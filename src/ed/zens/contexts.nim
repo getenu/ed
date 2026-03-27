@@ -134,16 +134,20 @@ proc pressure*(self: EdContext): float =
 
   result = values.sum / float values.len
 
+template harvest_reactor(self: EdContext) =
+  self.dead_connections &= self.reactor.dead_connections
+  for msg in self.reactor.messages:
+    self.bytes_received += msg.data.len
+  self.remote_messages &= self.reactor.messages
+
 proc tick_reactor*(self: EdContext) =
   privileged
   if ?self.reactor:
     self.reactor.tick
-    self.dead_connections &= self.reactor.dead_connections
-    for msg in self.reactor.messages:
-      self.bytes_received += msg.data.len
-    self.remote_messages &= self.reactor.messages
+    self.harvest_reactor
 
 proc tick_keepalives*(self: EdContext) {.gcsafe.} =
+  privileged
   ## Lightweight tick that only sends keepalives if enough time has passed.
   ## Safe to call frequently - won't do anything if called too soon.
   ## Call this after long operations (file I/O, etc.) to prevent connection timeouts.
@@ -159,18 +163,17 @@ proc tick_keepalives*(self: EdContext) {.gcsafe.} =
 
   self.last_keepalive_tick = now
 
-  # Tick the reactor to update time and send any pending packets
   self.reactor.tick
+  self.harvest_reactor
 
-  # Send keepalive pings to idle remote subscribers
   for sub in self.subscribers:
     if sub.kind == REMOTE and sub.last_sent_time + keepalive_interval <= now:
       self.bytes_sent += 4  # "PING"
       self.reactor.send(sub.connection, "PING")
       sub.last_sent_time = now
 
-  # Tick again to actually send the keepalive packets
   self.reactor.tick
+  self.harvest_reactor
 
 proc clear*(self: EdContext) =
   ## Remove all objects from this context.
