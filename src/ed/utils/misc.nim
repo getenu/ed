@@ -1,4 +1,4 @@
-import std/[options, sets, macrocache, strformat, strutils]
+import std/[options, sets, strformat, strutils, hashes]
 
 # Logic
 
@@ -78,10 +78,7 @@ template `\`*(s: string): string =
   f.remove_suffix("\n\n")
   f
 
-const type_id = CacheCounter"type_id"
-
 func tid*(T: type): int =
-  const id = type_id.value
-  static:
-    inc type_id
-  id
+  const name = $T
+  const h = hash(name)
+  when h < 0: -h else: h
