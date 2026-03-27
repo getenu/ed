@@ -518,8 +518,11 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
   elif msg.kind == CREATE:
     {.gcsafe.}:
       if msg.type_id notin type_initializers:
-        print msg
-        fail \"No type initializer for type {msg.type_id}"
+        when defined(ed_partial_subscriber):
+          return
+        else:
+          print msg
+          fail "No type initializer for type {msg.type_id}"
 
     {.gcsafe.}:
       let fn = type_initializers[msg.type_id]
