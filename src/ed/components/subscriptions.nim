@@ -1,7 +1,7 @@
 import
   std/[
     importutils, tables, sets, sequtils, algorithm, intsets, locks, math, times,
-    strutils,
+    strutils, macros,
   ]
 
 import pkg/threading/channels {.all.}
@@ -729,6 +729,29 @@ proc tick*(
         ((count > 0 or not blocking) and get_mono_time() > recv_until):
       break
 
+proc find_bare_return(n: NimNode): NimNode =
+  if n.kind == nnkReturnStmt:
+    return n
+  if n.kind in {nnkProcDef, nnkFuncDef, nnkLambda, nnkDo}:
+    return nil
+  for child in n:
+    let found = find_bare_return(child)
+    if found != nil:
+      return found
+
+macro check_no_return*(body: untyped): untyped =
+  ## Passthrough macro: emits a compile error if body contains a bare return.
+  ## Use inside changes bodies — return exits the callback proc, not the
+  ## enclosing proc, and skips remaining changes in the seq.
+  let ret = find_bare_return(body)
+  if ret != nil:
+    error(
+      "return is not valid inside a changes body; " &
+        "use if/else instead of early return",
+      ret,
+    )
+  result = body
+
 template changes*[T, O](self: Ed[T, O], pause_me, body) =
   let zen = self
   make_discardable block:
@@ -765,7 +788,7 @@ template changes*[T, O](self: Ed[T, O], pause_me, body) =
               CLOSED in change.changes
 
             {.line.}:
-              body
+              check_no_return(body)
 
 template changes*[T, O](self: Ed[T, O], body) =
   changes(self, true, body)
