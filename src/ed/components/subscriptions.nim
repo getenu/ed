@@ -8,8 +8,7 @@ import pkg/threading/channels {.all.}
 import pkg/[flatty, supersnappy]
 
 import
-  ed/[core, types {.all.}],
-  ed/zens/[contexts, private, initializers {.all.}]
+  ed/[core, types {.all.}], ed/zens/[contexts, private, initializers {.all.}]
 
 import ed/components/[private/global_state]
 
@@ -122,8 +121,12 @@ proc from_flatty*[T: ref RootObj](s: string, i: var int, value: var T) =
         value = value.type()(flatty_ctx.ref_pool[val.ref_id].obj)
       else:
         var registered_type: RegisteredType
-        do_assert lookup_type(val.tid, registered_type)
-        value = value.type()(registered_type.parse(flatty_ctx, val.item))
+        when defined(ed_partial_subscriber):
+          if lookup_type(val.tid, registered_type):
+            value = value.type()(registered_type.parse(flatty_ctx, val.item))
+        else:
+          do_assert lookup_type(val.tid, registered_type)
+          value = value.type()(registered_type.parse(flatty_ctx, val.item))
     else:
       var is_nil: bool
       s.from_flatty(i, is_nil)
@@ -302,34 +305,41 @@ proc publish_changes*[T, O](
 ) =
   privileged
   log_defaults("ed publishing")
-  debug "publish_changes", op_ctx
+  trace "publish_changes", op_ctx
   if self.ctx.subscribers.len > 0:
-    var msgs: seq[Message]
-    let id = self.id
-    assert id in self.ctx
-    let obj = self.ctx.objects[id]
-
-    for change in changes:
-      if [ADDED, REMOVED, CREATED, TOUCHED].any_it(it in change.changes):
-        if REMOVED in change.changes and MODIFIED in change.changes:
-          # An assign will trigger both an assign and an unassign on the other
-          # side. We only want to send a Removed message when an item is
-          # removed from a collection.
-          debug "skipping changes"
-          continue
-        let trace =
-          when defined(ed_trace):
-            \"{get_stack_trace()}\n\nop:\n{op_ctx.trace}"
-          else:
-            ""
-        msgs.add obj.build_message(obj, change, id, trace)
-
-    msgs = pack_messages(msgs)
-
+    var has_eligible = false
     for sub in self.ctx.subscribers:
       if sub.ctx_id notin op_ctx.source:
-        for msg in msgs:
-          self.ctx.send(sub, msg, op_ctx, self.flags)
+        has_eligible = true
+        break
+
+    if has_eligible:
+      var msgs: seq[Message]
+      let id = self.id
+      assert id in self.ctx
+      let obj = self.ctx.objects[id]
+
+      for change in changes:
+        if [ADDED, REMOVED, CREATED, TOUCHED].any_it(it in change.changes):
+          if REMOVED in change.changes and MODIFIED in change.changes:
+            # An assign will trigger both an assign and an unassign on the other
+            # side. We only want to send a Removed message when an item is
+            # removed from a collection.
+            debug "skipping changes"
+            continue
+          let trace =
+            when defined(ed_trace):
+              \"{get_stack_trace()}\n\nop:\n{op_ctx.trace}"
+            else:
+              ""
+          msgs.add obj.build_message(obj, change, id, trace)
+
+      msgs = pack_messages(msgs)
+
+      for sub in self.ctx.subscribers:
+        if sub.ctx_id notin op_ctx.source:
+          for msg in msgs:
+            self.ctx.send(sub, msg, op_ctx, self.flags)
 
     self.ctx.tick_reactor
 
@@ -486,7 +496,10 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         fallback.incl $id
       fallback
 
-  assert self.id notin source
+  if self.id in source:
+    debug "skipping own message (reconnect edge case)",
+      ctx = self.id, topics = "ed"
+    return
 
   received_message_counter.inc(label_values = [self.metrics_label])
   # when defined(ed_trace):
@@ -580,8 +593,7 @@ proc track*[T, O](
   result = zid
 
 proc track*[T, O](
-    self: Ed[T, O],
-    callback: proc(changes: seq[Change[O]], zid: EID) {.gcsafe.},
+    self: Ed[T, O], callback: proc(changes: seq[Change[O]], zid: EID) {.gcsafe.}
 ): EID {.discardable.} =
   assert self.valid
   var zid: EID
