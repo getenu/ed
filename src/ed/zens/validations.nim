@@ -6,7 +6,7 @@ proc valid*[T: ref EdBase](self: T): bool =
   if not result:
     let id = if ?self: self.id else: "nil"
 
-    debug "Ed invalid", type_name = $T, id
+    error "Ed invalid", id, type_name = $T, trace = get_stack_trace()
 
 proc valid*[T: ref EdBase, V: ref EdBase](self: T, value: V): bool =
   self.valid and value.valid and self.ctx == value.ctx
