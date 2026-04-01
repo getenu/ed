@@ -56,6 +56,8 @@ proc register_type(typ: type) =
             dest = field
         elif src is ref:
           dest = nil
+        elif src is ptr:
+          dest = nil
         elif (src is proc):
           dest = nil
         elif src.has_custom_pragma(ed_ignore):
