@@ -12,3 +12,4 @@ nimble.develop
 nimble.paths
 *.out
 *.out.dSYM
+nim.cfg
