@@ -19,13 +19,14 @@ proc generate_jsondoc() =
 
   # Generate jsondoc for key modules
   # Note: subscriptions.nim and type_registry.nim cause jsondoc compiler bugs
-  let modules = @[
-    ("ed/types", src_dir / "ed/types.nim"),
-    ("ed/zens/initializers", src_dir / "ed/zens/initializers.nim"),
-    ("ed/zens/operations", src_dir / "ed/zens/operations.nim"),
-    ("ed/zens/contexts", src_dir / "ed/zens/contexts.nim"),
-    ("ed/zens/validations", src_dir / "ed/zens/validations.nim"),
-  ]
+  let modules =
+    @[
+      ("ed/types", src_dir / "ed/types.nim"),
+      ("ed/zens/initializers", src_dir / "ed/zens/initializers.nim"),
+      ("ed/zens/operations", src_dir / "ed/zens/operations.nim"),
+      ("ed/zens/contexts", src_dir / "ed/zens/contexts.nim"),
+      ("ed/zens/validations", src_dir / "ed/zens/validations.nim"),
+    ]
 
   for (name, path) in modules:
     let out_path = json_dir / name.parentDir
@@ -46,9 +47,9 @@ task docs, "Generate Ed documentation":
     rmDir(out_dir)
   mkDir(out_dir)
 
-  let cmd = "nim doc --project --index:off " &
-            "-d:chronicles_enabled=off " &
-            "--outdir:" & out_dir & " " & src_dir / "ed.nim"
+  let cmd =
+    "nim doc --project --index:off " & "-d:chronicles_enabled=off " & "--outdir:" &
+    out_dir & " " & src_dir / "ed.nim"
 
   echo "Running: ", cmd
   exec cmd

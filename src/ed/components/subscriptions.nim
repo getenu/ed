@@ -1,7 +1,7 @@
 import
   std/[
-    importutils, isolation, tables, sets, sequtils, algorithm, intsets, locks, math,
-    times, strutils, macros,
+    importutils, isolation, tables, sets, sequtils, algorithm, intsets, locks,
+    math, times, strutils, macros,
   ]
 
 import pkg/threading/channels {.all.}
@@ -501,20 +501,11 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       fallback
 
   if self.id in source:
-    let diag =
-      "OWN_MSG ctx=" & self.id &
-      " source=" & source.to_seq.join(",") &
-      " kind=" & $msg.kind &
-      " src_set_len=" & $msg.source_set.len &
-      " sub=" & (if sub.is_nil: "nil" else: $sub.kind) &
-      " raw_source=" & msg.source.map_it($it).join(",") &
-      " sub_ctx=" & (if sub.is_nil: "nil" else: sub.ctx_id) &
-      "\nStack:\n" & get_stack_trace()
-    stderr.write(diag)
-    stderr.flush_file
-    system.write_file("/tmp/enu_mcp_assert.txt", diag)
-    error "own_message_assert", ctx = self.id, source = source.to_seq.join(","),
-      kind = $msg.kind, sub_kind = (if sub.is_nil: "nil" else: $sub.kind),
+    error "own_message_assert",
+      ctx = self.id,
+      source = source.to_seq.join(","),
+      kind = $msg.kind,
+      sub_kind = (if sub.is_nil: "nil" else: $sub.kind),
       raw_source = msg.source.map_it($it).join(","),
       sub_ctx = (if sub.is_nil: "nil" else: sub.ctx_id)
   assert self.id notin source
