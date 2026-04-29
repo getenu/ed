@@ -1,7 +1,0 @@
-nimTitle	typeids	ed/utils/typeids.html	module ed/utils/typeids		0
-nim	base_type	ed/utils/typeids.html#base_type,RootObj	proc base_type(obj: RootObj): cstring		3
-nim	base_type	ed/utils/typeids.html#base_type,ref.RootObj	proc base_type(obj: ref RootObj): cstring		8
-nim	type_id	ed/utils/typeids.html#type_id,ref.RootObj	proc type_id(obj: ref RootObj): int		11
-nim	type_id	ed/utils/typeids.html#type_id,type[ref.RootObj]	proc type_id(T: type[ref RootObj]): int		14
-nimgrp	typeid	ed/utils/typeids.html#type_id-procs-all	proc		11
-nimgrp	basetype	ed/utils/typeids.html#base_type-procs-all	proc		3
