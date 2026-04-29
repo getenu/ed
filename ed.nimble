@@ -1,4 +1,4 @@
-version = "0.20.4"
+version = "0.20.5"
 author = "Scott Wadden"
 description = "Nothing for now"
 license = "MIT"
@@ -9,5 +9,3 @@ requires(
   "flatty", "netty", "supersnappy",
   "https://github.com/getenu/nanoid.nim >= 0.2.1", "metrics >= 0.2.1",
 )
-
-include tasks
