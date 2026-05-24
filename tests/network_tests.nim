@@ -1,6 +1,8 @@
-import std/[tables, sugar, unittest]
+import std/[tables, sugar, unittest, sequtils]
 import pkg/[flatty, chronicles, pretty]
 import ed
+import ed/types {.all.}
+import ed/zens/private {.all.}
 from std/times import init_duration
 
 const recv_duration = init_duration(milliseconds = 10)
@@ -183,6 +185,44 @@ proc run*() =
     check v2.value == Vector3([4.0, 5.0, 6.0])
 
     ctx2.close
+
+  test "resubscribe with same ctx_id drops the stale subscription":
+    # Reproduces the Enu MCP reconnect scenario at the protocol level. A
+    # client subscribes, then its EdContext is recreated (process didn't
+    # die — same id, fresh context) and subscribes again. The publisher
+    # must drop the stale subscriber so it doesn't route messages to a
+    # connection that now belongs to the new context.
+    Ed.thread_ctx = EdContext.init(id = "mainA")
+    var
+      publisher = EdContext.init(
+        id = "publisher",
+        listen_address = "127.0.0.1:19632",
+        min_recv_duration = recv_duration,
+        blocking_recv = true,
+      )
+      client_a = Ed.thread_ctx
+
+    client_a.subscribe "127.0.0.1:19632",
+      callback = proc() =
+        publisher.tick(blocking = false)
+
+    privileged
+    check publisher.subscribers.filter_it(it.kind == REMOTE).len == 1
+
+    # Simulate the reconnect: same ctx id, fresh EdContext.
+    Ed.thread_ctx = EdContext.init(id = "mainA")
+    var client_b = Ed.thread_ctx
+    client_b.subscribe "127.0.0.1:19632",
+      callback = proc() =
+        publisher.tick(blocking = false)
+
+    # Publisher should have swept the stale "mainA" subscriber when the
+    # new one's SUBSCRIBE arrived — exactly one REMOTE sub remains.
+    let remote_subs = publisher.subscribers.filter_it(it.kind == REMOTE)
+    check remote_subs.len == 1
+    check remote_subs[0].ctx_id == "mainA"
+
+    publisher.close
 
 when is_main_module:
   Ed.bootstrap

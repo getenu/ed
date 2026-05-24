@@ -98,10 +98,14 @@ type
 
   Subscription* = ref object
     ctx_id*: string
-    # Short ID mappings for this connection
-    next_short_id*: uint8  # Next available short ID to assign
-    id_to_short*: Table[string, uint8]  # full context ID -> short ID
-    short_to_id*: Table[uint8, string]  # short ID -> full context ID
+    # Short ID mappings for this connection. Outgoing and incoming are
+    # *separate* namespaces — each peer independently allocates short IDs
+    # in messages it sends. Sharing the table would let our own outgoing
+    # assignments clobber an incoming mapping the peer expects us to use.
+    next_short_id*: uint8  # Next outgoing short ID to assign
+    id_to_short*: Table[string, uint8]  # full id -> short we send for it
+    outgoing_short_to_id*: Table[uint8, string]  # inverse of id_to_short
+    incoming_short_to_id*: Table[uint8, string]  # short the peer sends -> full id
     case kind*: SubscriptionKind
     of LOCAL:
       chan*: Chan[Message]

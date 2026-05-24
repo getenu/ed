@@ -25,14 +25,16 @@ privileged
 # Short ID helpers for source field optimization
 
 proc get_or_assign_short_id(sub: Subscription, full_id: string): uint8 =
-  ## Get existing short ID or assign a new one for this connection.
+  ## Get existing short ID or assign a new one for our outgoing encoding.
+  ## Touches only the outgoing namespace — incoming shorts are tracked
+  ## separately in incoming_short_to_id.
   if full_id in sub.id_to_short:
     result = sub.id_to_short[full_id]
   else:
     result = sub.next_short_id
     inc sub.next_short_id
     sub.id_to_short[full_id] = result
-    sub.short_to_id[result] = full_id
+    sub.outgoing_short_to_id[result] = full_id
 
 proc encode_source(
     sub: Subscription, source: HashSet[string]
@@ -46,20 +48,17 @@ proc encode_source(
       result.mappings.add (short_id, full_id)
 
 proc register_mappings(sub: Subscription, mappings: seq[IdMapping]) =
-  ## Register new ID mappings from an incoming message.
+  ## Register new ID mappings from an incoming message into the *incoming*
+  ## namespace. The peer chose these short IDs independently of ours, so we
+  ## must not let them interact with our outgoing allocation.
   for (short_id, full_id) in mappings:
-    if short_id notin sub.short_to_id:
-      sub.short_to_id[short_id] = full_id
-      sub.id_to_short[full_id] = short_id
-      # Update next_short_id to avoid conflicts
-      if short_id >= sub.next_short_id:
-        sub.next_short_id = short_id + 1
+    sub.incoming_short_to_id[short_id] = full_id
 
 proc decode_source(sub: Subscription, source: seq[uint8]): HashSet[string] =
   ## Convert short IDs back to full context ID HashSet.
   for short_id in source:
-    if short_id in sub.short_to_id:
-      result.incl sub.short_to_id[short_id]
+    if short_id in sub.incoming_short_to_id:
+      result.incl sub.incoming_short_to_id[short_id]
     else:
       result.incl "unknown:" & $short_id
 
@@ -260,7 +259,7 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
   privileged
   log_defaults("ed publishing")
 
-  debug "publishing destroy", ed_id = self.id
+  trace "publishing destroy", ed_id = self.id
   for sub in self.ctx.subscribers:
     if sub.ctx_id notin op_ctx.source:
       when defined(ed_trace):
@@ -329,7 +328,7 @@ proc publish_changes*[T, O](
             # An assign will trigger both an assign and an unassign on the other
             # side. We only want to send a Removed message when an item is
             # removed from a collection.
-            debug "skipping changes"
+            trace "skipping changes"
             continue
           let trace =
             when defined(ed_trace):
@@ -501,6 +500,10 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       fallback
 
   if self.id in source:
+    # Routing invariant violated: a message tagged with our own id arrived
+    # back at us. With the publish-side filter and the SUBSCRIBE-time stale
+    # subscription sweep this should be unreachable for any well-behaved
+    # client. If it fires, treat it as a bug rather than swallowing it.
     error "own_message_assert",
       ctx = self.id,
       source = source.to_seq.join(","),
@@ -715,6 +718,32 @@ proc tick*(
                 break
           if source_str == "":
             source_str = "unknown"
+
+          # Drop any subscription that this SUBSCRIBE supersedes. Two
+          # conditions both warrant a sweep:
+          #   1. Same ctx_id — the client reused its stable id (same
+          #      process reconnect, or a deterministically-assigned id).
+          #      Without this the old subscription persists until netty's
+          #      ~10s keepalive timeout, during which the publisher can
+          #      route messages back to the reconnected peer via the
+          #      stale route.
+          #   2. Same remote endpoint — a previous client at that
+          #      address/port has been replaced by a new process that
+          #      happened to get the same UDP source port. Different
+          #      ctx_ids, but routing to the old sub's endpoint would now
+          #      land in the new process's reactor.
+          let new_addr_str = $raw_msg.conn.address
+          let stale = self.subscribers.filter_it(
+            it.kind == REMOTE and (
+              (source_str != "" and source_str != "unknown" and
+                it.ctx_id == source_str) or
+              $it.connection.address == new_addr_str
+            )
+          )
+          for sub in stale:
+            debug "dropping superseded subscription",
+              old_ctx_id = sub.ctx_id, new_ctx_id = source_str
+            self.unsubscribe(sub)
 
           var new_sub = Subscription(
             kind: REMOTE,

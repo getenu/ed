@@ -80,7 +80,7 @@ proc defaults[T, O](
       sub: Subscription, broadcast: bool, op_ctx = OperationContext()
   ) =
     log_defaults "ed publishing"
-    debug "publish_create", sub
+    trace "publish_create", sub
 
     {.gcsafe.}:
       let bin = self.tracked.to_flatty
