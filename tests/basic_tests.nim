@@ -5,6 +5,7 @@ import
   ]
 import pkg/[pretty, chronicles, netty]
 import ed
+import test_util
 from std/times import init_duration
 import ed/[types {.all.}, zens {.all.}, zens/contexts {.all.}]
 
@@ -56,10 +57,11 @@ proc run*() =
     block remote:
       debug "remote run"
       const recv_duration = init_duration(milliseconds = 10)
+      let host = free_addr()
       var
         ctx1 {.inject.} = EdContext.init(
           id = "ctx1",
-          listen_address = "127.0.0.1",
+          listen_address = host,
           min_recv_duration = recv_duration,
           blocking_recv = true,
         )
@@ -68,7 +70,7 @@ proc run*() =
           id = "ctx2", min_recv_duration = recv_duration, blocking_recv = true
         )
 
-      ctx2.subscribe "127.0.0.1",
+      ctx2.subscribe host,
         callback = proc() =
           ctx1.tick(blocking = false)
 

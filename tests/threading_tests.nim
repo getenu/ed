@@ -1,6 +1,7 @@
 import std/[locks, os, unittest, tables]
 import pkg/[pretty, chronicles]
 import ed
+import test_util
 
 var global_lock: Lock
 global_lock.init_lock
@@ -33,8 +34,9 @@ proc run*() =
   test "basic":
     Ed.thread_ctx.clear
     Ed.thread_ctx = EdContext.init(id = "main")
-    var ctx = EdContext.init(id = "worker", listen_address = "127.0.0.1")
-    Ed.thread_ctx.subscribe "127.0.0.1",
+    let host = free_addr()
+    var ctx = EdContext.init(id = "worker", listen_address = host)
+    Ed.thread_ctx.subscribe host,
       callback = proc() =
         ctx.tick
 
