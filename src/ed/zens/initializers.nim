@@ -183,7 +183,10 @@ proc defaults[T, O](
       if msg.object_id notin self.ctx:
         when defined(ed_trace):
           echo msg.trace
-        fail "object not in context " & msg.object_id & " " & $Ed[T, O]
+        # Change for an object we don't have (version skew / not yet
+        # materialized). Skip rather than abort, matching the non-Pair path.
+        debug "skipping change for missing object", object_id = msg.object_id
+        return
 
       if msg.change_object_id notin self.ctx and msg.kind == UNASSIGN:
         debug "can't find ", obj = msg.change_object_id
@@ -206,7 +209,10 @@ proc defaults[T, O](
                 debug "item found (not restored)",
                   item = item.type.name, ref_id = item.ref_id
             else:
-              fail \"Type for ref_id {msg.ref_id} not registered"
+              # Unknown ref type — can't parse the item, so skip this change
+              # rather than aborting. Forgiving on payload.
+              debug "skipping change for unknown ref type", ref_tid = msg.ref_id
+              return
           else:
             {.gcsafe.}:
               item = msg.obj.from_flatty(O, self.ctx)

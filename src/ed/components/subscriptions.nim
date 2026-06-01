@@ -120,12 +120,13 @@ proc from_flatty*[T: ref RootObj](s: string, i: var int, value: var T) =
         value = value.type()(flatty_ctx.ref_pool[val.ref_id].obj)
       else:
         var registered_type: RegisteredType
-        when defined(ed_partial_subscriber):
-          if lookup_type(val.tid, registered_type):
-            value = value.type()(registered_type.parse(flatty_ctx, val.item))
-        else:
-          do_assert lookup_type(val.tid, registered_type)
+        if lookup_type(val.tid, registered_type):
           value = value.type()(registered_type.parse(flatty_ctx, val.item))
+        else:
+          # Unknown ref type (version skew / type not compiled here). Leave the
+          # ref nil and carry on rather than aborting — forgiving on payload,
+          # strict only on the envelope.
+          debug "skipping ref for unknown type", ref_tid = val.tid
     else:
       var is_nil: bool
       s.from_flatty(i, is_nil)
@@ -593,11 +594,13 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
   elif msg.kind == CREATE:
     {.gcsafe.}:
       if msg.type_id notin type_initializers:
-        when defined(ed_partial_subscriber):
-          return
-        else:
-          print msg
-          fail "No type initializer for type {msg.type_id}"
+        # Unknown type: a version-skewed peer or a type this context wasn't
+        # compiled with. Skip it rather than aborting — the consistency layer no
+        # longer needs every object present to trust the rest. (Relaying unknown
+        # types through the authority is a separate, future step.)
+        debug "skipping create for unknown type",
+          type_id = msg.type_id, object_id = msg.object_id
+        return
 
     {.gcsafe.}:
       let fn = type_initializers[msg.type_id]
@@ -767,7 +770,18 @@ proc tick*(
         # Handle keepalive pings - just ignore them (receiving updates lastActiveTime in netty)
         if raw_msg.data == "PING":
           continue
-        var msg = raw_msg.data.uncompress.from_flatty(Message, self)
+        # Parse boundary for untrusted bytes: a version-skewed peer or stray
+        # packet (e.g. another process on the same port) can't be parsed with
+        # our envelope. Drop it instead of crashing — don't let one bad packet
+        # take down the process. Scoped to (de)serialization so it doesn't mask
+        # logic bugs in process_message.
+        var msg: Message
+        try:
+          msg = raw_msg.data.uncompress.from_flatty(Message, self)
+        except CatchableError, Defect:
+          warn "dropping unparseable remote message",
+            bytes = raw_msg.data.len, peer = $raw_msg.conn.address
+          continue
         when defined(zen_debug_messages):
           inc self.messages_received
           self.obj_bytes_received += msg.obj.len
