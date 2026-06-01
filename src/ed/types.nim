@@ -59,6 +59,10 @@ type
     source_set*: HashSet[string]  # Full source for internal use (Local) - not serialized
     id_mappings*: seq[IdMapping]  # New mappings for unknown IDs
     flags*: set[EdFlags]
+    # Phase 1: global ordering (see docs/phase-1-keystone-spike.md)
+    epoch*: int64   # authority epoch; bumped on host/leader change
+    lsn*: int64     # global sequence number from the authority (0 = unordered)
+    op_id*: int64   # originator-generated id for ack/commit correlation (0 = none)
     when defined(ed_trace):
       trace*: string
       id*: int
@@ -120,6 +124,11 @@ type
     ## Central coordination object managing `Ed` container lifecycle, subscriptions,
     ## and message passing between threads/network.
     id*: string
+    # Phase 1: global LSN + appointed leader (docs/phase-1-keystone-spike.md)
+    is_authority*: bool   # this context is the sequencer (leader) for its objects
+    leader_id*: string    # ctx_id of the authority (own id when is_authority)
+    lsn_counter*: int64   # authority-only: next global LSN to assign
+    applied_lsn*: int64   # highest global LSN applied (frontier)
     changed_callback_eid: EID
     last_id: int
     close_procs: Table[EID, proc() {.gcsafe.}]
@@ -231,6 +240,9 @@ proc to_flatty*(s: var string, msg: Message) =
   # Skip source_set - internal use only
   s.to_flatty msg.id_mappings
   s.to_flatty msg.flags
+  s.to_flatty msg.epoch
+  s.to_flatty msg.lsn
+  s.to_flatty msg.op_id
   when defined(ed_trace):
     s.to_flatty msg.trace
     s.to_flatty msg.id
@@ -247,6 +259,9 @@ proc from_flatty*(s: string, i: var int, msg: var Message) =
   # source_set not in wire format
   s.from_flatty(i, msg.id_mappings)
   s.from_flatty(i, msg.flags)
+  s.from_flatty(i, msg.epoch)
+  s.from_flatty(i, msg.lsn)
+  s.from_flatty(i, msg.op_id)
   when defined(ed_trace):
     s.from_flatty(i, msg.trace)
     s.from_flatty(i, msg.id)
