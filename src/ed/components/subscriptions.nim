@@ -339,6 +339,11 @@ proc publish_changes*[T, O](
 
       msgs = pack_messages(msgs)
 
+      # Authority stamps each ordered op with its global LSN, once, before
+      # fanout so every subscriber receives the same LSN.
+      for msg in msgs.mitems:
+        self.ctx.stamp_lsn(msg)
+
       for sub in self.ctx.subscribers:
         if sub.ctx_id notin op_ctx.source:
           for msg in msgs:

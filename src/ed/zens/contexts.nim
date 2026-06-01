@@ -57,8 +57,11 @@ proc init*(
     max_recv_duration = Duration.default,
     min_recv_duration = Duration.default,
     label = "default",
+    is_authority = false,
 ): EdContext =
   ## Create a new `EdContext`. Set `listen_address` to enable network sync.
+  ## Set `is_authority` to make this context the sequencer (leader) that assigns
+  ## global LSNs — see docs/phase-1-keystone-spike.md.
   privileged
   log_scope:
     topics = "ed"
@@ -73,7 +76,10 @@ proc init*(
     buffer: buffer,
     metrics_label: label,
     last_keepalive_tick: epoch_time(),
+    is_authority: is_authority,
   )
+  if is_authority:
+    result.leader_id = id
 
   result.chan = new_chan[Message](elements = chan_size)
   if ?listen_address:
@@ -104,6 +110,20 @@ proc `thread_ctx=`*(_: type Ed, ctx: EdContext) =
 
 proc `$`*(self: EdContext): string =
   \"EdContext {self.id}"
+
+proc next_lsn*(self: EdContext): int64 =
+  ## Authority-only: allocate the next global sequence number.
+  inc self.lsn_counter
+  self.lsn_counter
+
+proc stamp_lsn*(self: EdContext, msg: var Message) =
+  ## If this context is the authority, assign the op its global LSN, once.
+  ## Applies to the change ops the authority broadcasts (self-originated or
+  ## forwarded). CREATE/DESTROY are intentionally not stamped yet — the
+  ## subscribe-time resend distinction needs its own step (see spike doc).
+  if self.is_authority and msg.lsn == 0 and
+      msg.kind in {ASSIGN, UNASSIGN, TOUCH, PACKED}:
+    msg.lsn = self.next_lsn
 
 proc `[]`*[T, O](self: EdContext, src: Ed[T, O]): Ed[T, O] =
   result = Ed[T, O](self.objects[src.id])
