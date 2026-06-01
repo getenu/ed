@@ -85,6 +85,35 @@ proc run*() =
       check EdValue[int](fb["lsn_obj_e"]).value == lv
       check lv == 20  # later writer in the authority's order wins
 
+    test "register reconciliation is flicker-free (coalesced)":
+      var leader = EdContext.init(id = "lsn_leader_h", is_authority = true)
+      var fa = EdContext.init(id = "lsn_fa_h")
+      var fb = EdContext.init(id = "lsn_fb_h")
+      fa.subscribe(leader)
+      fb.subscribe(leader)
+
+      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_h")
+      fa.tick()
+      fb.tick()
+
+      var seen: seq[int]
+      EdValue[int](fb["lsn_obj_h"]).track proc(
+          changes: seq[Change[int]]
+      ) {.gcsafe.} =
+        for c in changes:
+          if ADDED in c.changes:
+            seen.add c.item
+
+      EdValue[int](fa["lsn_obj_h"]).value = 10
+      EdValue[int](fb["lsn_obj_h"]).value = 20
+      leader.tick()
+      fa.tick()
+      fb.tick()
+
+      # fb converges to 20 without ever applying the superseded intermediate 10.
+      check EdValue[int](fb["lsn_obj_h"]).value == 20
+      check 10 notin seen
+
     test "a follower's collection op is not double-applied":
       var leader = EdContext.init(id = "lsn_leader_f", is_authority = true)
       var follower = EdContext.init(id = "lsn_follower_f")
