@@ -3,6 +3,7 @@ import pkg/[flatty, chronicles, pretty]
 import ed
 import ed/types {.all.}
 import ed/zens/private {.all.}
+import test_util
 from std/times import init_duration
 
 const recv_duration = init_duration(milliseconds = 10)
@@ -11,11 +12,12 @@ type Vector3 = array[3, float]
 
 proc run*() =
   test "4 way sync":
+    let host = free_addr()
     var
       ctx1 = EdContext.init(id = "ctx1")
       ctx2 = EdContext.init(
         id = "ctx2",
-        listen_address = "127.0.0.1",
+        listen_address = host,
         min_recv_duration = recv_duration,
         blocking_recv = true,
       )
@@ -26,7 +28,7 @@ proc run*() =
 
     ctx2.subscribe(ctx1)
     ctx3.subscribe(ctx4)
-    ctx3.subscribe "127.0.0.1",
+    ctx3.subscribe host,
       callback = proc() =
         ctx2.tick(blocking = false)
 
@@ -49,12 +51,13 @@ proc run*() =
     ctx2.close
 
   test "trigger changes on subscribe":
+    let host = free_addr()
     var
       count = 0
       ctx1 = EdContext.init(id = "ctx1")
       ctx2 = EdContext.init(
         id = "ctx2",
-        listen_address = "127.0.0.1",
+        listen_address = host,
         min_recv_duration = recv_duration,
         blocking_recv = true,
       )
@@ -82,7 +85,7 @@ proc run*() =
     check b.value == @["a1", "a2"]
 
     ctx4.tick
-    ctx3.subscribe "127.0.0.1",
+    ctx3.subscribe host,
       callback = proc() =
         ctx2.tick(blocking = false)
 
@@ -99,6 +102,7 @@ proc run*() =
     ctx2.close
 
   test "nested collection":
+    let host = free_addr()
     type Unit = object
       code: EdValue[string]
 
@@ -107,7 +111,7 @@ proc run*() =
       ctx1 = EdContext.init(id = "ctx1")
       ctx2 = EdContext.init(
         id = "ctx2",
-        listen_address = "127.0.0.1",
+        listen_address = host,
         min_recv_duration = recv_duration,
         blocking_recv = true,
       )
@@ -135,7 +139,7 @@ proc run*() =
     check b.value == @["a1", "a2"]
 
     ctx4.tick
-    ctx3.subscribe "127.0.0.1",
+    ctx3.subscribe host,
       callback = proc() =
         ctx2.tick(blocking = false)
 
@@ -152,11 +156,12 @@ proc run*() =
     ctx2.close
 
   test "Vector3 array network sync":
+    let host = free_addr()
     var
       ctx1 = EdContext.init(id = "ctx1")
       ctx2 = EdContext.init(
         id = "ctx2",
-        listen_address = "127.0.0.1",
+        listen_address = host,
         min_recv_duration = recv_duration,
         blocking_recv = true,
       )
@@ -192,17 +197,18 @@ proc run*() =
     # die — same id, fresh context) and subscribes again. The publisher
     # must drop the stale subscriber so it doesn't route messages to a
     # connection that now belongs to the new context.
+    let host = free_addr()
     Ed.thread_ctx = EdContext.init(id = "mainA")
     var
       publisher = EdContext.init(
         id = "publisher",
-        listen_address = "127.0.0.1:19632",
+        listen_address = host,
         min_recv_duration = recv_duration,
         blocking_recv = true,
       )
       client_a = Ed.thread_ctx
 
-    client_a.subscribe "127.0.0.1:19632",
+    client_a.subscribe host,
       callback = proc() =
         publisher.tick(blocking = false)
 
@@ -212,7 +218,7 @@ proc run*() =
     # Simulate the reconnect: same ctx id, fresh EdContext.
     Ed.thread_ctx = EdContext.init(id = "mainA")
     var client_b = Ed.thread_ctx
-    client_b.subscribe "127.0.0.1:19632",
+    client_b.subscribe host,
       callback = proc() =
         publisher.tick(blocking = false)
 
