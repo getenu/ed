@@ -56,7 +56,7 @@ first-class, leader-assigned, global LSN and adds the apply-side ordering.
 |---|---|
 | **`(epoch, lsn)` + `op_id` on every op** | add fields to `Message` (`types.nim:51`); wire into the custom `to_flatty`/`from_flatty(Message)` in `types.nim` (un-gate from `ed_trace`). Promote the `last_msg_id` idea into a real per-object LSN assigned by the authority. |
 | **Appointed leader / sequencer** | new `EdContext` state: `is_authority: bool` (or a `leader_id`), and an `authority_of(obj) -> ctx_id` indirection (constant = leader for now). Enu: the **worker-thread context** is the leader. |
-| **Ordered apply + dedup-by-LSN (frontier)** | `process_message` (`subscriptions.nim:470`) — the single apply point. Add per-object `applied_lsn`; `lsn <= applied_lsn` ⇒ idempotent no-op; `== applied_lsn+1` ⇒ apply; `> +1` ⇒ gap → buffer + request replay. |
+| **Ordered apply + dedup-by-LSN (frontier)** | `process_message` (`subscriptions.nim:470`) — the single apply point. Track a global `applied_lsn` (single int frontier for a full replica); `lsn <= applied_lsn` ⇒ idempotent no-op; `== applied_lsn+1` ⇒ apply; `> +1` ⇒ gap → buffer + request replay. `object_id` on each op keeps per-object frontiers derivable later. |
 | **Reconciliation (snap-to-correct)** | also `process_message`: when an ordered op supersedes an optimistic local value, apply the authority value through the existing `change_receiver` path, gated by LSN + "is this my own op coming back?" (`op_id`). |
 | **Ack / commit callback** | originator tracks `pending_ops` by `op_id`; in `process_message`, after apply, if `msg.op_id` is pending, fire callback with outcome **confirmed-as-is vs corrected-to(X)**. |
 | **Durable log + persist** | Phase 2 — leader appends ordered ops; out of scope here. |
@@ -74,11 +74,50 @@ How does a non-leader write acquire its LSN?
   receipt, assigns the canonical LSN and re-broadcasts the ordered version;
   others reconcile/snap. Fast, may flicker.
 
-These are exactly the two **per-object modes** from the plan. Recommendation:
-**implement (b) first** (it's the primary "fast local + snap-to-correct" pattern
-and the smaller delta from today's optimistic broadcast), but lay the message +
-leader plumbing so **(a) slots in** for `confirmed` objects by selecting routing
-off the object's `mode`.
+These are exactly the two **per-object modes** from the plan. *Decided:*
+**implement (b) first** (the primary "fast local + snap-to-correct" pattern and
+the smaller delta from today's optimistic broadcast); lay the message + leader
+plumbing so **(a) slots in** for `confirmed` objects by selecting routing off the
+object's `mode`.
+
+## LSN granularity — decided: global (per-context)
+
+*Decided:* **one global LSN per authority** for Phase 1, with `object_id` on every
+op so per-object frontiers are derivable later. Per-object LSN is the long-term
+future but far off; we keep a (laborious but clear) path to it rather than pay for
+it now.
+
+**The asymmetry that decides it:** a global LSN + `object_id` lets you *derive*
+per-object views; per-object LSNs cannot give global order without adding a global
+counter. Global is the more general primitive and the simpler Phase 1.
+
+**Regret analysis (pre-mortem).**
+
+- *We'd regret **global** LSN if:* Enu goes truly decentralized (per-object
+  authority / p2p) — one sequencer fights decentralization (funnel/SPOF), forcing
+  per-authority spaces + a merge layer; write throughput hits the single
+  sequencer's ceiling (per-object parallelizes across authorities); independent
+  worlds want to shard onto separate servers (global couples them into one
+  stream); split-brain can only discard a losing partition (per-object could merge
+  object-by-object). **All far-off and architectural — they coincide with the
+  already-deferred federated→p2p fork (Phase 6).**
+- *We'd regret **per-object** LSN if:* **causal ordering of inter-object
+  references** (the standout for Ed's ref-heavy model) — nothing guarantees a
+  referenced object's create applies before a reference to it, so you'd attach
+  causal-dependency metadata to every cross-object op (global gives "A before B"
+  free); multi-object script snapshot reads (scenario H) need a global point
+  anyway; cross-object transactions / global time-travel need a global cut. **All
+  near-term and pervasive.**
+
+**Path to per-object later (the seam we keep open):** `authority_of(obj)`
+indirection + `object_id` on every op (both already in PR 1). Migrating means
+per-authority epochs/sequence spaces, per-subscription frontiers for partial
+replicas, and a causal-dependency / merge layer for cross-object ordering — big
+work, but unblocked, not a corner.
+
+**Canaries we chose wrong:** wanting two independent worlds on one server, peers
+sequencing their own objects, or hitting the sequencer's write ceiling → revisit
+toward per-object.
 
 ## Routing & fanout — current behavior and plan
 
@@ -144,8 +183,9 @@ Bounded, testable, minimal product-behavior change:
 
 1. Add `epoch`, `lsn`, `op_id` to `Message` + serializers (un-gate from
    `ed_trace`).
-2. `EdContext`: `is_authority`/`leader_id`, `authority_of(obj)` (constant),
-   per-object `applied_lsn`, `pending_ops` for acks.
+2. `EdContext`: `is_authority`/`leader_id`, `authority_of(obj)` (constant), a
+   global `applied_lsn` frontier, `pending_ops` for acks. `object_id` stays on
+   every op (per-object frontiers derivable later).
 3. Leader stamps `lsn` on its ordered broadcast; non-leader optimistic writes get
    ordered at the leader and re-broadcast (model **b**).
 4. Apply side: LSN-ordered apply + dedup in `process_message`; reconciliation
@@ -179,5 +219,5 @@ Bounded, testable, minimal product-behavior change:
 - **`op_ctx.source` interaction** — the new ordered re-broadcast must not be
   suppressed by echo-prevention when it returns to the originator (it *must* come
   back to drive the ack/snap). Reconcile LSN logic with the `source` skip.
-- **Per-object vs per-context LSN space** — per-object is cleaner for partial sync
-  later; per-context is simpler now. Decide early (leaning per-object).
+- **LSN granularity** — *decided: global (per-context)*; see the dedicated
+  section above for the regret analysis and the path to per-object.
