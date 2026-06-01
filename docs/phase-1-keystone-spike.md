@@ -240,11 +240,12 @@ equivalent) when the canonical stream arrives. We cannot simply suppress the loc
 apply (existing code + tests rely on a mutation being immediately visible
 locally).
 
-**Decision needed (blocks the convergence demo):** how to do model (b) correctly —
-options to weigh: (i) speculative overlay with rollback/replay; (ii)
-`confirmed`-style apply as the default with opt-in optimism; (iii) register-LWW
-fast path + op-id effect-dedup for collections (correct per-type but two code
-paths). This is the heart of the consistency work and deserves its own design.
+**Resolved → `reconciliation-design.md`.** Chosen model: **state-based
+authority-driven forward correction** (not client-side rollback). The authority
+sends the canonical value/state forward; clients never roll back. The own-op rule
+("authority sends value, not an echo to replay") dissolves the register-vs-
+collection dilemma; collections (the voxel hot path) use op-id delta-dedup with
+state-snapshot resync (mirroring Enu's existing `MAX_DELTAS_BEFORE_SNAPSHOT`).
 
 **Until decided, we land the safe, type-agnostic foundation:** DESTROY stamping +
 **idempotent ordered apply** (LSN dedup + frontier advance) in `process_message`.
