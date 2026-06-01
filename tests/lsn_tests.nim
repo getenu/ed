@@ -155,6 +155,33 @@ proc run*() =
       check EdSeq[int](fa["lsn_seq_g"]).len == 2
       check EdSeq[int](fb["lsn_seq_g"]).len == 2
 
+    test "concurrent update and delete converge (delete wins, no divergence)":
+      var leader = EdContext.init(id = "lsn_leader_i", is_authority = true)
+      var fa = EdContext.init(id = "lsn_fa_i")
+      var fb = EdContext.init(id = "lsn_fb_i")
+      fa.subscribe(leader)
+      fb.subscribe(leader)
+
+      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_i")
+      obj.value = 1
+      fa.tick()
+      fb.tick()
+      check "lsn_obj_i" in fa
+      check "lsn_obj_i" in fb
+
+      # fa updates the object; fb deletes it — concurrently.
+      EdValue[int](fa["lsn_obj_i"]).value = 99
+      EdValue[int](fb["lsn_obj_i"]).destroy()
+
+      leader.tick()
+      fa.tick()
+      fb.tick()
+
+      # All replicas agree (no divergence); the ordered delete wins.
+      check ("lsn_obj_i" in leader) == ("lsn_obj_i" in fa)
+      check ("lsn_obj_i" in fa) == ("lsn_obj_i" in fb)
+      check "lsn_obj_i" notin leader
+
     test "ordered destroy propagates and advances the frontier":
       var leader = EdContext.init(id = "lsn_leader_d", is_authority = true)
       var follower = EdContext.init(id = "lsn_follower_d")
