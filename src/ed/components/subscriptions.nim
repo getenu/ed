@@ -338,10 +338,21 @@ proc publish_changes*[T, O](
       for msg in msgs.mitems:
         self.ctx.stamp_lsn(msg)
 
-      for sub in self.ctx.subscribers:
-        if sub.ctx_id notin op_ctx.source:
+      if self.ctx.is_authority:
+        # Canonical ops originate from the authority. Re-origin the source to us
+        # and deliver to ALL subscribers — including the original writer
+        # (return-to-source) — so writers learn the canonical order/value and
+        # converge. LSN dedup in process_message keeps this idempotent and
+        # loop-free (receivers won't echo back to us: we're in their source).
+        let canon_ctx = OperationContext.init(source = [self.ctx.id].toHashSet)
+        for sub in self.ctx.subscribers:
           for msg in msgs:
-            self.ctx.send(sub, msg, op_ctx, self.flags)
+            self.ctx.send(sub, msg, canon_ctx, self.flags)
+      else:
+        for sub in self.ctx.subscribers:
+          if sub.ctx_id notin op_ctx.source:
+            for msg in msgs:
+              self.ctx.send(sub, msg, op_ctx, self.flags)
 
     self.ctx.tick_reactor
 

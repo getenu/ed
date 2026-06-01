@@ -57,6 +57,34 @@ proc run*() =
       check follower.applied_lsn >= 3
       check EdValue[int](follower["lsn_obj_c"]).value == 3
 
+    test "concurrent register writers converge to the authority's order":
+      var leader = EdContext.init(id = "lsn_leader_e", is_authority = true)
+      var fa = EdContext.init(id = "lsn_fa")
+      var fb = EdContext.init(id = "lsn_fb")
+      fa.subscribe(leader)
+      fb.subscribe(leader)
+
+      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_e")
+      fa.tick()
+      fb.tick()
+      check "lsn_obj_e" in fa
+      check "lsn_obj_e" in fb
+
+      # Two optimistic writers race the same register.
+      EdValue[int](fa["lsn_obj_e"]).value = 10
+      EdValue[int](fb["lsn_obj_e"]).value = 20
+
+      # Authority orders them (FIFO: fa then fb) and fans the canonical values
+      # back to everyone — including the writers (return-to-source).
+      leader.tick()
+      fa.tick()
+      fb.tick()
+
+      let lv = EdValue[int](leader["lsn_obj_e"]).value
+      check EdValue[int](fa["lsn_obj_e"]).value == lv  # no divergence
+      check EdValue[int](fb["lsn_obj_e"]).value == lv
+      check lv == 20  # later writer in the authority's order wins
+
     test "ordered destroy propagates and advances the frontier":
       var leader = EdContext.init(id = "lsn_leader_d", is_authority = true)
       var follower = EdContext.init(id = "lsn_follower_d")
