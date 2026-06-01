@@ -190,7 +190,11 @@ Bounded, testable, minimal product-behavior change:
    ordered at the leader and re-broadcast (model **b**).
 4. Apply side: LSN-ordered apply + dedup in `process_message`; reconciliation
    snaps to authority value.
-5. Commit-callback plumbing (op_id echo → callback, with outcome).
+5. Commit-callback plumbing (op_id echo → callback, with outcome). **Deferred**
+   (open Q #10): the `op_id` field is in place, but the public callback API is on
+   hold until a short **options doc** — code examples for each shape (setter
+   handle / `on_commit=` / `track_commits`) plus **perf & correctness**
+   considerations, not just ergonomics — is written and a shape chosen.
 6. **Serialize/compress once per change** — split `Message` into a sub-independent
    body (serialized + compressed a single time, carrying payload + `epoch`/`lsn`)
    and a per-sub source header; the per-subscriber `send` loop only varies the
