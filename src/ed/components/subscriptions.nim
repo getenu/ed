@@ -723,9 +723,29 @@ proc tick*(
   self.flush_buffers
   while true:
     if poll:
+      # Drain the available batch, then coalesce superseded register updates:
+      # a non-delta ASSIGN for an object that a higher-LSN ASSIGN in the same
+      # batch overwrites is frontier-advanced but its effect is skipped, so a
+      # losing optimistic writer converges to the latest value without applying
+      # (or showing) the intermediate one. Deltas (collections) are never
+      # coalesced — every add matters.
+      var batch: seq[Message]
       while get_mono_time() < timeout and self.chan.try_recv(msg):
-        self.process_message(msg)
-        inc count
+        batch.add msg
+      if batch.len > 0:
+        var latest: Table[string, int64]
+        for m in batch:
+          if m.kind == ASSIGN and not m.delta and m.lsn > 0 and
+              m.lsn > latest.getOrDefault(m.object_id, 0'i64):
+            latest[m.object_id] = m.lsn
+        for m in batch:
+          if m.kind == ASSIGN and not m.delta and m.lsn > 0 and
+              m.lsn < latest.getOrDefault(m.object_id, 0'i64):
+            if m.lsn > self.applied_lsn:
+              self.applied_lsn = m.lsn  # superseded register update: skip effect
+          else:
+            self.process_message(m)
+          inc count
 
     if ?self.reactor:
       if poll:
