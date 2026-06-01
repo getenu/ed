@@ -80,6 +80,64 @@ and the smaller delta from today's optimistic broadcast), but lay the message +
 leader plumbing so **(a) slots in** for `confirmed` objects by selecting routing
 off the object's `mode`.
 
+## Routing & fanout — current behavior and plan
+
+The leader model **concentrates** all fanout at the host, so the existing fanout
+costs must be addressed alongside Phase 1, not after.
+
+### Blocking points (today)
+
+- **Local send blocks the producer.** `send_or_buffer` (`subscriptions.nim:160`)
+  with `buffer=false` — the `EdContext` **default** — calls `sub.chan.send`,
+  which blocks when the target inbox `Chan` (size **100**) is full → a slow
+  consumer thread stalls every producer feeding it. `buffer=true` instead grows an
+  **unbounded** in-memory `chan_buffer`.
+- **Remote connect spins.** `subscribe(address)` blocks in
+  `while not finished: reactor.tick` until ACK (`:444`).
+- **Subscribe pushes all state synchronously.** `add_subscriber` (`:349`)
+  `publish_create`s **every object** inline — an O(objects) serialize-and-send
+  burst per join.
+
+### Netty under backpressure
+
+Defaults: **492 B** UDP payload, **25 KB** max in-flight/connection, **250 ms**
+ack/retransmit, **10 s** timeout.
+
+- `send`/`divideAndSend` only queues parts into `conn.sendParts` — **never
+  blocks, never drops, unbounded queue.**
+- `tick`/`sendNeededParts` pushes ≤25 KB in-flight then flags `saturated` and
+  stops for that conn; unacked parts retransmit every 250 ms; `deleteAckedParts`
+  frees only a *contiguous acked prefix* → one early loss head-of-line-blocks the
+  whole queue.
+- Slow client ⇒ unbounded host-memory backlog + throughput capped at ~25 KB/RTT +
+  constant retransmits, until the 10 s timeout drops it.
+- netty exposes `saturated` / `inQueue` / throughput stats — **Ed reads none of
+  them.** No backpressure feedback into publishing.
+
+### The fanout cost (the bottleneck)
+
+`publish_changes` loops subscribers → `send` per sub → `send` runs
+`msg.to_flatty` + `.compress` **per subscriber** (`:232-237`). N clients ⇒ N×
+serialize + N× compress of an essentially identical payload. Only the source
+short-id header is genuinely per-sub.
+
+### Plan
+
+1. **Serialize/compress once (PR 1).** Split a `Message` into a sub-independent
+   **body** (payload + `epoch`/`lsn`, flatty'd + snappy'd **once**) and a tiny
+   per-sub **header** (source short-ids). Biggest single fanout win; lives in the
+   same `send`/`publish_changes` code as the LSN format change.
+2. **Per-subscription delivery state (Phase 2; design now).** Give each
+   `Subscription` a mode: `op_stream` vs `resyncing`. Read netty
+   `saturated`/`inQueue` + local chan depth; a far-behind sub switches to
+   **snapshot@LSN + tail** instead of replaying the op backlog — reuses the
+   durable-log/snapshot capability. (Backpressure handling and snapshot-resync are
+   the same mechanism.)
+3. **LSN queue compaction (Phase 2/3).** Per-object LSN lets a slow sub's queued
+   `ASSIGN`s collapse to last-value-wins per object.
+4. **Relay topology (later).** The parked forwarding partial subscriber → host →
+   relays → clients, turning host fanout O(N) into O(relays).
+
 ## Proposed PR 1 — "LSN + appointed leader ordering (cross-thread)"
 
 Bounded, testable, minimal product-behavior change:
@@ -93,6 +151,10 @@ Bounded, testable, minimal product-behavior change:
 4. Apply side: LSN-ordered apply + dedup in `process_message`; reconciliation
    snaps to authority value.
 5. Commit-callback plumbing (op_id echo → callback, with outcome).
+6. **Serialize/compress once per change** — split `Message` into a sub-independent
+   body (serialized + compressed a single time, carrying payload + `epoch`/`lsn`)
+   and a per-sub source header; the per-subscriber `send` loop only varies the
+   header, never re-runs `to_flatty`/`compress` on the body.
 
 **Tests (in-process, two contexts, one leader):**
 - Concurrent writes to the same `EdValue` from two contexts → both converge to
@@ -101,6 +163,8 @@ Bounded, testable, minimal product-behavior change:
   the loser.
 - Re-delivering an already-applied LSN is a no-op (idempotency).
 - A collection (`EdSeq`) with concurrent adds → both present, order = leader order.
+- **Fanout serializes/compresses the body once regardless of subscriber count**
+  (assert a single serialize/compress per change across N subscribers).
 
 ## Risks / unknowns to resolve while building
 
