@@ -264,6 +264,11 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
   # so every subscriber receives the same ordered op. DESTROY is ordered like
   # ASSIGN — delete-vs-update is a real conflict (see spike doc).
   var msg = Message(kind: DESTROY, object_id: self.id)
+  msg.origin =
+    if op_ctx.origin != "":
+      op_ctx.origin
+    else:
+      self.ctx.id
   when defined(ed_trace):
     msg.trace = \"{get_stack_trace()}\n\nop:\n{op_ctx.trace}"
   self.ctx.stamp_lsn(msg)
@@ -276,8 +281,12 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
 
 proc pack_messages(msgs: seq[Message]): seq[Message] =
   if msgs.len > 1:
-    var packed_msg =
-      Message(kind: PACKED, source: msgs[0].source, flags: msgs[0].flags)
+    var packed_msg = Message(
+      kind: PACKED,
+      source: msgs[0].source,
+      flags: msgs[0].flags,
+      delta: msgs[0].delta,
+    )
     var ops: seq[PackedMessageOperation]
 
     for msg in msgs:
@@ -333,9 +342,19 @@ proc publish_changes*[T, O](
 
       msgs = pack_messages(msgs)
 
+      # Tag each op with its origin (the original writer) so writers can dedup
+      # their own returned delta ops. Forwards preserve the incoming origin;
+      # original mutations stamp our own id.
+      let out_origin =
+        if op_ctx.origin != "":
+          op_ctx.origin
+        else:
+          self.ctx.id
+
       # Authority stamps each ordered op with its global LSN, once, before
       # fanout so every subscriber receives the same LSN.
       for msg in msgs.mitems:
+        msg.origin = out_origin
         self.ctx.stamp_lsn(msg)
 
       if self.ctx.is_authority:
@@ -542,6 +561,16 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       lsn = msg.lsn, frontier = self.applied_lsn
     return
 
+  # Own-op dedup: a delta (collection) op we originated has already been applied
+  # optimistically. When it returns canonically, advance the frontier (and ack,
+  # deferred #10) but don't re-run the effect — re-applying a seq.add would
+  # double it. Registers (delta = false) are re-applied by LSN so a losing
+  # optimistic write still converges to the canonical value.
+  if msg.delta and msg.origin == self.id:
+    if msg.lsn > self.applied_lsn:
+      self.applied_lsn = msg.lsn
+    return
+
   if msg.kind == PACKED:
     let ops = msg.obj.from_flatty(seq[PackedMessageOperation])
     for op in ops:
@@ -577,7 +606,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         self,
         msg.object_id,
         msg.flags,
-        OperationContext.init(source = source, ctx = self),
+        OperationContext.init(source = source, ctx = self, origin = msg.origin),
       )
       # :(
   elif msg.kind != BLANK:
@@ -587,7 +616,9 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       return
     let obj = self.objects[msg.object_id]
     obj.change_receiver(
-      obj, msg, op_ctx = OperationContext.init(source = source, ctx = self)
+      obj,
+      msg,
+      op_ctx = OperationContext.init(source = source, ctx = self, origin = msg.origin),
     )
     if msg.lsn > self.applied_lsn:
       self.applied_lsn = msg.lsn

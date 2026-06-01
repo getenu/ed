@@ -118,6 +118,10 @@ proc defaults[T, O](
       self: ref EdBase, change: BaseChange, id, trace: string
   ): Message =
     var msg = Message(object_id: id, type_id: Ed[T, O].tid)
+    # Collections (change object O differs from tracked T) are delta /
+    # non-idempotent ops; registers (O is T) are whole-value and idempotent.
+    when O isnot T:
+      msg.delta = true
     when defined(ed_trace):
       msg.trace = trace
     assert ADDED in change.changes or REMOVED in change.changes or

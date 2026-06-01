@@ -85,6 +85,47 @@ proc run*() =
       check EdValue[int](fb["lsn_obj_e"]).value == lv
       check lv == 20  # later writer in the authority's order wins
 
+    test "a follower's collection op is not double-applied":
+      var leader = EdContext.init(id = "lsn_leader_f", is_authority = true)
+      var follower = EdContext.init(id = "lsn_follower_f")
+      follower.subscribe(leader)
+
+      var s = EdSeq[int].init(ctx = leader, id = "lsn_seq_f")
+      follower.tick()
+      check "lsn_seq_f" in follower
+
+      # Applied optimistically, sent to the authority, ordered, returned —
+      # must NOT be re-applied (no duplicate).
+      EdSeq[int](follower["lsn_seq_f"]).add 42
+      leader.tick()
+      follower.tick()
+
+      check EdSeq[int](follower["lsn_seq_f"]).len == 1
+      check EdSeq[int](leader["lsn_seq_f"]).len == 1
+      check 42 in EdSeq[int](follower["lsn_seq_f"])
+
+    test "concurrent collection writers converge without duplication":
+      var leader = EdContext.init(id = "lsn_leader_g", is_authority = true)
+      var fa = EdContext.init(id = "lsn_fa_g")
+      var fb = EdContext.init(id = "lsn_fb_g")
+      fa.subscribe(leader)
+      fb.subscribe(leader)
+
+      var s = EdSeq[int].init(ctx = leader, id = "lsn_seq_g")
+      fa.tick()
+      fb.tick()
+
+      EdSeq[int](fa["lsn_seq_g"]).add 1
+      EdSeq[int](fb["lsn_seq_g"]).add 2
+      leader.tick()
+      fa.tick()
+      fb.tick()
+
+      # Both adds present exactly once on every replica.
+      check EdSeq[int](leader["lsn_seq_g"]).len == 2
+      check EdSeq[int](fa["lsn_seq_g"]).len == 2
+      check EdSeq[int](fb["lsn_seq_g"]).len == 2
+
     test "ordered destroy propagates and advances the frontier":
       var leader = EdContext.init(id = "lsn_leader_d", is_authority = true)
       var follower = EdContext.init(id = "lsn_follower_d")
