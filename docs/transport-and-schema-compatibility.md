@@ -119,6 +119,82 @@ Better, mostly-automatic options:
   range-checked enums**, with `TypeSchema` for graceful evolution and durable
   logs. Not a protocol-version counter.
 
+## Principle: strict envelope, forgiving payload
+
+The whole posture below reduces to one rule:
+
+> **Strict on the envelope, forgiving on the payload.** The framing/version is the
+> one place a hard fail is right (you literally can't parse). Once a message
+> *parses*, an unfamiliar **type or value** should be logged-and-skipped or
+> relayed — not fatal.
+
+### Why we can relax now
+
+Ed's defensive "blow up on anything unexpected" was a *proxy for correctness
+verification* — when a missing TID or odd value was the only signal that something
+was wrong, treating every anomaly as serious was rational. The consistency layer
+(LSN ordering, frontier, reconciliation) now gives **independent, verifiable
+correctness**, so a single weird object is no longer evidence of systemic failure.
+We can downgrade many payload-level hard-fails to log-and-continue — especially
+once we accept version-skewed clients.
+
+### Triage of the hard-fail sites
+
+Survey: ~12 production hard-fails (`fail`/`do_assert`/`raise`), concentrated in
+`subscriptions.nim`, `initializers.nim`, `contexts.nim`; plus ~60 plain `assert`s
+(dev-only, stripped in release). Classify each:
+
+- **Keep hard** — envelope/transport framing, genuine corruption, and our own
+  routing invariants where continuing would corrupt shared state.
+- **Downgrade to log-and-skip/relay** — unknown `type_id` / missing initializer /
+  unregistered ref tid (e.g. `subscriptions.nim` "No type initializer for type",
+  the `do_assert lookup_type(...)`). The `ed_partial_subscriber` flag already does
+  this for some; make it the default policy, not a flag.
+- **Log loudly but continue** — our-own-invariant violations that are *not*
+  corrupting (e.g. the `assert self.id notin source` own-message guard already
+  logs an error before asserting). In production: log + drop the message.
+
+Pair with the defensive-deserialize backstop (drop packet + disconnect on parse
+failure) so even the "keep hard" cases isolate instead of crashing the process.
+
+## Relaying unknown types (older server, newer clients)
+
+A nice property of the leader model: **the authority can sequence and relay a
+message without understanding its type.** It has `type_id`, `object_id`, the
+opaque `obj` bytes, and the envelope fields (`lsn`/`origin`/`delta`) — enough to
+**assign an LSN and forward** to subscribers without deserializing the payload.
+
+So an **older server can relay newer clients' types it doesn't know**: it stamps
+the order and fans the opaque bytes out; clients that *do* know the type apply it.
+This needs:
+
+1. **Don't hard-fail on unknown type** (the relaxation above).
+2. **Store/forward opaque bytes** — the parked `EdDynamic` / forwarding-partial-
+   subscriber work.
+3. **Stamp LSN without applying** — the leader orders but keeps no typed state for
+   the object (pure relay).
+
+Crucially, `lsn`/`origin`/`delta` are **envelope-level**, so a relay can even
+coalesce/dedup correctly (e.g. honor `delta`) without knowing the type. Unknown
+types fall back to operation-based ordering (apply ops in LSN order); state-based
+forward-correction needs a peer that can apply, which the knowledgeable clients
+provide.
+
+## Versioning: two tiers (Ed envelope + app policy)
+
+- **Ed envelope `protocol_version`** — a constant bumped on `Message`/handshake/
+  transport-framing changes (the decision rule above). Exchanged in SUBSCRIBE;
+  Ed enforces envelope **compatibility** as a hard gate (can't parse → reject).
+- **App version (Enu)** — separate, carried opaquely in the handshake, enforced by
+  an **Ed-provided policy hook** so the app decides accept/reject (e.g. "reject
+  clients older than vX"). Enu's version moves independently of Ed's.
+
+These compose with relaying: keep the **envelope stable across app-type changes**
+(don't bump it for new types/enums), let the **app policy** gate on app version,
+and let an **envelope-compatible but app-newer** client relay its unknown types
+through an older server (previous section). Reject only on envelope incompatibility
+or an explicit app-version policy — not on "I don't recognize this type."
+
 ## Open items
 
 - Implement defensive deserialization (try/except + disconnect) — high value,
@@ -128,3 +204,11 @@ Better, mostly-automatic options:
 - Decide structure-aware `tid` vs `TypeSchema`-on-wire (or both: tids for
   live-sync safety, schema for durable/graceful evolution).
 - Range-check enum deserialization.
+- **Triage the hard-fail sites** (keep-hard / log-and-skip / log-and-continue);
+  make graceful payload handling the default rather than the `ed_partial_subscriber`
+  flag.
+- **Relay unknown types** at the authority (sequence + forward opaque bytes;
+  finish the `EdDynamic`/forwarding-partial-subscriber work).
+- **Two-tier versioning:** an Ed envelope `protocol_version` (hard gate) plus an
+  app-version policy hook (Enu rejects old clients). Decide how the policy hook is
+  exposed.
