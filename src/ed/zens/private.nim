@@ -16,9 +16,11 @@ proc init*(
     _: type OperationContext,
     source: HashSet[string] = initHashSet[string](),
     ctx: EdContext = nil,
+    origin = "",
 ): OperationContext =
   result = OperationContext()
   result.source = source
+  result.origin = origin
   if ?ctx:
     result.source.incl ctx.id
   when defined(ed_trace):

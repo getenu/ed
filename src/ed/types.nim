@@ -40,6 +40,7 @@ type
 
   OperationContext = object
     source*: HashSet[string]
+    origin*: string  # ctx id that originated the op (threaded for own-op dedup)
     when defined(ed_trace):
       trace*: string
 
@@ -63,6 +64,8 @@ type
     epoch*: int64   # authority epoch; bumped on host/leader change
     lsn*: int64     # global sequence number from the authority (0 = unordered)
     op_id*: int64   # originator-generated id for ack/commit correlation (0 = none)
+    origin*: string # ctx id that originated the op (for own-op dedup)
+    delta*: bool    # true for collection (non-idempotent) ops, false for registers
     when defined(ed_trace):
       trace*: string
       id*: int
@@ -243,6 +246,8 @@ proc to_flatty*(s: var string, msg: Message) =
   s.to_flatty msg.epoch
   s.to_flatty msg.lsn
   s.to_flatty msg.op_id
+  s.to_flatty msg.origin
+  s.to_flatty msg.delta
   when defined(ed_trace):
     s.to_flatty msg.trace
     s.to_flatty msg.id
@@ -262,6 +267,8 @@ proc from_flatty*(s: string, i: var int, msg: var Message) =
   s.from_flatty(i, msg.epoch)
   s.from_flatty(i, msg.lsn)
   s.from_flatty(i, msg.op_id)
+  s.from_flatty(i, msg.origin)
+  s.from_flatty(i, msg.delta)
   when defined(ed_trace):
     s.from_flatty(i, msg.trace)
     s.from_flatty(i, msg.id)
