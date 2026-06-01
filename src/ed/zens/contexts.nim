@@ -118,11 +118,13 @@ proc next_lsn*(self: EdContext): int64 =
 
 proc stamp_lsn*(self: EdContext, msg: var Message) =
   ## If this context is the authority, assign the op its global LSN, once.
-  ## Applies to the change ops the authority broadcasts (self-originated or
-  ## forwarded). CREATE/DESTROY are intentionally not stamped yet — the
-  ## subscribe-time resend distinction needs its own step (see spike doc).
+  ## Applies to the ordered ops the authority broadcasts (self-originated or
+  ## forwarded). CREATE is intentionally not stamped — concurrent same-id
+  ## creation is out of scope and the subscribe-time resend distinction needs
+  ## its own step (see spike doc). DESTROY *is* stamped: delete-vs-update is a
+  ## real conflict that must be ordered.
   if self.is_authority and msg.lsn == 0 and
-      msg.kind in {ASSIGN, UNASSIGN, TOUCH, PACKED}:
+      msg.kind in {ASSIGN, UNASSIGN, TOUCH, DESTROY, PACKED}:
     msg.lsn = self.next_lsn
 
 proc `[]`*[T, O](self: EdContext, src: Ed[T, O]): Ed[T, O] =

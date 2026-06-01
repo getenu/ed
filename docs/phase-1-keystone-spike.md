@@ -177,6 +177,80 @@ short-id header is genuinely per-sub.
 4. **Relay topology (later).** The parked forwarding partial subscriber → host →
    relays → clients, turning host fanout O(N) into O(relays).
 
+## Ordered delivery: return-to-source, destroy ordering, and the optimism crux
+
+### Return-to-source is required (not a convenience)
+
+The originator of an optimistic write **must learn the LSN its own op was
+assigned**, or replicas diverge. Proof — A and B both write object X:
+
+- A's op → leader stamps `lsn=5`, fans to all **except A**.
+- B's op → leader stamps `lsn=6`, fans to all **except B**.
+- A applied its optimistic value, then receives B's `lsn=6` → snaps to B. **A = b.**
+- B applied `b` (no LSN — *floating*), then receives A's `lsn=5`. B can't tell its
+  own write is newer (it never heard `lsn=6`), so it applies `5` and clobbers its
+  own write. **B = a.** → **divergence.**
+
+So return-to-source is mandatory. What's returned can be the full op or a lean
+receipt (`op_id → lsn`, + value if it differs), but *some* return is required.
+Confirmed mode needs it too (it un-pends the write on return). Only fire-and-forget
+avoids it — and that can neither converge nor ack.
+
+### DESTROY must be ordered (CREATE may be deferred)
+
+CREATE is deferrable: ids are generated-unique, "exists" is monotonic, and the
+`id notin ctx` guards make concurrent creates idempotent. **DESTROY is not** —
+delete-vs-update is a real conflict. Worked example (partition):
+
+- Minority client destroys X; the DESTROY can't reach the leader.
+- Leader assigns X = v1 (`lsn=10`), v2 (`lsn=11`).
+- Heal. *Unordered destroy:* applies unconditionally → X gone everywhere, and the
+  leader's assigns hit "missing object" and vanish — **timing-dependent / can
+  diverge.** *Ordered destroy:* on heal the leader stamps it (`lsn=12`); canonical
+  order `10,11,12` → everyone converges to destroyed; late `≤ frontier` ops are
+  no-ops (the frontier is the tombstone). **Deterministic.**
+
+⇒ DESTROY joins the stamped/ordered/return-to-source path; CREATE stays deferred
+(concurrent same-id explicitly out of scope for now).
+
+**Policy note — delete-vs-update:** LSN-last-wins means a *stale* destroy (the
+destroyer never saw v1/v2) still wins if sequenced last ("delete beats concurrent
+updates"). If "an update should beat a stale delete" is wanted, the leader must
+reject a destroy of an object modified since the destroyer's observed version — a
+versioned/compare-and-set destroy (the `confirmed`/F flavor). Default =
+LSN-last-wins; the stricter policy is opt-in later.
+
+### The optimism crux (the next real decision)
+
+Surfaced while implementing: correct **model (b)** under contention needs more
+than return-to-source, because the optimistic local apply happens *before* the
+op's LSN position is known.
+
+- **Register loser:** B applies `b` optimistically, receives `a@5` (applies `a`),
+  then its own `b@6` returns. If B *skips* re-applying its own op → stays at `a`
+  (wrong). If it *re-applies* → correct for registers.
+- **Collection:** but *re-applying* a returned `seq.add` op **double-adds** the
+  item. Skipping is correct for collections, re-applying is wrong.
+
+So "skip own op" is right for collections and wrong for registers; "re-apply" is
+the reverse. The only model correct for *all* types is **apply each distinct op
+exactly once, in LSN order** — which means the optimistic local value must live in
+a **speculative layer** that is reconciled (rolled back + replayed, or
+equivalent) when the canonical stream arrives. We cannot simply suppress the local
+apply (existing code + tests rely on a mutation being immediately visible
+locally).
+
+**Decision needed (blocks the convergence demo):** how to do model (b) correctly —
+options to weigh: (i) speculative overlay with rollback/replay; (ii)
+`confirmed`-style apply as the default with opt-in optimism; (iii) register-LWW
+fast path + op-id effect-dedup for collections (correct per-type but two code
+paths). This is the heart of the consistency work and deserves its own design.
+
+**Until decided, we land the safe, type-agnostic foundation:** DESTROY stamping +
+**idempotent ordered apply** (LSN dedup + frontier advance) in `process_message`.
+This is correct and behavior-neutral for existing (no-authority) use, and sets up
+return-to-source. Routing changes and reconciliation wait on the decision above.
+
 ## Proposed PR 1 — "LSN + appointed leader ordering (cross-thread)"
 
 Bounded, testable, minimal product-behavior change:

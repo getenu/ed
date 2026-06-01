@@ -39,3 +39,36 @@ proc run*() =
       fobj.value = 7
       fobj.value = 8
       check follower.lsn_counter == 0
+
+    test "follower frontier tracks the authority's ordered ops":
+      var leader = EdContext.init(id = "lsn_leader_c", is_authority = true)
+      var follower = EdContext.init(id = "lsn_follower_c")
+      follower.subscribe(leader)
+
+      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_c")
+      obj.value = 1
+      obj.value = 2
+      obj.value = 3
+      follower.tick()
+
+      # Follower applied the ordered ops; its frontier matches the authority's
+      # LSN counter (CREATE is unstamped, so only the 3 assigns count).
+      check follower.applied_lsn == leader.lsn_counter
+      check follower.applied_lsn >= 3
+      check EdValue[int](follower["lsn_obj_c"]).value == 3
+
+    test "ordered destroy propagates and advances the frontier":
+      var leader = EdContext.init(id = "lsn_leader_d", is_authority = true)
+      var follower = EdContext.init(id = "lsn_follower_d")
+      follower.subscribe(leader)
+
+      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_d")
+      obj.value = 5
+      follower.tick()
+      check "lsn_obj_d" in follower
+
+      let before = follower.applied_lsn
+      obj.destroy()
+      follower.tick()
+      check "lsn_obj_d" notin follower
+      check follower.applied_lsn > before  # DESTROY is a stamped, ordered op

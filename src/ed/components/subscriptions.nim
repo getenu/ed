@@ -260,23 +260,17 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
   log_defaults("ed publishing")
 
   trace "publishing destroy", ed_id = self.id
+  # Build the DESTROY once and stamp it with the global LSN (authority only),
+  # so every subscriber receives the same ordered op. DESTROY is ordered like
+  # ASSIGN — delete-vs-update is a real conflict (see spike doc).
+  var msg = Message(kind: DESTROY, object_id: self.id)
+  when defined(ed_trace):
+    msg.trace = \"{get_stack_trace()}\n\nop:\n{op_ctx.trace}"
+  self.ctx.stamp_lsn(msg)
+
   for sub in self.ctx.subscribers:
     if sub.ctx_id notin op_ctx.source:
-      when defined(ed_trace):
-        self.ctx.send(
-          sub,
-          Message(
-            kind: DESTROY,
-            object_id: self.id,
-            trace: \"{get_stack_trace()}\n\nop:\n{op_ctx.trace}",
-          ),
-          op_ctx,
-          self.flags,
-        )
-      else:
-        self.ctx.send(
-          sub, Message(kind: DESTROY, object_id: self.id), op_ctx, self.flags
-        )
+      self.ctx.send(sub, msg, op_ctx, self.flags)
 
   self.ctx.tick_reactor
 
@@ -528,6 +522,15 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
   #   self.last_received_id[src] = msg.id
   debug "receiving", msg, topics = "networking"
 
+  # Ordered-op idempotency: a stamped op at or below our frontier was already
+  # applied or superseded — drop it. lsn == 0 (CREATE / unordered) always
+  # proceeds. Gap/reorder buffering (lsn > frontier + 1) is deferred to the
+  # network phase; cross-thread delivery is FIFO from a single sequencer.
+  if msg.lsn > 0 and msg.lsn <= self.applied_lsn:
+    debug "skipping already-applied op",
+      lsn = msg.lsn, frontier = self.applied_lsn
+    return
+
   if msg.kind == PACKED:
     let ops = msg.obj.from_flatty(seq[PackedMessageOperation])
     for op in ops:
@@ -545,6 +548,8 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       )
 
       self.process_message(new_msg, sub)
+    if msg.lsn > self.applied_lsn:
+      self.applied_lsn = msg.lsn
   elif msg.kind == CREATE:
     {.gcsafe.}:
       if msg.type_id notin type_initializers:
@@ -573,6 +578,8 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     obj.change_receiver(
       obj, msg, op_ctx = OperationContext.init(source = source, ctx = self)
     )
+    if msg.lsn > self.applied_lsn:
+      self.applied_lsn = msg.lsn
   else:
     fail "Can't recv a blank message"
 
