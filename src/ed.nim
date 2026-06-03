@@ -25,3 +25,6 @@ export channels, flatty
 
 import ed/[types, zens, components, utils]
 export types, zens, components, utils
+
+import ed/client
+export client
