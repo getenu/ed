@@ -1,7 +1,7 @@
 import
   std/[
     importutils, isolation, tables, sets, sequtils, algorithm, intsets, locks,
-    math, times, strutils, macros,
+    math, times, strutils, macros, os,
   ]
 
 import pkg/threading/channels {.all.}
@@ -471,6 +471,7 @@ proc subscribe*(
   var received_objects: HashSet[string]
   var finished = false
   var remote_objects: HashSet[string]
+  var last_progress = epoch_time()
   while not finished:
     self.reactor.tick
     self.dead_connections &= self.reactor.dead_connections
@@ -478,7 +479,9 @@ proc subscribe*(
       if connection == conn:
         raise ConnectionError.init(\"Unable to connect to {address}:{port}")
 
+    var got_messages = false
     for msg in self.reactor.messages:
+      got_messages = true
       self.bytes_received += msg.data.len
       if msg.data.starts_with("ACK:"):
         if bidirectional:
@@ -492,6 +495,15 @@ proc subscribe*(
         self.remote_messages &= msg
     if callback != nil:
       callback()
+    if got_messages:
+      last_progress = epoch_time()
+    # reactor.tick is non-blocking, so an unyielding loop pegs a core for the
+    # whole connect-timeout window when the peer is down. Spin hot at first so a
+    # healthy handshake (sub-ms on localhost) is timing-identical to before, then
+    # yield once we've gone a while with no traffic — the peer is gone and we're
+    # just waiting out the timeout.
+    elif epoch_time() - last_progress > 0.2:
+      sleep 1
 
   # Create bidirectional subscription BEFORE processing messages so mappings get registered
   var bi_sub: Subscription = nil
