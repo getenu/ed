@@ -106,6 +106,11 @@ type
 
   Subscription* = ref object
     ctx_id*: string
+    # Partial replicas: when `partial`, this subscriber only receives objects in
+    # `interest` (its roots + ids it has fetched). Default (not partial) gets
+    # everything — the existing full-replica behavior.
+    partial*: bool
+    interest*: HashSet[string]
     # Short ID mappings for this connection. Outgoing and incoming are
     # *separate* namespaces — each peer independently allocates short IDs
     # in messages it sends. Sharing the table would let our own outgoing

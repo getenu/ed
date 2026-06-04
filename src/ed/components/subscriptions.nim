@@ -273,6 +273,8 @@ proc fanout(
     source.incl self.id
   var body, body_no_overwrite: string
   for sub in targets:
+    if sub.partial and msg.object_id notin sub.interest:
+      continue  # partial subscriber: only ops for objects it's interested in
     if sub.kind == LOCAL:
       self.send(sub, msg, op_ctx, flags)
     elif sub.kind == REMOTE and SYNC_REMOTE in flags:
@@ -424,6 +426,8 @@ proc add_subscriber*(
   debug "adding subscriber", sub
   self.subscribers.add sub
   for id in self.objects.keys.to_seq.reversed:
+    if sub.partial and id notin sub.interest:
+      continue  # partial subscriber: only push objects it's interested in
     if id notin remote_objects or push_all:
       debug "sending object on subscribe",
         from_ctx = self.id, to_ctx = sub.ctx_id, ed_id = id
@@ -449,8 +453,16 @@ proc process_value_initializers(self: EdContext) =
     initializer()
   self.value_initializers = @[]
 
-proc subscribe*(self: EdContext, ctx: EdContext, bidirectional = true) =
-  ## Subscribe to another local context for cross-thread sync.
+proc subscribe*(
+    self: EdContext,
+    ctx: EdContext,
+    bidirectional = true,
+    partial = false,
+    roots: seq[string] = @[],
+) =
+  ## Subscribe to another local context for cross-thread sync. When `partial`,
+  ## we only receive objects in `roots` (and ids we later fetch) — the
+  ## authority→us direction is filtered; our own writes still flow to it.
   privileged
   debug "local subscribe", ctx = self.id
   self.pack_objects
@@ -459,7 +471,13 @@ proc subscribe*(self: EdContext, ctx: EdContext, bidirectional = true) =
     remote_objects.incl id
   self.subscribing = true
   ctx.add_subscriber(
-    Subscription(kind: LOCAL, chan: self.chan, ctx_id: self.id),
+    Subscription(
+      kind: LOCAL,
+      chan: self.chan,
+      ctx_id: self.id,
+      partial: partial,
+      interest: roots.toHashSet,
+    ),
     push_all = bidirectional,
     remote_objects,
   )
@@ -469,6 +487,7 @@ proc subscribe*(self: EdContext, ctx: EdContext, bidirectional = true) =
   self.process_value_initializers
 
   if bidirectional:
+    # Reverse direction (us → authority) stays full: we push our own writes.
     ctx.subscribe(self, bidirectional = false)
 
 proc subscribe*(
