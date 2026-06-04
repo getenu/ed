@@ -52,6 +52,48 @@ unknown-type schema part is unneeded, since `O` gives the type.)
 | **Fetch protocol** | New message exchange: subscriber → authority **REQUEST(object_id)**; authority → subscriber the object's `CREATE` + current state, and adds it to that sub's interest set so future ops flow. Mirrors the existing SUBSCRIBE/ACK handshake. |
 | **Materialize-on-access** | The container's access paths (`items`/`[]`) detect a lazy handle and kick off a fetch **once**; the handle fills in asynchronously and fires a change. |
 
+## Decisions log (for review)
+
+Resolved with Scott, or gut-calls made during implementation (flagged ⚙️):
+
+1. **Opt-in, non-breaking.** Partial sync is gated; default stays full-push, so
+   Enu and existing tests are unaffected. Enabled per-subscription (a partial
+   subscribe) and/or a context flag.
+2. **Two consumer modes, both plain sync (no async/chronos).**
+   - *Game loop:* **placeholder-then-fill** — access returns a handle now, fetch
+     in the background, fill fires a change.
+   - *Request/response (MCP server, scripts):* **`blocking:` scope** — accesses
+     inside it wait for materialization. This matches what `agent.query` already
+     does (tick-until-`MCP_DONE`).
+3. **`tick` semantics are unchanged.** Split `tick` internals into **receive**
+   (pump transport → buffer; no side effects) and **process** (apply buffer → fire
+   `changes`, re-broadcast, flush). `tick` = receive + process.
+4. **Blocking fetch = receive + *silent* materialize.** Send the fetch request,
+   pump I/O into the buffer until the response arrives, apply **only that object**
+   silently (no callbacks, no re-broadcast). Everything else — buffered messages,
+   the **Fill** callback for the materialized object, outgoing — waits for the next
+   explicit `tick`. So nothing application-visible happens outside an explicit
+   `tick`; re-entrant blocking access only does I/O.
+5. **Initial / Fill callbacks + `Change.trigger`.** On `track`, optionally replay
+   current contents as synthetic changes (`Initial`); on materialize, replay as
+   `Fill`. `EdValue` fires even for `nil`; an empty collection fires nothing (it
+   has no contents to replay). New `Change.trigger: Normal | Initial | Fill`,
+   orthogonal to `changes: set[ChangeKind]`. Builds on the existing `changes(bool)`
+   initial flag.
+6. ⚙️ **Fetch protocol.** New `MessageKind` `REQUEST` (subscriber → authority,
+   carries the requested `object_id`); the response is a normal `CREATE` for that
+   object (its initializer materializes it), and the authority adds the id to the
+   subscriber's interest set so future ops flow. Mirrors SUBSCRIBE/ACK.
+7. ⚙️ **Interest is grows-only until eviction (Phase 4).** A partial subscriber's
+   interest set only accumulates (roots + fetched ids). No shedding yet, so a long
+   session drifts back toward a full replica — acceptable for a first cut.
+8. ⚙️ **Bootstrap via explicit roots.** A partial subscriber declares root ids it
+   wants; `add_subscriber` pushes those (and, for now, nothing else). The
+   reference graph + fetch-on-access pull the rest.
+9. ⚙️ **Fetch granularity.** Start one-object-per-request; subtree/region fetch
+   (a `Unit` is a ref + several Ed-field objects, so it's really a subtree) is a
+   follow-up optimization — flagged by the MCP `Unit` access pattern.
+
 ## The crux: access is synchronous, fetch is asynchronous
 
 A game loop reads objects synchronously, but a fetch is a round-trip (cross-thread
