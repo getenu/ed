@@ -41,6 +41,7 @@ type
   OperationContext = object
     source*: HashSet[string]
     origin*: string  # ctx id that originated the op (threaded for own-op dedup)
+    op_id*: int64    # originator's op id (threaded so forwards preserve it)
     when defined(ed_trace):
       trace*: string
 
@@ -132,6 +133,8 @@ type
     leader_id*: string    # ctx_id of the authority (own id when is_authority)
     lsn_counter*: int64   # authority-only: next global LSN to assign
     applied_lsn*: int64   # highest global LSN applied (frontier)
+    op_id_counter*: int64 # next op id to assign to a write we originate
+    latest_op_id*: Table[string, int64]  # object_id -> our highest op id (own-op reconciliation)
     changed_callback_eid: EID
     last_id: int
     close_procs: Table[EID, proc() {.gcsafe.}]

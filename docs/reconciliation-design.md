@@ -59,6 +59,47 @@ EdSeq[DeltaUpdate]]`, `packed_chunks`). So collection reconciliation is the
   compact into a snapshot; `EdSeq` index order is guaranteed only within a tick
   (per the main plan). Add-vs-remove of the same element resolves by LSN order.
 
+## Register own-op handling: the op_id-superseded rule
+
+A naive "re-apply your own echo by LSN" is correct for *convergence* but makes a
+continuously-writing entity (player movement) **snap back** to its own stale
+echoes — an old position update echoes from the authority ~1 RTT later and
+overwrites the entity's newer optimistic position. (Cross-thread the RTT is ~0 so
+it's invisible; over the network it's visible jitter.)
+
+The fix — for **registers** — is to skip your own echo *only when a later write
+of your own supersedes it*:
+
+- Each originated write gets a per-context `op_id`; we record `latest_op_id`
+  per object.
+- On a register op we originated (`origin == self`): if `op_id < latest_op_id[obj]`
+  it's **stale** (we've written newer) → advance the frontier, skip the effect →
+  *no snap-back*. If `op_id == latest_op_id[obj]` it's our **latest** → apply it →
+  a contended register still **converges** to the canonical value.
+- Other-origin ops are always applied — an **authoritative override** (e.g. a
+  script teleport) is accepted, and the entity re-bases onto it.
+
+This preserves convergence in all cases (the accept-override variant did **not** —
+it could leave two writers permanently divergent). It's a state-based form of
+**client-side prediction + server reconciliation** (game netcode; Replicache-style
+sync engines), valid here because we ship values over a single LSN-ordered stream.
+
+**Known limitation (accepted):** a forward write already *in flight* when an
+authoritative override lands gets a higher LSN than the override, so **observers**
+briefly see the stale position before the writer's re-based write supersedes it
+(one or a few self-correcting frames). The writer's own client is unaffected.
+Fully eliminating the observer glitch needs **versioned / conditional writes**
+(OCC — the authority rejects a write whose base was superseded); deferred as
+optional, since the case is rare and self-correcting.
+
+**Precondition:** the rule needs each object's ops delivered in its authority's
+LSN order — provided by the single-leader star topology (one upstream per leaf).
+It generalizes to per-object authority (per-object frontiers + `authority_of`);
+multi-path meshes would additionally need the deferred reorder buffer.
+
+Collections keep the simpler rule below (own delta ops always skipped — no
+whole-value snap-back exists for element-level adds/removes).
+
 ## Own-op handling (the load-bearing rule)
 
 1. Originator applies optimistically (instant local feedback — unchanged from

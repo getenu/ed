@@ -116,6 +116,11 @@ proc next_lsn*(self: EdContext): int64 =
   inc self.lsn_counter
   self.lsn_counter
 
+proc next_op_id*(self: EdContext): int64 =
+  ## Allocate the next op id for a write this context originates.
+  inc self.op_id_counter
+  self.op_id_counter
+
 proc stamp_lsn*(self: EdContext, msg: var Message) =
   ## If this context is the authority, assign the op its global LSN, once.
   ## Applies to the ordered ops the authority broadcasts (self-originated or
