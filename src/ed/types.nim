@@ -30,6 +30,7 @@ type
     TOUCH
     SUBSCRIBE
     PACKED
+    REQUEST  # partial replica asking the authority for an object by id
 
   BaseChange* = ref object of RootObj
     changes*: set[ChangeKind]

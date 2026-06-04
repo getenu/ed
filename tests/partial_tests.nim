@@ -28,6 +28,31 @@ proc run*() =
       check EdValue[int](client["obj_x"]).value == 10
       check "obj_y" notin client
 
+    test "fetch materializes an out-of-interest object and starts syncing it":
+      var authority = EdContext.init(id = "f_authority", is_authority = true)
+      var client = EdContext.init(id = "f_client")
+
+      var x = EdValue[int].init(ctx = authority, id = "f_x")
+      var y = EdValue[int].init(ctx = authority, id = "f_y")
+      x.value = 1
+      y.value = 2
+
+      client.subscribe(authority, partial = true, roots = @["f_x"])
+      client.tick()
+      check "f_y" notin client
+
+      # Fetch f_y on demand.
+      client.fetch("f_y")
+      authority.tick() # authority handles REQUEST, sends f_y's CREATE
+      client.tick() # client materializes f_y
+      check "f_y" in client
+      check EdValue[int](client["f_y"]).value == 2
+
+      # f_y now syncs (it joined the interest set).
+      y.value = 20
+      client.tick()
+      check EdValue[int](client["f_y"]).value == 20
+
     test "non-partial subscriber still gets everything (default unchanged)":
       var authority = EdContext.init(id = "p_authority2", is_authority = true)
       var client = EdContext.init(id = "p_client2")

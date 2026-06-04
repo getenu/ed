@@ -490,6 +490,17 @@ proc subscribe*(
     # Reverse direction (us → authority) stays full: we push our own writes.
     ctx.subscribe(self, bidirectional = false)
 
+proc fetch*(self: EdContext, object_id: string) =
+  ## Ask the authority for `object_id`. It's materialized on a later tick
+  ## (placeholder-then-fill); the authority adds it to our interest so future
+  ## ops follow. No-op if we already hold it.
+  if object_id in self:
+    return
+  var msg = Message(kind: REQUEST, object_id: object_id)
+  for sub in self.subscribers:
+    self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
+  self.tick_reactor
+
 proc subscribe*(
     self: EdContext,
     address: string,
@@ -691,6 +702,15 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         ),
       )
       # :(
+  elif msg.kind == REQUEST:
+    # A partial subscriber wants this object. Add it to that subscriber's
+    # interest (so future ops follow) and send it now via publish_create. The
+    # requester is whoever the message came from — match by ctx id in `source`.
+    for s in self.subscribers:
+      if s.ctx_id in source:
+        s.interest.incl msg.object_id
+        if msg.object_id in self:
+          self.objects[msg.object_id].publish_create(s)
   elif msg.kind != BLANK:
     if msg.object_id notin self:
       # :( this should throw an error
