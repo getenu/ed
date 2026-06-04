@@ -162,10 +162,15 @@ short-id header is genuinely per-sub.
 
 ### Plan
 
-1. **Serialize/compress once (PR 1).** Split a `Message` into a sub-independent
-   **body** (payload + `epoch`/`lsn`, flatty'd + snappy'd **once**) and a tiny
-   per-sub **header** (source short-ids). Biggest single fanout win; lives in the
-   same `send`/`publish_changes` code as the LSN format change.
+1. **Serialize/compress once — *done*.** A remote packet is now
+   `flatty((source_short_ids, new_mappings, compressed_body))`: the per-subscriber
+   header (source + mappings) is tiny, and the shared `compressed_body` (the
+   message with source stripped, flatty'd + snappy'd) is computed **once** per
+   fanout (`fanout` / `send_remote` / `remote_body` in `subscriptions.nim`).
+   `publish_changes`/`publish_destroy` fan out through it; `publish_create` still
+   uses per-sub `send` (same format, not yet shared — fine, CREATEs are colder).
+   **Envelope change:** the wire layout moved, so this is exactly the kind of
+   change the future `protocol_version` must bump on (see transport doc).
 2. **Per-subscription delivery state (Phase 2; design now).** Give each
    `Subscription` a mode: `op_stream` vs `resyncing`. Read netty
    `saturated`/`inQueue` + local chan depth; a far-behind sub switches to
