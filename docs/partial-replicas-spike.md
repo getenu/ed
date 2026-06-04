@@ -52,6 +52,42 @@ unknown-type schema part is unneeded, since `O` gives the type.)
 | **Fetch protocol** | New message exchange: subscriber → authority **REQUEST(object_id)**; authority → subscriber the object's `CREATE` + current state, and adds it to that sub's interest set so future ops flow. Mirrors the existing SUBSCRIBE/ACK handshake. |
 | **Materialize-on-access** | The container's access paths (`items`/`[]`) detect a lazy handle and kick off a fetch **once**; the handle fills in asynchronously and fires a change. |
 
+## Implementation status (this session)
+
+**Done & tested** (opt-in, non-breaking — default is still a full replica):
+
+- **P3a — interest sets + filtered delivery.** `Subscription.partial` +
+  `interest`. The filter is applied in all three send paths: `add_subscriber`
+  (initial push), `fanout`/`publish_changes` (ongoing ops), and `publish_create`
+  (new-object broadcasts). `subscribe(ctx, partial = true, roots = @[...])`.
+- **P3b — fetch protocol.** `REQUEST` message + `EdContext.fetch(id)`; the
+  authority adds the id to that subscriber's interest and `publish_create`s it.
+- **Gap fixes:** post-subscribe creations are filtered (not just the initial
+  push); a partial client's **own** created objects auto-join its interest on the
+  authority, so its writes get return-to-source/convergence.
+
+So a context can now subscribe to a subset, receive only that subset's ops, and
+**explicitly** pull more on demand with `fetch` — the core of partial replicas.
+
+**Logged for tomorrow** (not yet built — the ergonomic layer, and the riskier
+bits I didn't want to rush solo):
+
+- **Transparent materialize-on-access.** Today fetch is *explicit*. The "nested
+  objects don't exist until accessed via the seq" experience needs: a **typed
+  lazy handle** for a non-resident nested `Ed` (turn the `assert object_id in
+  self.ctx` at `initializers.nim` `when O is Ed:` into a placeholder), plus
+  container access (`[]`/`items`) auto-firing a `fetch`. The blocker is a
+  **non-broadcasting placeholder constructor** for an arbitrary `Ed[T,O]` — the
+  current `init`/`defaults` always `publish_create`s. (The parked `EdDynamic`
+  work is the untyped version of this primitive.)
+- **`tick` receive/process split + `blocking:` scope** (decisions 3–4). I kept
+  `tick` untouched this session; the split + silent-materialize is the next piece.
+- **Initial / Fill callbacks + `Change.trigger`** (decision 5).
+
+Recommend reviewing the explicit-fetch core first, then deciding the order of the
+ergonomic layer — materialize-on-access is the headline UX, blocking is what the
+MCP server wants.
+
 ## Decisions log (for review)
 
 Resolved with Scott, or gut-calls made during implementation (flagged ⚙️):
