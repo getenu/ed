@@ -524,14 +524,21 @@ The axes worth holding in mind, each with a now/later verdict:
 
 ## Roadmap (order matters)
 
-- **Phase 0 — Plumbing (now, low risk).** Rebase `fix/changes-return-detection`
-  onto main (currently ~16 behind). Land forwarding partial subscriber. Defer /
-  re-aim the schema work.
-- **Phase 1 — Keystone: global LSN + sequencer.** Host stamps monotonic LSNs;
-  ordered in-memory log; gap-detection + replay request; reconciliation (LWW
-  snap for values, op-replay for collections). Add per-object `mode`
-  (optimistic/confirmed) and `authority` (always = host for now). Delivers
-  eventual consistency + "snap to correct value."
+> **Status:** Phase 1 is **done** and validated in Enu (branch
+> `feat/lsn-leader-ordering`, PR #10). Phase 0's forwarding partial subscriber is
+> still parked; Phases 2+ are future. Per-object `mode` (optimistic/confirmed)
+> and gap/replay buffering ended up **deferred** rather than landing in Phase 1 —
+> the implemented reconciliation is state-based forward correction with the
+> `op_id`-superseded rule (see `reconciliation-design.md`), not LWW-snap +
+> op-replay.
+
+- **Phase 0 — Plumbing (now, low risk).** Rebase onto main. Land forwarding
+  partial subscriber (still parked). Defer / re-aim the schema work.
+- **Phase 1 — Keystone: global LSN + sequencer. *(done)*** Worker (leader) stamps
+  monotonic LSNs; ordered apply + dedup + frontier; return-to-source;
+  reconciliation (op_id-superseded for registers, delta-dedup for collections);
+  `authority` = host. Delivers eventual consistency + smooth optimistic writes.
+  *Deferred from this phase:* durable log, per-object `mode`, gap/replay buffer.
 - **Phase 2 — Durable log + snapshots.** Persist the ordered stream; snapshot
   for compaction; schema-versioned log format. Full-replica time-travel/replay
   falls out — prototype early as a debug/replay tool to validate the design.

@@ -100,19 +100,20 @@ multi-path meshes would additionally need the deferred reorder buffer.
 Collections keep the simpler rule below (own delta ops always skipped — no
 whole-value snap-back exists for element-level adds/removes).
 
-## Own-op handling (the load-bearing rule)
+## Collection own-op handling
 
-1. Originator applies optimistically (instant local feedback — unchanged from
-   today).
-2. Originator tags the op with a client-generated `op_id`, records it in a small
-   `pending` set, and sends it to the authority.
-3. Authority assigns the LSN and broadcasts the canonical op/value to everyone.
-4. On receiving an op whose `op_id` is in `pending`: **advance the frontier, drop
-   from `pending`, fire the ack (deferred, #10) — do NOT re-run the effect.** The
-   effect is already applied optimistically; the canonical truth either matches
-   (no-op) or a *later* higher-LSN op corrects it forward.
+Collections (`delta = true`) take the simpler path: an op we originated is
+**always skipped** when it echoes back — it was already applied optimistically,
+and a re-applied `seq.add` would duplicate. There's no whole-value snap-back to
+worry about (element-level adds/removes accumulate and resolve per element by
+LSN), so no op_id comparison is needed; other-origin collection ops apply
+normally. Implemented via the `delta` flag on the message; registers use the
+`op_id`-superseded rule above.
 
-This needs `op_id` on every op (the field exists) + a per-context `pending` set.
+*(Superseded note: an earlier draft proposed a `pending`-set rule that skipped
+**every** own op. That breaks register convergence — a writer whose own op is the
+canonical winner would never re-apply it — which is why the implemented rule
+distinguishes "stale own echo" from "our latest" via `op_id`.)*
 
 ## Ordering & frontier
 
@@ -141,9 +142,10 @@ This needs `op_id` on every op (the field exists) + a per-context `pending` set.
 
 ## Relationship to other work
 
-- Builds on increments 1–2 (LSN stamping, frontier, ordered `DESTROY`).
+- Builds on the LSN stamping, frontier, and ordered `DESTROY` work.
 - Reuses Enu's snapshot+delta voxel pattern for collection resync.
-- `op_id` ties into the deferred ack-callback (#10).
+- `op_id` now **drives** the register reconciliation rule (`latest_op_id` per
+  object) and will also feed the deferred ack-callback (#10) — same field.
 - Per-object frontier is the partial-sync-ready direction noted in the spike's
   LSN-granularity section.
 
@@ -154,13 +156,23 @@ This needs `op_id` on every op (the field exists) + a per-context `pending` set.
 - **delete-vs-update policy** (LSN-last-wins default vs versioned/CAS) — from the
   spike doc.
 
-## Implementation increments
+## Implementation status
 
-- **3a — own-op dedup + `pending` set.** `op_id` assignment, `pending` tracking,
-  the "don't re-run own op" rule. Makes registers correct under contention with no
-  rollback. (Enables return-to-source safely.)
-- **3b — collection delta-idempotent apply.** op-id effect-dedup for
-  seq/table/set — the voxel hot path.
-- **3c — forward correction + coalescing.** Authority sends canonical value/state
-  to losers; coalesced (flicker-free) delivery.
-- **3d — delete → restore flow.** Authority restores objects whose delete lost.
+**Done** (what actually shipped, in order):
+- LSN fields, authority designation + stamping, ordered `DESTROY`, idempotent
+  ordered apply (dedup + frontier).
+- **Return-to-source** — registers converge under contention.
+- **Collection** reconciliation — origin + `delta` own-op dedup (voxel hot path).
+- **Flicker-free coalescing** (within-tick).
+- **op_id-superseded register rule** — no snap-back; convergence preserved (this
+  superseded the earlier "skip-all-own" idea after the movement bug surfaced).
+- **Serialize-once fanout** — shared compressed body built once per fanout.
+- delete-vs-update convergence **verified** (restore not needed under
+  LSN-last-wins; the delete is sequenced and wins).
+
+**Deferred** (documented, not built):
+- OCC / versioned writes — eliminates the observer glitch on an in-flight write
+  vs an authoritative override.
+- Ack/commit callback (#10) — the `op_id` plumbing is now in place.
+- Snapshot-vs-delta resync threshold; stricter delete-vs-update policy + the
+  delete→restore flow above.
