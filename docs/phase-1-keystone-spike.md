@@ -259,6 +259,15 @@ return-to-source. Routing changes and reconciliation wait on the decision above.
 
 ## Proposed PR 1 — "LSN + appointed leader ordering (cross-thread)"
 
+> **Status:** this was the original scope; PR 1 (branch `feat/lsn-leader-ordering`)
+> grew to cover all of it **plus** collection reconciliation, the
+> `op_id`-superseded register rule, flicker-free coalescing, robustness, and the
+> serialize-once fanout. Two items below drifted from what shipped: the
+> `EdContext` ack field is `latest_op_id` (used for reconciliation, not a
+> `pending_ops` ack set), and item 4's "snaps to authority value" is really the
+> `op_id`-superseded rule. The ack-callback (item 5) and its test are **deferred**
+> (#10). See `reconciliation-design.md` for the implemented rules.
+
 Bounded, testable, minimal product-behavior change:
 
 1. Add `epoch`, `lsn`, `op_id` to `Message` + serializers (un-gate from
