@@ -176,6 +176,29 @@ proc flush_buffers*(self: EdContext) =
       for msg in buffer:
         sub.send_or_buffer(msg, true)
 
+proc remote_body(msg: Message, no_overwrite: bool): string =
+  ## The shared, compressed wire body for a remote message — identical across
+  ## subscribers (source / id_mappings travel per-subscriber, outside it), so a
+  ## fanout serializes + compresses it once.
+  var body_msg = msg
+  body_msg.source = @[]
+  body_msg.id_mappings = @[]
+  if no_overwrite:
+    body_msg.obj = ""
+  result = body_msg.to_flatty.compress
+
+proc send_remote(
+    self: EdContext, sub: Subscription, source: HashSet[string], body: string
+) =
+  ## One remote packet: a small per-subscriber header (source short-ids + any
+  ## new mappings) followed by the shared compressed body.
+  let (encoded_source, new_mappings) = sub.encode_source(source)
+  let packet = (encoded_source, new_mappings, body).to_flatty
+  self.bytes_sent += packet.len
+  self.reactor.send(sub.connection, packet)
+  sub.last_sent_time = epoch_time()
+  sent_message_counter.inc(label_values = [self.metrics_label])
+
 proc send*(
     self: EdContext,
     sub: Subscription,
@@ -184,7 +207,6 @@ proc send*(
     flags = DEFAULT_FLAGS,
 ) =
   log_defaults("ed networking")
-  sent_message_counter.inc(label_values = [self.metrics_label])
   when defined(ed_trace):
     if sub.ctx_id notin self.last_msg_id:
       self.last_msg_id[sub.ctx_id] = 1
@@ -207,15 +229,13 @@ proc send*(
     # Local: just use the HashSet, no encoding needed
     msg.source_set = source
     sub.send_or_buffer(msg, self.buffer)
+    sent_message_counter.inc(label_values = [self.metrics_label])
   elif sub.kind == LOCAL and SYNC_ALL_NO_OVERWRITE in flags:
     msg.source_set = source
     msg.obj = ""
     sub.send_or_buffer(msg, self.buffer)
+    sent_message_counter.inc(label_values = [self.metrics_label])
   elif sub.kind == REMOTE and SYNC_REMOTE in flags:
-    # Remote: encode source to short IDs
-    let (encoded_source, new_mappings) = sub.encode_source(source)
-    msg.source = encoded_source
-    msg.id_mappings = new_mappings
     when defined(zen_debug_messages):
       inc self.messages_sent
       inc self.messages_sent_by_kind[msg.kind]
@@ -230,31 +250,39 @@ proc send*(
         if msg.type_id notin self.obj_bytes_by_type:
           self.obj_bytes_by_type[msg.type_id] = 0
         self.obj_bytes_by_type[msg.type_id] += msg.obj.len
-    let serialized = msg.to_flatty
-    when defined(zen_debug_messages):
-      self.pre_compression_bytes += serialized.len
-    let data = serialized.compress
-    self.bytes_sent += data.len
-    self.reactor.send(sub.connection, data)
-    sub.last_sent_time = epoch_time()
+    self.send_remote(sub, source, remote_body(msg, no_overwrite = false))
   elif sub.kind == REMOTE and SYNC_ALL_NO_OVERWRITE in flags:
-    # Remote: encode source to short IDs
-    let (encoded_source, new_mappings) = sub.encode_source(source)
-    msg.source = encoded_source
-    msg.id_mappings = new_mappings
     when defined(zen_debug_messages):
       inc self.messages_sent
       inc self.messages_sent_by_kind[msg.kind]
-      # obj is empty for NoOverwrite, track 0 bytes
       inc self.messages_by_kind[msg.kind]
-    msg.obj = ""
-    let serialized = msg.to_flatty
-    when defined(zen_debug_messages):
-      self.pre_compression_bytes += serialized.len
-    let data = serialized.compress
-    self.bytes_sent += data.len
-    self.reactor.send(sub.connection, data)
-    sub.last_sent_time = epoch_time()
+    self.send_remote(sub, source, remote_body(msg, no_overwrite = true))
+
+proc fanout(
+    self: EdContext,
+    msg: sink Message,
+    op_ctx: OperationContext,
+    flags: set[EdFlags],
+    targets: seq[Subscription],
+) =
+  ## Send `msg` to many subscribers, serializing + compressing the shared remote
+  ## body only **once** across the fanout. Local subscribers get the struct (no
+  ## serialization). The caller pre-filters `targets` for source/skip rules.
+  var source = op_ctx.source
+  if source.len == 0:
+    source.incl self.id
+  var body, body_no_overwrite: string
+  for sub in targets:
+    if sub.kind == LOCAL:
+      self.send(sub, msg, op_ctx, flags)
+    elif sub.kind == REMOTE and SYNC_REMOTE in flags:
+      if body.len == 0:
+        body = remote_body(msg, no_overwrite = false)
+      self.send_remote(sub, source, body)
+    elif sub.kind == REMOTE and SYNC_ALL_NO_OVERWRITE in flags:
+      if body_no_overwrite.len == 0:
+        body_no_overwrite = remote_body(msg, no_overwrite = true)
+      self.send_remote(sub, source, body_no_overwrite)
 
 proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
   privileged
@@ -276,9 +304,8 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
     msg.trace = \"{get_stack_trace()}\n\nop:\n{op_ctx.trace}"
   self.ctx.stamp_lsn(msg)
 
-  for sub in self.ctx.subscribers:
-    if sub.ctx_id notin op_ctx.source:
-      self.ctx.send(sub, msg, op_ctx, self.flags)
+  let targets = self.ctx.subscribers.filter_it(it.ctx_id notin op_ctx.source)
+  self.ctx.fanout(msg, op_ctx, self.flags, targets)
 
   self.ctx.tick_reactor
 
@@ -377,14 +404,13 @@ proc publish_changes*[T, O](
         # converge. LSN dedup in process_message keeps this idempotent and
         # loop-free (receivers won't echo back to us: we're in their source).
         let canon_ctx = OperationContext.init(source = [self.ctx.id].toHashSet)
-        for sub in self.ctx.subscribers:
-          for msg in msgs:
-            self.ctx.send(sub, msg, canon_ctx, self.flags)
+        for msg in msgs:
+          self.ctx.fanout(msg, canon_ctx, self.flags, self.ctx.subscribers)
       else:
-        for sub in self.ctx.subscribers:
-          if sub.ctx_id notin op_ctx.source:
-            for msg in msgs:
-              self.ctx.send(sub, msg, op_ctx, self.flags)
+        let targets =
+          self.ctx.subscribers.filter_it(it.ctx_id notin op_ctx.source)
+        for msg in msgs:
+          self.ctx.fanout(msg, op_ctx, self.flags, targets)
 
     self.ctx.tick_reactor
 
@@ -813,7 +839,13 @@ proc tick*(
         # logic bugs in process_message.
         var msg: Message
         try:
-          msg = raw_msg.data.uncompress.from_flatty(Message, self)
+          # Wire format: a small per-subscriber header (source short-ids + new
+          # mappings) followed by the shared, compressed body (see send_remote).
+          let (enc_source, mappings, body) =
+            raw_msg.data.from_flatty((seq[uint8], seq[IdMapping], string))
+          msg = body.uncompress.from_flatty(Message, self)
+          msg.source = enc_source
+          msg.id_mappings = mappings
         except CatchableError, Defect:
           warn "dropping unparseable remote message",
             bytes = raw_msg.data.len, peer = $raw_msg.conn.address
