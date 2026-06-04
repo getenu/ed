@@ -702,6 +702,11 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         ),
       )
       # :(
+    # The creator is interested in its own object: make sure its canonical ops
+    # flow back. Matters for partial subscribers; a no-op for full ones.
+    for s in self.subscribers:
+      if s.ctx_id in source:
+        s.interest.incl msg.object_id
   elif msg.kind == REQUEST:
     # A partial subscriber wants this object. Add it to that subscriber's
     # interest (so future ops follow) and send it now via publish_create. The

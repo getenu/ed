@@ -53,6 +53,41 @@ proc run*() =
       client.tick()
       check EdValue[int](client["f_y"]).value == 20
 
+    test "objects created after subscribe respect partial interest":
+      var authority = EdContext.init(id = "pc_auth", is_authority = true)
+      var client = EdContext.init(id = "pc_client")
+      client.subscribe(authority, partial = true, roots = @["pc_root"])
+      client.tick()
+
+      # Created after the subscribe — the broadcast CREATE must still be filtered.
+      var root = EdValue[int].init(ctx = authority, id = "pc_root")
+      var other = EdValue[int].init(ctx = authority, id = "pc_other")
+      client.tick()
+      check "pc_root" in client # in interest
+      check "pc_other" notin client # filtered
+
+    test "a partial client's own object syncs back from the authority":
+      var authority = EdContext.init(id = "po_auth", is_authority = true)
+      var client = EdContext.init(id = "po_client")
+      client.subscribe(authority, partial = true, roots = @[])
+      client.tick()
+
+      # Client creates its own object; the authority should pick it up and
+      # return its canonical ops (auto-interest on create-from-subscriber).
+      var mine = EdValue[int].init(ctx = client, id = "po_mine")
+      mine.value = 5
+      authority.tick()
+      client.tick()
+      check "po_mine" in authority
+      check EdValue[int](authority["po_mine"]).value == 5
+
+      # Return-to-source works for the partial client's own object.
+      EdValue[int](client["po_mine"]).value = 7
+      authority.tick()
+      client.tick()
+      check EdValue[int](authority["po_mine"]).value == 7
+      check EdValue[int](client["po_mine"]).value == 7
+
     test "non-partial subscriber still gets everything (default unchanged)":
       var authority = EdContext.init(id = "p_authority2", is_authority = true)
       var client = EdContext.init(id = "p_client2")
