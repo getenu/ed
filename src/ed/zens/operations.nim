@@ -285,6 +285,7 @@ proc destroy*[T, O](self: Ed[T, O], publish = true) =
   self.destroyed = true
   self.ctx.objects[self.id] = nil
   self.ctx.objects_need_packing = true
+  self.ctx.latest_op_id.del(self.id)  # drop own-op reconciliation state
 
   if publish:
     self.publish_destroy OperationContext(source: [self.ctx.id].toHashSet)

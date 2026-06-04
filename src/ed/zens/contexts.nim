@@ -206,6 +206,7 @@ proc clear*(self: EdContext) =
   ## Remove all objects from this context.
   debug "Clearing EdContext"
   self.objects.clear
+  self.latest_op_id.clear
   self.objects_need_packing = false
 
 proc close*(self: EdContext) =
