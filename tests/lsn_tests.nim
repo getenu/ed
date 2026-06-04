@@ -114,6 +114,33 @@ proc run*() =
       check EdValue[int](fb["lsn_obj_h"]).value == 20
       check 10 notin seen
 
+    test "a non-leader's writes don't snap back to their own stale echoes":
+      # The movement case: a writer keeps updating a register; an earlier write
+      # echoes back from the authority after the writer has moved on. The stale
+      # echo must NOT snap the value backward (op_id-superseded rule).
+      var leader = EdContext.init(id = "lsn_leader_j", is_authority = true)
+      var follower = EdContext.init(id = "lsn_follower_j")
+      follower.subscribe(leader)
+
+      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_j")
+      follower.tick()
+      check "lsn_obj_j" in follower
+
+      # Write 1; let the authority order it (the echo is now queued for us)...
+      EdValue[int](follower["lsn_obj_j"]).value = 1
+      leader.tick()
+      # ...but before applying that echo we move on to 2.
+      EdValue[int](follower["lsn_obj_j"]).value = 2
+      follower.tick()
+      # The stale echo of 1 must not drag us back.
+      check EdValue[int](follower["lsn_obj_j"]).value == 2
+
+      # And we still converge: the latest write is the canonical value.
+      leader.tick()
+      follower.tick()
+      check EdValue[int](follower["lsn_obj_j"]).value == 2
+      check EdValue[int](leader["lsn_obj_j"]).value == 2
+
     test "a follower's collection op is not double-applied":
       var leader = EdContext.init(id = "lsn_leader_f", is_authority = true)
       var follower = EdContext.init(id = "lsn_follower_f")

@@ -270,6 +270,8 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
       op_ctx.origin
     else:
       self.ctx.id
+  msg.op_id =
+    if op_ctx.op_id != 0: op_ctx.op_id else: self.ctx.next_op_id
   when defined(ed_trace):
     msg.trace = \"{get_stack_trace()}\n\nop:\n{op_ctx.trace}"
   self.ctx.stamp_lsn(msg)
@@ -352,10 +354,20 @@ proc publish_changes*[T, O](
         else:
           self.ctx.id
 
+      # op id identifies the originating write. Forwards preserve the incoming
+      # one; an original mutation allocates a fresh id and records it as our
+      # latest for this object (used to skip our own superseded echoes).
+      let originating = op_ctx.op_id == 0
+      let out_op_id =
+        if originating: self.ctx.next_op_id else: op_ctx.op_id
+
       # Authority stamps each ordered op with its global LSN, once, before
       # fanout so every subscriber receives the same LSN.
       for msg in msgs.mitems:
         msg.origin = out_origin
+        msg.op_id = out_op_id
+        if originating:
+          self.ctx.latest_op_id[msg.object_id] = out_op_id
         self.ctx.stamp_lsn(msg)
 
       if self.ctx.is_authority:
@@ -574,15 +586,23 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       lsn = msg.lsn, frontier = self.applied_lsn
     return
 
-  # Own-op dedup: a delta (collection) op we originated has already been applied
-  # optimistically. When it returns canonically, advance the frontier (and ack,
-  # deferred #10) but don't re-run the effect — re-applying a seq.add would
-  # double it. Registers (delta = false) are re-applied by LSN so a losing
-  # optimistic write still converges to the canonical value.
-  if msg.delta and msg.origin == self.id:
-    if msg.lsn > self.applied_lsn:
-      self.applied_lsn = msg.lsn
-    return
+  # Own-op reconciliation: an op we originated, echoed back canonically.
+  #  - Collections (delta): already applied optimistically — skip to avoid
+  #    double-applying (a seq.add would duplicate).
+  #  - Registers: skip only if a *later* write of ours supersedes this echo
+  #    (op_id < our latest for this object) — that's what stops a moving entity
+  #    snapping back to its own stale echoes. Our *latest* own write (op_id ==
+  #    latest) is applied, so a contended register still converges to the
+  #    canonical value. (The op_id-superseded rule; see reconciliation-design.md.)
+  if msg.origin == self.id:
+    let superseded =
+      msg.delta or
+      msg.op_id < self.latest_op_id.getOrDefault(msg.object_id, 0'i64)
+    if superseded:
+      if msg.lsn > self.applied_lsn:
+        self.applied_lsn = msg.lsn
+      return
+    # else: our latest own write — fall through and apply it.
 
   if msg.kind == PACKED:
     let ops = msg.obj.from_flatty(seq[PackedMessageOperation])
@@ -621,7 +641,9 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         self,
         msg.object_id,
         msg.flags,
-        OperationContext.init(source = source, ctx = self, origin = msg.origin),
+        OperationContext.init(
+          source = source, ctx = self, origin = msg.origin, op_id = msg.op_id
+        ),
       )
       # :(
   elif msg.kind != BLANK:
@@ -633,7 +655,9 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     obj.change_receiver(
       obj,
       msg,
-      op_ctx = OperationContext.init(source = source, ctx = self, origin = msg.origin),
+      op_ctx = OperationContext.init(
+        source = source, ctx = self, origin = msg.origin, op_id = msg.op_id
+      ),
     )
     if msg.lsn > self.applied_lsn:
       self.applied_lsn = msg.lsn
