@@ -796,6 +796,30 @@ proc track*[T, O](
 proc untrack_on_destroy*(self: ref EdBase, zid: EID) =
   self.bound_eids.add(zid)
 
+proc parse_remote(
+    self: EdContext, raw_msg: netty.Message
+): tuple[ok: bool, msg: Message] {.gcsafe.} =
+  ## Decode one raw remote packet into a Message (source short-ids + mappings
+  ## attached, body uncompressed). ok = false for keepalive pings and unparseable
+  ## bytes — a version-skewed peer or stray packet on the same port is dropped,
+  ## not fatal. Shared by `tick` and the silent materialize pump so the wire
+  ## decode lives in exactly one place.
+  if raw_msg.data == "PING":
+    return (false, Message())
+  try:
+    # Wire format: a small per-subscriber header (source short-ids + new
+    # mappings) followed by the shared, compressed body (see send_remote).
+    let (enc_source, mappings, body) =
+      raw_msg.data.from_flatty((seq[uint8], seq[IdMapping], string))
+    var msg = body.uncompress.from_flatty(Message, self)
+    msg.source = enc_source
+    msg.id_mappings = mappings
+    return (true, msg)
+  except CatchableError, Defect:
+    warn "dropping unparseable remote message",
+      bytes = raw_msg.data.len, peer = $raw_msg.conn.address
+    return (false, Message())
+
 proc tick*(
     self: EdContext,
     messages = int.high,
@@ -904,27 +928,10 @@ proc tick*(
 
       for raw_msg in messages:
         inc count
-        # Handle keepalive pings - just ignore them (receiving updates lastActiveTime in netty)
-        if raw_msg.data == "PING":
+        let parsed = self.parse_remote(raw_msg)
+        if not parsed.ok: # keepalive ping or unparseable — already handled
           continue
-        # Parse boundary for untrusted bytes: a version-skewed peer or stray
-        # packet (e.g. another process on the same port) can't be parsed with
-        # our envelope. Drop it instead of crashing — don't let one bad packet
-        # take down the process. Scoped to (de)serialization so it doesn't mask
-        # logic bugs in process_message.
-        var msg: Message
-        try:
-          # Wire format: a small per-subscriber header (source short-ids + new
-          # mappings) followed by the shared, compressed body (see send_remote).
-          let (enc_source, mappings, body) =
-            raw_msg.data.from_flatty((seq[uint8], seq[IdMapping], string))
-          msg = body.uncompress.from_flatty(Message, self)
-          msg.source = enc_source
-          msg.id_mappings = mappings
-        except CatchableError, Defect:
-          warn "dropping unparseable remote message",
-            bytes = raw_msg.data.len, peer = $raw_msg.conn.address
-          continue
+        var msg = parsed.msg
         when defined(zen_debug_messages):
           inc self.messages_received
           self.obj_bytes_received += msg.obj.len
@@ -1026,11 +1033,8 @@ proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
   ## callback are deferred to the next explicit `tick`, so nothing
   ## application-visible happens mid-read (clean reentrancy). Bounded by a deadline
   ## so a gone authority can't hang the caller; it then falls back to the empty
-  ## placeholder, same as the non-blocking path.
-  ##
-  ## The silent pump currently drains the **local** (cross-thread) transport;
-  ## remote (network) silent materialize is a follow-up (the deferral machinery is
-  ## transport-agnostic — only the receive step needs the remote parse).
+  ## placeholder, same as the non-blocking path. Drains both the local
+  ## (cross-thread) and remote (network) transports.
   privileged
   if id notin self or not self.objects[id].placeholder:
     return
@@ -1038,16 +1042,40 @@ proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
   if not self.blocking:
     return
 
+  template triage(candidate: Message) =
+    # Apply only the target object's CREATE (silently — its callback is
+    # deferred); buffer everything else for the next tick. SUBSCRIBE can't be
+    # replayed sub-less, but a blocking *client* shouldn't receive one.
+    if candidate.object_id == id and candidate.kind == CREATE:
+      self.process_message(candidate)
+    elif candidate.kind != SUBSCRIBE:
+      self.pending_msgs.add candidate
+
   let deadline = get_mono_time() + init_duration(seconds = 5)
   self.silent = true
   while id in self and self.objects[id].placeholder and
       get_mono_time() < deadline:
+    # Local transport.
     var m: Message
     while self.chan.try_recv(m):
-      if m.object_id == id and m.kind == CREATE:
-        self.process_message(m) # applies the value; its Fill callback is deferred
-      else:
-        self.pending_msgs.add m # everything else waits for the next tick
+      triage(m)
+    # Remote transport — reuse the same wire decode as tick, then resolve the
+    # source eagerly so a deferred message processes correctly sub-less later.
+    if ?self.reactor:
+      self.tick_reactor
+      let raws = self.remote_messages
+      self.remote_messages = @[]
+      for raw_msg in raws:
+        let parsed = self.parse_remote(raw_msg)
+        if not parsed.ok:
+          continue
+        var rmsg = parsed.msg
+        for s in self.subscribers:
+          if s.kind == REMOTE and s.connection == raw_msg.conn:
+            s.register_mappings(rmsg.id_mappings)
+            rmsg.source_set = s.decode_source(rmsg.source)
+            break
+        triage(rmsg)
   self.silent = false
 
 proc find_bare_return(n: NimNode): NimNode =
