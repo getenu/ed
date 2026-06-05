@@ -91,7 +91,7 @@ proc run*() =
       client.tick()
       check not client["child"].loaded
 
-      var fill_reason = Normal
+      var fill_reason = Update
       EdValue[string](client["child"]).track proc(cs: seq[Change[string]]) =
         for c in cs:
           if MODIFIED in c.changes:
@@ -120,7 +120,7 @@ proc run*() =
       var other_fired = false
       EdValue[int](client["other"]).track proc(cs: seq[Change[int]]) =
         other_fired = true
-      var child_fill_reason = Normal
+      var child_fill_reason = Update
       EdValue[string](client["child"]).track proc(cs: seq[Change[string]]) =
         for c in cs:
           if MODIFIED in c.changes:

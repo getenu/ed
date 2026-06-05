@@ -34,7 +34,7 @@ type
   ChangeReason* = enum
     ## Why a change fired, orthogonal to `ChangeKind`. (Unrelated to
     ## `Change.triggered_by`, which is the upstream changes that caused this one.)
-    Normal    ## An ordinary mutation
+    Update    ## An ordinary live change — a mutation or touch
     Initial   ## Replay of existing contents at `track` time (reserved)
     Fill      ## A placeholder materialized (partial-replica fetch landed)
 
