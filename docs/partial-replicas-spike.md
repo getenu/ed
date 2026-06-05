@@ -69,24 +69,51 @@ unknown-type schema part is unneeded, since `O` gives the type.)
 So a context can now subscribe to a subset, receive only that subset's ops, and
 **explicitly** pull more on demand with `fetch` — the core of partial replicas.
 
-**Logged for tomorrow** (not yet built — the ergonomic layer, and the riskier
-bits I didn't want to rush solo):
+**Done & tested (later session) — capability handshake + materialize-on-access:**
 
-- **Transparent materialize-on-access.** Today fetch is *explicit*. The "nested
-  objects don't exist until accessed via the seq" experience needs: a **typed
-  lazy handle** for a non-resident nested `Ed` (turn the `assert object_id in
-  self.ctx` at `initializers.nim` `when O is Ed:` into a placeholder), plus
-  container access (`[]`/`items`) auto-firing a `fetch`. The blocker is a
-  **non-broadcasting placeholder constructor** for an arbitrary `Ed[T,O]` — the
-  current `init`/`defaults` always `publish_create`s. (The parked `EdDynamic`
-  work is the untyped version of this primitive.)
-- **`tick` receive/process split + `blocking:` scope** (decisions 3–4). I kept
-  `tick` untouched this session; the split + silent-materialize is the next piece.
-- **Initial / Fill callbacks + `Change.trigger`** (decision 5).
+- **TID capability handshake** (`Subscription.capabilities: HashSet[int]`). On
+  subscribe a peer advertises its registered `type_initializers` tids; the
+  authority filters every send (`publish_create` send_msg + `fanout`) so a peer
+  **never receives an object it can't construct**. type_id == 0 (DESTROY/control)
+  is exempt. Empty set = unfiltered (same-build/local/older peer). See
+  `ref-registration.md` for the crash this prevents. (`capability_tests.nim`)
+- **Placeholder primitive.** `EdBase.placeholder` + `loaded` predicate (option-1
+  model: empty stand-in, queryable loaded-bit). `Ed.init_placeholder` — a
+  non-broadcasting typed constructor (`defaults(..., broadcast = false)`). The two
+  `assert object_id in self.ctx` deserialize sites (`when O is Ed` / `Pair[auto,
+  Ed]`) now create a placeholder instead of asserting. Fill clears the bit in all
+  restore paths. `fetch` no longer early-returns on an unloaded placeholder.
+- **Materialize-on-access.** `EdContext.materialize` proc field, wired at subscribe
+  time (it needs `fetch`/`tick`); the read accessors (`value`/`items`/`pairs`/`[]`)
+  call it via `touch_placeholder`. Non-blocking: kicks a `fetch`, returns empty
+  now, fills on a later tick. Blocking: `EdContext.blocking` flag + `blocking:`
+  template (manages the flag; settable by hand) — the accessor pumps `tick` until
+  the object fills, **bounded by a 5s deadline** so a gone authority can't hang the
+  caller. (`materialize_tests.nim`)
 
-Recommend reviewing the explicit-fetch core first, then deciding the order of the
-ergonomic layer — materialize-on-access is the headline UX, blocking is what the
-MCP server wants.
+**Done & tested — silent materialize + change tagging:**
+
+- **`Change.reason: ChangeReason` (Normal | Initial | Fill)** (decision 5, renamed
+  from `trigger` to avoid confusion with `triggered_by`). A placeholder fill is
+  tagged `Fill` via a `ctx.filling` flag read in `trigger_callbacks`. `Initial`
+  reserved (track-time replay not built).
+- **Silent materialize** (decision 4). A `blocking:` read now applies **only the
+  fetched object**, silently: `ctx.silent` makes `trigger_callbacks` defer its
+  callbacks to `ctx.pending_fills`, and the pump buffers every non-target message
+  to `ctx.pending_msgs`. Both are replayed at the start of the next explicit
+  `tick`, so nothing application-visible happens mid-read (clean reentrancy, and a
+  deterministic single-threaded test). (`materialize_tests.nim`)
+
+**Still open:**
+
+- **Remote silent pump.** The silent pump drains the **local** (cross-thread)
+  transport; the deferral machinery (`pending_msgs`/`pending_fills`/`silent`) is
+  transport-agnostic, but the network receive (reactor parse + per-sub source
+  decode) isn't wired into it yet. enu_mcp's poll loop uses the (working)
+  non-blocking path, so this is the blocking-scope-over-network gap.
+- **`tick` receive/process split** (decision 3) — `tick` itself is untouched; the
+  silent pump sits beside it rather than being a true split.
+- **`Initial` reason** — track-time replay of current contents.
 
 ## Decisions log (for review)
 
