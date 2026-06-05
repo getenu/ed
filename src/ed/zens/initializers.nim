@@ -34,7 +34,10 @@ proc create_initializer[T, O](self: Ed[T, O]) =
             debug "restoring received object", id
             var value = bin.from_flatty(T, ctx)
             let item = Ed[T, O](ctx[id])
+            ctx.filling = item.placeholder # fill of a placeholder → tag Fill
+            item.placeholder = false # fill: real state arrived
             `value=`(item, value, op_ctx = op_ctx)
+            ctx.filling = false
           else:
             if id notin ctx:
               discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
@@ -44,13 +47,24 @@ proc create_initializer[T, O](self: Ed[T, O]) =
               {.gcsafe.}:
                 let value = bin.from_flatty(T, ctx)
               let item = Ed[T, O](ctx[id])
+              ctx.filling = item.placeholder # fill of a placeholder → tag Fill
+              item.placeholder = false # fill: real state arrived
               `value=`(item, value, op_ctx = op_ctx)
+              ctx.filling = false
             ctx.value_initializers.add(initializer)
         elif id notin ctx:
           discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
+        else:
+          # Empty-body CREATE for an object we were holding as a placeholder:
+          # it exists for real now, just with no value yet.
+          Ed[T, O](ctx[id]).placeholder = false
 
 proc defaults[T, O](
-    self: Ed[T, O], ctx: EdContext, id: string, op_ctx: OperationContext
+    self: Ed[T, O],
+    ctx: EdContext,
+    id: string,
+    op_ctx: OperationContext,
+    broadcast = true,
 ): Ed[T, O] =
   privileged
   log_defaults
@@ -90,21 +104,24 @@ proc defaults[T, O](
     template send_msg(src_ctx, sub) =
       const ed_type_id = self.type.tid
 
-      var msg = Message(
-        kind: CREATE,
-        obj: bin,
-        flags: flags,
-        type_id: ed_type_id,
-        object_id: id,
-        # source is set by send() based on subscription type
-      )
+      # Capability filter: don't send an object to a peer that can't materialize
+      # its type. Empty `capabilities` = unfiltered (same-build / no handshake).
+      if sub.capabilities.len == 0 or ed_type_id in sub.capabilities:
+        var msg = Message(
+          kind: CREATE,
+          obj: bin,
+          flags: flags,
+          type_id: ed_type_id,
+          object_id: id,
+          # source is set by send() based on subscription type
+        )
 
-      when defined(ed_trace):
-        msg.trace = get_stack_trace()
+        when defined(ed_trace):
+          msg.trace = get_stack_trace()
 
-      src_ctx.send(
-        sub, msg, op_ctx, flags = self.flags & {SYNC_ALL_NO_OVERWRITE}
-      )
+        src_ctx.send(
+          sub, msg, op_ctx, flags = self.flags & {SYNC_ALL_NO_OVERWRITE}
+        )
 
     if sub.kind != BLANK:
       ctx.send_msg(sub)
@@ -175,7 +192,11 @@ proc defaults[T, O](
 
     when O is Ed:
       let object_id = msg.change_object_id
-      assert object_id in self.ctx
+      if object_id notin self.ctx:
+        # Nested object not materialized yet — stand in with a non-broadcasting
+        # placeholder so the container op applies and cardinality is correct.
+        # Reading the placeholder later triggers a fetch (materialize-on-access).
+        discard O.init_placeholder(self.ctx, object_id)
       let item = O(self.ctx.objects[object_id])
     elif O is Pair[auto, Ed]:
       # Workaround for compile issue. This should be `O`, not `O.default.type`.
@@ -189,9 +210,12 @@ proc defaults[T, O](
         debug "skipping change for missing object", object_id = msg.object_id
         return
 
-      if msg.change_object_id notin self.ctx and msg.kind == UNASSIGN:
-        debug "can't find ", obj = msg.change_object_id
-        return
+      if msg.change_object_id notin self.ctx:
+        if msg.kind == UNASSIGN:
+          debug "can't find ", obj = msg.change_object_id
+          return
+        # Value object not materialized yet — placeholder it (see above).
+        discard V.init_placeholder(self.ctx, msg.change_object_id)
       let value = V(self.ctx.objects[msg.change_object_id])
       {.gcsafe.}:
         let item = O(key: msg.obj.from_flatty(K, self.ctx), value: value)
@@ -233,8 +257,20 @@ proc defaults[T, O](
   assert self.ctx == nil
   self.ctx = ctx
 
-  self.publish_create(broadcast = true, op_ctx = op_ctx)
+  if broadcast:
+    self.publish_create(broadcast = true, op_ctx = op_ctx)
   self
+
+proc init_placeholder*[T, O](
+    _: typedesc[Ed[T, O]], ctx: EdContext, id: string
+): Ed[T, O] =
+  ## A non-broadcasting stand-in for a not-yet-materialized object. Registered in
+  ## `ctx.objects` under `id` and marked `placeholder`; no CREATE goes out.
+  ## Reading it triggers a fetch; the real state fills it in later.
+  # `op_ctx` is only consulted by defaults' broadcast, which we skip.
+  result = Ed[T, O](flags: DEFAULT_FLAGS, placeholder: true).defaults(
+    ctx, id, OperationContext(), broadcast = false
+  )
 
 proc init*(
     T: type Ed,

@@ -275,6 +275,12 @@ proc fanout(
   for sub in targets:
     if sub.partial and msg.object_id notin sub.interest:
       continue  # partial subscriber: only ops for objects it's interested in
+    if sub.capabilities.len > 0 and msg.type_id != 0 and
+        msg.type_id notin sub.capabilities:
+      # Peer can't materialize this type — never send its ops. type_id == 0
+      # (DESTROY / control) isn't type-gated; it's a no-op on a peer that never
+      # got the CREATE, and must reach a peer that did.
+      continue
     if sub.kind == LOCAL:
       self.send(sub, msg, op_ctx, flags)
     elif sub.kind == REMOTE and SYNC_REMOTE in flags:
@@ -447,6 +453,10 @@ proc unsubscribe*(self: EdContext, sub: Subscription) =
   self.subscribers.delete self.subscribers.find(sub)
   self.unsubscribed.add sub.ctx_id
 
+# Defined after `tick` (which it pumps); forward-declared so `subscribe` can wire
+# it onto each subscribing context.
+proc materialize_impl(self: EdContext, id: string) {.gcsafe.}
+
 proc process_value_initializers(self: EdContext) =
   debug "running deferred initializers", ctx = self.id
   for initializer in self.value_initializers:
@@ -465,6 +475,7 @@ proc subscribe*(
   ## authority→us direction is filtered; our own writes still flow to it.
   privileged
   debug "local subscribe", ctx = self.id
+  self.materialize = materialize_impl # enable materialize-on-access
   self.pack_objects
   var remote_objects: HashSet[string]
   for id in self.objects.keys:
@@ -493,8 +504,9 @@ proc subscribe*(
 proc fetch*(self: EdContext, object_id: string) =
   ## Ask the authority for `object_id`. It's materialized on a later tick
   ## (placeholder-then-fill); the authority adds it to our interest so future
-  ## ops follow. No-op if we already hold it.
-  if object_id in self:
+  ## ops follow. No-op if we already hold it *loaded* — a placeholder (held but
+  ## not materialized) still needs fetching.
+  if object_id in self and not self.objects[object_id].placeholder:
     return
   var msg = Message(kind: REQUEST, object_id: object_id)
   for sub in self.subscribers:
@@ -512,6 +524,7 @@ proc subscribe*(
   var port = 9632
 
   debug "remote subscribe", address
+  self.materialize = materialize_impl # enable materialize-on-access
   if not ?self.reactor:
     self.reactor = new_reactor()
   self.subscribing = true
@@ -525,6 +538,9 @@ proc subscribe*(
     port = parts[1].parse_int
 
   let connection = self.reactor.connect(address, port)
+  # Advertise the type-ids we can materialize so the authority never sends us an
+  # object we can't construct (capability handshake; see ref-registration.md).
+  let capabilities = toSeq(type_initializers.keys).to_flatty
   self.send(
     Subscription(
       kind: REMOTE,
@@ -532,7 +548,7 @@ proc subscribe*(
       connection: connection,
       last_sent_time: epoch_time(),
     ),
-    Message(kind: SUBSCRIBE),
+    Message(kind: SUBSCRIBE, obj: capabilities),
   )
 
   var ctx_id = ""
@@ -830,6 +846,21 @@ proc tick*(
       get_mono_time() + min_duration
 
   self.flush_buffers
+
+  # Replay whatever a silent (blocking) materialize deferred — at this tick
+  # boundary, before new traffic: first the messages it buffered (apply + fire
+  # their callbacks), then the Fill callbacks for the object it materialized.
+  if self.pending_msgs.len > 0:
+    let deferred = self.pending_msgs
+    self.pending_msgs = @[]
+    for m in deferred:
+      self.process_message(m)
+  if self.pending_fills.len > 0:
+    let fills = self.pending_fills
+    self.pending_fills = @[]
+    for f in fills:
+      f()
+
   while true:
     if poll:
       # Drain the available batch, then coalesce superseded register updates:
@@ -950,6 +981,14 @@ proc tick*(
             connection: raw_msg.conn,
             ctx_id: source_str,
             last_sent_time: epoch_time(),
+            # Capability handshake: the SUBSCRIBE carries the subscriber's
+            # materializable type-ids in `obj`. We filter all sends to it by
+            # this set. Empty (older peer) = unfiltered, full replica.
+            capabilities:
+              if msg.obj.len > 0:
+                msg.obj.from_flatty(seq[int]).to_hash_set
+              else:
+                init_hash_set[int](),
           )
           # Register all mappings from the subscribe message
           new_sub.register_mappings(msg.id_mappings)
@@ -978,6 +1017,38 @@ proc tick*(
     if poll == false or
         ((count > 0 or not blocking) and get_mono_time() > recv_until):
       break
+
+proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
+  ## Wired onto a context at subscribe time and called by the read accessors when
+  ## they touch a placeholder (see operations.touch_placeholder). Kicks a fetch;
+  ## when in a `blocking` scope, pumps I/O and **silently** materializes just this
+  ## object — every other received message and even this object's own Fill
+  ## callback are deferred to the next explicit `tick`, so nothing
+  ## application-visible happens mid-read (clean reentrancy). Bounded by a deadline
+  ## so a gone authority can't hang the caller; it then falls back to the empty
+  ## placeholder, same as the non-blocking path.
+  ##
+  ## The silent pump currently drains the **local** (cross-thread) transport;
+  ## remote (network) silent materialize is a follow-up (the deferral machinery is
+  ## transport-agnostic — only the receive step needs the remote parse).
+  privileged
+  if id notin self or not self.objects[id].placeholder:
+    return
+  self.fetch(id)
+  if not self.blocking:
+    return
+
+  let deadline = get_mono_time() + init_duration(seconds = 5)
+  self.silent = true
+  while id in self and self.objects[id].placeholder and
+      get_mono_time() < deadline:
+    var m: Message
+    while self.chan.try_recv(m):
+      if m.object_id == id and m.kind == CREATE:
+        self.process_message(m) # applies the value; its Fill callback is deferred
+      else:
+        self.pending_msgs.add m # everything else waits for the next tick
+  self.silent = false
 
 proc find_bare_return(n: NimNode): NimNode =
   if n.kind == nnkReturnStmt:

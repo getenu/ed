@@ -36,6 +36,17 @@ proc pack_objects*(self: EdContext) =
     self.objects = table
     self.objects_need_packing = false
 
+template blocking*(self: EdContext, body: untyped) =
+  ## Within this scope, a read that touches an unmaterialized placeholder blocks
+  ## (pumps I/O) until it fills, instead of returning empty and fetching async.
+  ## Just manages the `blocking` flag — you can set `self.blocking` directly too.
+  let prev = self.blocking
+  self.blocking = true
+  try:
+    body
+  finally:
+    self.blocking = prev
+
 proc contains*(self: EdContext, id: string): bool =
   id in self.objects and self.objects[id] != nil
 

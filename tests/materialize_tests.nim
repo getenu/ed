@@ -1,0 +1,140 @@
+import std/[unittest, sets]
+import ed
+import ed/zens/contexts
+
+proc run*() =
+  suite "materialize on access":
+    test "placeholder stands in for an out-of-interest nested object":
+      var authority = EdContext.init(id = "m_auth", is_authority = true)
+      var client = EdContext.init(id = "m_client")
+
+      # Parent collection of nested Ed values.
+      var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
+
+      # Client is interested only in the parent, not its children.
+      client.subscribe(authority, partial = true, roots = @["parent"])
+      client.tick()
+      check "parent" in client
+
+      # Author a child and add it to the parent. The child's CREATE is filtered
+      # (not in interest), but the parent's ADD op — which references the child —
+      # is delivered, so the client must stand in with a placeholder.
+      var child = EdValue[string].init(ctx = authority, id = "child")
+      child.value = "hi"
+      parent += child
+      client.tick()
+
+      check "child" in client # placeholder materialized into the object pool
+      check EdSeq[EdValue[string]](client["parent"]).len == 1 # cardinality correct
+      check not client["child"].loaded # exists, but not loaded
+      check EdValue[string](client["child"]).value == "" # empty until filled
+
+      # Explicit fetch materializes it (access-triggered fetch is the next slice).
+      client.fetch("child")
+      authority.tick() # authority answers the REQUEST
+      client.tick() # client fills the placeholder
+      check client["child"].loaded # fill cleared the bit
+      check EdValue[string](client["child"]).value == "hi"
+
+    test "reading a placeholder auto-triggers the fetch (no explicit fetch)":
+      var authority = EdContext.init(id = "ma_auth", is_authority = true)
+      var client = EdContext.init(id = "ma_client")
+      var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
+      client.subscribe(authority, partial = true, roots = @["parent"])
+      client.tick()
+
+      var child = EdValue[string].init(ctx = authority, id = "child")
+      child.value = "hi"
+      parent += child
+      client.tick()
+      check not client["child"].loaded
+
+      # Just *reading* the placeholder's value kicks the fetch (non-blocking:
+      # returns empty now). No client.fetch() call here.
+      check EdValue[string](client["child"]).value == ""
+      authority.tick() # authority answers the access-triggered REQUEST
+      client.tick() # fill arrives
+      check client["child"].loaded
+      check EdValue[string](client["child"]).value == "hi"
+
+    test "a fill fires a change tagged reason == Fill":
+      var authority = EdContext.init(id = "mf_auth", is_authority = true)
+      var client = EdContext.init(id = "mf_client")
+      var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
+      client.subscribe(authority, partial = true, roots = @["parent"])
+      client.tick()
+      var child = EdValue[string].init(ctx = authority, id = "child")
+      child.value = "hi"
+      parent += child
+      client.tick()
+      check not client["child"].loaded
+
+      var fill_reason = Normal
+      EdValue[string](client["child"]).track proc(cs: seq[Change[string]]) =
+        for c in cs:
+          if MODIFIED in c.changes:
+            fill_reason = c.reason
+
+      client.fetch("child")
+      authority.tick()
+      client.tick() # fill applies here → callback fires, tagged Fill
+      check client["child"].loaded
+      check fill_reason == Fill
+
+    test "blocking materialize is silent: only the target fills, rest defers":
+      var authority = EdContext.init(id = "ms_auth", is_authority = true)
+      var client = EdContext.init(id = "ms_client")
+      var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
+      var other = EdValue[int].init(ctx = authority, id = "other")
+      client.subscribe(authority, partial = true, roots = @["parent", "other"])
+      client.tick()
+
+      var child = EdValue[string].init(ctx = authority, id = "child")
+      child.value = "hi"
+      parent += child
+      client.tick() # placeholder for child
+      check not client["child"].loaded
+
+      var other_fired = false
+      EdValue[int](client["other"]).track proc(cs: seq[Change[int]]) =
+        other_fired = true
+      var child_fill_reason = Normal
+      EdValue[string](client["child"]).track proc(cs: seq[Change[string]]) =
+        for c in cs:
+          if MODIFIED in c.changes:
+            child_fill_reason = c.reason
+
+      # Queue two messages into the client's channel WITHOUT processing them:
+      # an unrelated change to `other`, and (via fetch) the child's CREATE.
+      other.value = 99
+      client.fetch("child")
+      authority.tick() # authority queues child's CREATE onto the client's chan
+
+      # Blocking read materializes ONLY child; everything else is deferred.
+      var got = "before"
+      client.blocking:
+        got = EdValue[string](client["child"]).value
+
+      check got == "hi" # blocking read returned the real value
+      check client["child"].loaded
+      check not other_fired # unrelated message was deferred, not applied
+      check EdValue[int](client["other"]).value == 0 # ...and its value untouched
+      check not (child_fill_reason == Fill) # even the Fill callback deferred
+
+      # The next explicit tick replays everything at the tick boundary.
+      client.tick()
+      check other_fired
+      check EdValue[int](client["other"]).value == 99
+      check child_fill_reason == Fill
+
+    test "blocking scope toggles the flag and restores it":
+      var ctx = EdContext.init(id = "mb_ctx")
+      check not ctx.blocking
+      ctx.blocking:
+        check ctx.blocking # set inside the scope
+      check not ctx.blocking # restored after
+      # Nested / manual management still composes.
+      ctx.blocking = true
+      ctx.blocking:
+        check ctx.blocking
+      check ctx.blocking # restored to the manual value, not forced off

@@ -58,20 +58,36 @@ proc `value=`*[T, O](self: Ed[T, O], value: T, op_ctx = OperationContext()) =
     mutate(op_ctx):
       self.tracked = value
 
+proc loaded*(self: ref EdBase): bool =
+  ## False while this object is an unmaterialized placeholder (a partial replica
+  ## holds the reference but not the contents yet). Lets a caller distinguish
+  ## "exists but not loaded" from "exists and is genuinely empty".
+  not self.placeholder
+
+template touch_placeholder(self: untyped) =
+  ## Materialize-on-access: if `self` is an unmaterialized placeholder, ask its
+  ## context to materialize it (kick a fetch; block until filled when
+  ## `ctx.blocking`). No-op for a loaded object or a context without the hook.
+  if self.placeholder and self.ctx.materialize != nil:
+    self.ctx.materialize(self.ctx, self.id)
+
 proc value*[T, O](self: Ed[T, O]): T =
   ## Get the container's current value.
   privileged
   assert self.valid
+  self.touch_placeholder
   self.tracked
 
 proc `[]`*[K, V](self: Ed[Table[K, V], Pair[K, V]], index: K): V =
   privileged
   assert self.valid
+  self.touch_placeholder
   self.tracked[index]
 
 proc `[]`*[T](self: EdSeq[T], index: SomeOrdinal | BackwardsIndex): T =
   privileged
   assert self.valid
+  self.touch_placeholder
   self.tracked[index]
 
 proc `[]=`*[K, V](
@@ -293,17 +309,20 @@ proc destroy*[T, O](self: Ed[T, O], publish = true) =
 iterator items*[T](self: EdSet[T] | EdSeq[T]): T =
   privileged
   assert self.valid
+  self.touch_placeholder
   for item in self.tracked.items:
     yield item
 
 iterator items*[K, V](self: EdTable[K, V]): Pair[K, V] =
   privileged
   assert self.valid
+  self.touch_placeholder
   for key, value in self.tracked.pairs:
     yield Pair[K, V](key: key, value: value)
 
 iterator pairs*[K, V](self: EdTable[K, V]): (K, V) =
   privileged
   assert self.valid
+  self.touch_placeholder
   for pair in self.tracked.pairs:
     yield pair

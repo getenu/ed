@@ -13,15 +13,33 @@ proc `-`*[T](a, b: seq[T]): seq[T] =
 template `&`*[T](a, b: set[T]): set[T] =
   a + b
 
-proc trigger_callbacks*[T, O](self: Ed[T, O], changes: seq[Change[O]]) =
+proc trigger_callbacks*[T, O](self: Ed[T, O], changes: seq[Change[O]]) {.gcsafe.} =
   private_access EdObject[T, O]
   private_access EdBase
 
-  if changes.len > 0:
-    let callbacks = self.changed_callbacks.dup
-    for zid, callback in callbacks.pairs:
-      if zid in self.changed_callbacks and zid notin self.paused_eids:
-        callback(changes)
+  if changes.len == 0:
+    return
+
+  # Tag changes produced while filling a placeholder so callbacks can tell a
+  # materialize-on-access fill from an ordinary mutation.
+  if self.ctx != nil and self.ctx.filling:
+    for c in changes:
+      c.reason = Fill
+
+  # Silent (blocking) materialize: nothing application-visible fires mid-fetch —
+  # defer the callbacks to the next explicit tick (preserves tick-boundary
+  # semantics and clean reentrancy). The value is already applied, so the
+  # blocking read still returns real data.
+  if self.ctx != nil and self.ctx.silent:
+    let deferred = changes
+    self.ctx.pending_fills.add proc() {.gcsafe.} =
+      self.trigger_callbacks(deferred)
+    return
+
+  let callbacks = self.changed_callbacks.dup
+  for zid, callback in callbacks.pairs:
+    if zid in self.changed_callbacks and zid notin self.paused_eids:
+      callback(changes)
 
 proc link_child*[K, V](
     self: EdTable[K, V], child, obj: Pair[K, V], field_name = ""
