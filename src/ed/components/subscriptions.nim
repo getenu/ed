@@ -182,6 +182,17 @@ proc flush_buffers*(self: EdContext) =
       for msg in buffer:
         sub.send_or_buffer(msg, true)
 
+template ed_compress(s: string): string =
+  ## Pass-through under `-d:ed_no_compress` — supersnappy's snappy fast-path
+  ## over-reads within an allocation, which trips AddressSanitizer (it's a benign
+  ## third-party over-read, not our bug). The sanitizer build defines the flag so
+  ## ASan can focus on Ed's own memory behaviour; in-process sync uses one build,
+  ## so both sides agree on the (un)compressed wire format.
+  when defined(ed_no_compress): s else: s.compress
+
+template ed_uncompress(s: string): string =
+  when defined(ed_no_compress): s else: s.uncompress
+
 proc remote_body(msg: Message, no_overwrite: bool): string =
   ## The shared, compressed wire body for a remote message — identical across
   ## subscribers (source / id_mappings travel per-subscriber, outside it), so a
@@ -191,7 +202,7 @@ proc remote_body(msg: Message, no_overwrite: bool): string =
   body_msg.id_mappings = @[]
   if no_overwrite:
     body_msg.obj = ""
-  result = body_msg.to_flatty.compress
+  result = body_msg.to_flatty.ed_compress
 
 proc send_remote(
     self: EdContext, sub: Subscription, source: HashSet[string], body: string
@@ -866,7 +877,7 @@ proc parse_remote(
     # mappings) followed by the shared, compressed body (see send_remote).
     let (enc_source, mappings, body) =
       raw_msg.data.from_flatty((seq[uint8], seq[IdMapping], string))
-    var msg = body.uncompress.from_flatty(Message, self)
+    var msg = body.ed_uncompress.from_flatty(Message, self)
     msg.source = enc_source
     msg.id_mappings = mappings
     return (true, msg)

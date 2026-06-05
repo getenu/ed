@@ -58,6 +58,27 @@ Same risk class as #2, larger. Sketch for when we can validate at runtime:
   `lifetime` field (if present) and destroys the type's Ed fields — this is the
   logic that lets enu's `destroy_impl` shrink to a hook.
 
+## Sanitizer harness — `tests/asan.sh`  ✅ baseline clean
+
+AddressSanitizer is the validation gate for the cursor / ref_pool memory work
+(the failure mode is silent UAF, which functional green can't catch). Apple
+Silicon runs ASan natively — no VM. `tests/asan.sh` builds + runs the full suite
+with `-d:useMalloc` (ORC via malloc, so ASan sees the heap) and runs it.
+
+- **Baseline: clean** — 94 tests, 0 ASan errors on the current branch. So any new
+  UAF/overflow after a memory change is a real regression.
+- **supersnappy trips ASan** (heap-buffer-overflow in `nimCopyMem` from its snappy
+  fast-path over-read — benign third-party, not our bug; the `src:` ignorelist
+  didn't catch it because the access is inlined). Worked around with a guarded
+  pass-through: `ed_compress`/`ed_uncompress` are identity under
+  `-d:ed_no_compress`. Default builds still compress (94 green confirmed). The
+  sanitizer build sets the flag; in-process sync uses one build so the wire format
+  stays consistent.
+- **Leaks: not covered on macOS** (no LeakSanitizer). ASan here catches the UAF
+  that the cursor work risks; *leak* validation for `ref_pool`→ORC wants the Linux
+  path (`detect_leaks=1`, or Valgrind) — recipe in `asan.sh`'s footer. Worth a
+  Docker/Linux run when that step lands.
+
 ## Status / where to resume
 
 - **Landed + tested (Ed suite, 94 green):** standalone `Lifetime` + `track(self,
