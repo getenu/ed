@@ -162,6 +162,65 @@ may still reference.
 - **Two callback registries** (sync on body, local on proxy).
 - A **big, invasive refactor** of the core object model.
 
+### Ref proxy vs value proxy (open; **value proxy leading**)
+
+The proxy can be a `ref` or a **value type** (`==` overridden to compare ids). The
+value form is attractive because it **dissolves the identity-map machinery**: with
+`==` by id you just mint a proxy whenever asked and they compare equal — no
+weak-backref, no resurrect-or-mint, no `GC_ref` dance (the scariest part of the
+ref version disappears). Trade-offs:
+
+- **Body lifetime moves to a tombstone model.** A value proxy can't sanely *own*
+  the body (counted body-refs churn as value copies come and go; a raw `ptr`
+  dangles if the body is freed under a stored proxy). The workable shape:
+  **registry-strong body + tombstone** — `destroy` marks the body dead (`?proxy`
+  checks `body.destroyed`) and memory is reclaimed on a delayed sweep, not
+  immediately. Ed already half-lives here (`objects[id] = nil`, `freeable_refs`).
+- **No GC-liveness eviction signal.** Value proxies are created/destroyed
+  constantly, so "no live proxy → evict" is meaningless — eviction becomes
+  **touch/LRU-based** (which we wanted anyway for auto-eviction, and which is more
+  predictable than GC timing). So the "proxy liveness is the missing signal"
+  framing above applies to the *ref* proxy; under value proxies that signal is
+  replaced by touch-eviction + graph reachability.
+- **Pervasive `ref` → value change** at every usage site (mechanical; mutation
+  through any copy still hits the shared body, so semantics hold).
+
+Leaning value-proxy: trading the subtle identity map for a tombstone body + touch
+eviction is the better deal. Decide at implementation time; the rest of the design
+is proxy-form-agnostic.
+
+### Handle semantics — unmaterialized objects (decided)
+
+A partial replica holds objects it knows exist (via shape) but hasn't loaded. The
+handle carries that state; you can get/hold/pass/**listen on** it, you just can't
+read its data:
+
+- **Object-returning access returns the handle even when unmaterialized** —
+  `ctx[id]`, and `table[key]` when the value type is itself an Ed object. No throw
+  on *access*. (This supersedes the earlier `[]` → `Unmaterialized`-on-access
+  plan.) **Value-returning** access — `EdTable[_, SnapshotData][key]` — has no
+  handle to hand back, so it keeps the loaded / `get(): Option` / blocking
+  semantics.
+- **`?obj` means "usable/materialized,"** not merely "non-nil." Existence is
+  `id in collection` (shape); usability is `?obj` (≈ loaded). For a full replica
+  these coincide. Redefining `?` needs an audit of enu's `?unit`/`?field` sites
+  (e.g. `destroy_impl`, asserts) to confirm none mean "structurally exists."
+- **Reading the data throws** until materialized (`.value`/`.items`/`[]`).
+- **Listeners are allowed on unmaterialized handles; reads are not.** `track` is
+  data-independent (it appends to the callback list, never touches `tracked`), so
+  you wire up reactivity *before* load — the intended partial flow. `track` stays
+  **decoupled from fetch** (listen-without-forcing-load is a valid passive mode;
+  an opt-in `track(eager = true)` that also requests is a later nicety).
+  Initial-contents replay is empty for an unmaterialized handle.
+- **Materialization fires `ADDED` + `reason == Fill`;** the *structural* entry of
+  an unmaterialized handle fires nothing. This makes enu's existing
+  `if added: render(change.item)` work unchanged (the item is usable when it
+  fires), keeps shape (`in`/`len`/iteration) reflecting the handle immediately, and
+  is *forced* by "listen on unmaterialized": a listener attached pre-load must catch
+  the fill, so the fill has to be the real event. (A handle removed before it ever
+  materialized fired no `ADDED`, so its removal fires nothing — needs an explicit
+  rule.) Listeners live on the **body**, so they survive placeholder → materialized.
+
 ---
 
 # How much of step one survives step two
@@ -178,8 +237,13 @@ ref just becomes a proxy. So all consumer-side work (Lifetime usage, the trivial
 | `ref_pool` → ORC | Survives, orthogonal — registered refs are graph-owned in both worlds. |
 | Cascading `destroy` | Logic reused, **relocated** across the body/proxy seam. Refactor, not rewrite. |
 
-Net-new at split time (additive, not throwaway): the identity map and the
-proxy/body allocation. `ctx[id]` just gets a smarter body.
+Net-new at split time (additive, not throwaway): the proxy/body allocation, the
+handle semantics, and — *only under a ref proxy* — the identity map. (A value
+proxy has no identity map; `ctx[id]` just mints a value.) Either way `ctx[id]`
+gets a smarter body, nothing in step one is undone.
+
+Step-one piece 1a marked done: standalone `Lifetime` + `track(self, lifetime, cb)`
+landed and tested (`tests/lifetime_tests.nim`).
 
 ### The two guardrails that keep step-one waste at ~zero
 
@@ -195,17 +259,19 @@ proxy/body allocation. `ctx[id]` just gets a smarter body.
 
 # Migration order
 
-1. **Lifetime** (standalone) + owner-bound/scope-bound `track`; migrate enu's
-   `eids` to owner-binding. Kills `zid`. *(registry-agnostic, ship + green tests)*
+1. **Lifetime** (standalone) + owner-bound/scope-bound `track`. **1a done**
+   (primitive + tests). **1b next:** migrate enu's `Unit.eids` to owner-binding,
+   shrink `destroy_impl`. *(registry-agnostic, ship + green tests)*
 2. **`{.cursor.}` back-ref pass** — audit and annotate; verify graph-root
    reachability precondition.
 3. **`ref_pool` → ORC** — `register`-emitted `=destroy` enqueuing sync cleanup;
    remove manual `free` calls; framework-cascading `destroy`; collapse
    `unit.destroy` to an `on_destroy` hook + `self.destroy`.
-4. **Proxy/body split** — body to registry (strong, explicit), proxy GC'd with a
-   weak backref + identity map; move local callbacks/resources onto the proxy;
-   wire proxy liveness to local-resource eviction and (later) partial-replica
-   interest/eviction.
+4. **Proxy/body split** — body to registry (strong, explicit, tombstone teardown);
+   proxy as value-or-ref (value leading); handle semantics (unmaterialized handles,
+   `?` = usable, listen-not-read, `ADDED`+`Fill` on materialization); eviction via
+   touch/LRU (value proxy) and/or proxy liveness (ref proxy); wire to
+   partial-replica interest/eviction.
 
 Steps 1–3 are the 80% and de-risk the core. Step 4 is the v2 model and is also the
 substrate the partial-replica **eviction** phase wants — so it's likely where the
@@ -213,10 +279,14 @@ proxy split stops being elegance and starts doing real work.
 
 ## Open questions
 
+- **Ref proxy vs value proxy** — decide at step 4 (value leading; trades the
+  identity map for a tombstone body + touch eviction).
+- **Materialization-event rule for the removed-before-materialized edge** — a handle
+  dropped before it ever filled fired no `ADDED`; define what (if anything) its
+  removal fires.
 - Confirm graph-root reachability in enu (no floating, ownerless objects).
-- Is "a ref from `ctx[id]` is a safe strong handle" preserved? (Yes under the
-  proxy split — the body stays alive; this is *better* than a weak data registry.)
-- Identity-map resurrection details (the `ptr` + `GC_ref` dance) — prototype in
-  isolation before the wide refactor.
+- `?` redefinition (usable vs non-nil) — audit enu's `?unit`/`?field` sites.
+- Identity-map resurrection details (`ptr` + `GC_ref`) — *only if* we choose a ref
+  proxy; prototype in isolation first.
 - Threading invariant: assert no Ed ref crosses a thread boundary (already
   required for ORC correctness).

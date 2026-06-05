@@ -123,6 +123,17 @@ So a context can now subscribe to a subset, receive only that subset's ops, and
 
 **Still open:**
 
+- **EdTable shape + per-key access** — `keys`/`loaded`/`unloaded` views (O(1)
+  membership), per-key `request`/`release` (release = tree), in-flight dedup.
+  Per-key fetch landed; shape sync is the next build. Voxel value types are flat
+  (`SnapshotData`/`DeltaUpdate` = `{data}`), so fetch depth ≤ 2.
+- **Unmaterialized-handle semantics (revised — see `object-lifecycle-design.md`).**
+  Supersedes the earlier `[]` → `Unmaterialized`-on-access plan: object-returning
+  access (`ctx[id]`, Ed-valued `table[key]`) returns the handle even when
+  unmaterialized; `?obj` = usable; reading the data throws; **listeners are allowed
+  on unmaterialized handles** (read not). Materialization fires `ADDED` +
+  `reason == Fill`. Value-returning access (`EdTable[_, SnapshotData][key]`) keeps
+  loaded / `get(): Option` / blocking. This rides the proxy/body split.
 - **`tick` receive/process split** (decision 3) — deliberately *not* done;
   `parse_remote` got the de-duplication win without refactoring `tick`'s hot path.
 - **`Initial` reason** — track-time replay of current contents.
