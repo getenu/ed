@@ -1,6 +1,28 @@
-import std/[unittest, sets]
+import std/[unittest, sets, atomics, os]
 import ed
 import ed/zens/contexts
+import test_util
+
+# A listening authority on its own thread, ticking continuously — the role Enu
+# plays for the MCP server (separate process, independent tick loop), and what a
+# blocking remote materialize needs to respond to it.
+var rmat_running: Atomic[bool]
+var rmat_ready: Atomic[bool]
+var rmat_thread: Thread[string]
+
+proc rmat_server_loop(address: string) {.thread.} =
+  let server =
+    EdContext.init(id = "rmat-server", is_authority = true, listen_address = address)
+  Ed.thread_ctx = server
+  var parent = EdSeq[EdValue[string]].init(id = "parent", ctx = server)
+  var child = EdValue[string].init(id = "child", ctx = server)
+  child.value = "materialized"
+  parent += child # parent is pre-populated before any client connects
+  rmat_ready.store(true)
+  while rmat_running.load:
+    server.tick
+    sleep 5
+  server.close
 
 proc run*() =
   suite "materialize on access":
@@ -126,6 +148,41 @@ proc run*() =
       check other_fired
       check EdValue[int](client["other"]).value == 99
       check child_fill_reason == Fill
+
+    test "remote partial replica blocking-materializes a placeholder":
+      let address = free_addr()
+      rmat_ready.store(false)
+      rmat_running.store(true)
+      create_thread(rmat_thread, rmat_server_loop, address)
+      while not rmat_ready.load:
+        sleep 5
+      defer:
+        rmat_running.store(false)
+        join_thread(rmat_thread)
+
+      var client = EdContext.init(id = "rmat-client")
+      # Partial subscribe over the network: interested only in the parent.
+      client.subscribe(address, partial = true, roots = @["parent"])
+
+      # The pre-populated parent arrives; its out-of-interest child is a
+      # placeholder (created in from_flatty). Wait briefly for it (UDP).
+      var tries = 0
+      while "child" notin client and tries < 200:
+        client.tick()
+        sleep 5
+        inc tries
+      check "parent" in client
+      check "child" in client
+      check not client["child"].loaded # placeholder, contents not pulled yet
+
+      # A blocking read materializes it over the network — the server thread
+      # answers the fetch while we pump.
+      var got = ""
+      client.blocking:
+        got = EdValue[string](client["child"]).value
+      check got == "materialized"
+      check client["child"].loaded
+      client.close
 
     test "blocking scope toggles the flag and restores it":
       var ctx = EdContext.init(id = "mb_ctx")

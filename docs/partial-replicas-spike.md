@@ -104,15 +104,27 @@ So a context can now subscribe to a subset, receive only that subset's ops, and
   `tick`, so nothing application-visible happens mid-read (clean reentrancy, and a
   deterministic single-threaded test). (`materialize_tests.nim`)
 
+**Done & tested — remote partial replicas (full network path):**
+
+- **Remote partial subscribe.** `subscribe(address, partial = ..., roots = ...)`;
+  the SUBSCRIBE message carries `(capabilities, partial, roots)` and the authority
+  builds a filtered subscription from it. Mirrors the local subscribe.
+- **Placeholders on initial push.** `from_flatty` for a nested `Ed` ref now
+  placeholders a non-resident child instead of leaving it nil — so a partial
+  replica receiving a **pre-populated** parent (the real enu_mcp `root_units` case)
+  gets correct cardinality, and a full replica that gets a parent before its child
+  fills the placeholder when the child's CREATE arrives.
+- **Remote silent pump.** `parse_remote` extracted (shared by `tick` and the
+  pump — no duplicated wire decode, no `tick` split); the silent pump drains both
+  transports and resolves source eagerly so deferred messages process sub-less.
+- **End-to-end test:** a remote partial replica subscribes over UDP, gets a
+  placeholder for an out-of-interest child, and `blocking:`-materializes it against
+  a threaded authority. Stable across repeated runs. (`materialize_tests.nim`)
+
 **Still open:**
 
-- **Remote silent pump.** The silent pump drains the **local** (cross-thread)
-  transport; the deferral machinery (`pending_msgs`/`pending_fills`/`silent`) is
-  transport-agnostic, but the network receive (reactor parse + per-sub source
-  decode) isn't wired into it yet. enu_mcp's poll loop uses the (working)
-  non-blocking path, so this is the blocking-scope-over-network gap.
-- **`tick` receive/process split** (decision 3) — `tick` itself is untouched; the
-  silent pump sits beside it rather than being a true split.
+- **`tick` receive/process split** (decision 3) — deliberately *not* done;
+  `parse_remote` got the de-duplication win without refactoring `tick`'s hot path.
 - **`Initial` reason** — track-time replay of current contents.
 
 ## Decisions log (for review)

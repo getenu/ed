@@ -109,6 +109,12 @@ proc from_flatty*[T: ref RootObj](s: string, i: var int, value: var T) =
       # :(
       if info.object_id in flatty_ctx:
         value = value.type()(flatty_ctx.objects[info.object_id])
+      else:
+        # A nested Ed reference we don't hold (a partial replica receiving a
+        # pre-populated parent, or a parent that arrived before its child).
+        # Stand it in with a placeholder rather than leaving the ref nil; reading
+        # it later materializes it (or its own CREATE fills it when it arrives).
+        value = value.type.init_placeholder(flatty_ctx, info.object_id)
   else:
     var is_registered: bool
     s.from_flatty(i, is_registered)
@@ -517,9 +523,14 @@ proc subscribe*(
     self: EdContext,
     address: string,
     bidirectional = true,
+    partial = false,
+    roots: seq[string] = @[],
     callback: proc() {.gcsafe.} = nil,
 ) =
-  ## Subscribe to a remote context for network sync. Address format: "host" or "host:port".
+  ## Subscribe to a remote context for network sync. Address format: "host" or
+  ## "host:port". When `partial`, the authority only sends objects in `roots`
+  ## (and ids fetched later); the reference graph + materialize-on-access pull the
+  ## rest. Mirrors the local `subscribe(partial = ..., roots = ...)`.
   var address = address
   var port = 9632
 
@@ -538,9 +549,11 @@ proc subscribe*(
     port = parts[1].parse_int
 
   let connection = self.reactor.connect(address, port)
-  # Advertise the type-ids we can materialize so the authority never sends us an
-  # object we can't construct (capability handshake; see ref-registration.md).
-  let capabilities = toSeq(type_initializers.keys).to_flatty
+  # The SUBSCRIBE carries, in `obj`, the subscriber's handshake: the type-ids it
+  # can materialize (capability filter; see ref-registration.md) plus its
+  # partial-replica interest (partial flag + root ids). The authority applies all
+  # three to the subscription it creates for us.
+  let handshake = (toSeq(type_initializers.keys), partial, roots).to_flatty
   self.send(
     Subscription(
       kind: REMOTE,
@@ -548,7 +561,7 @@ proc subscribe*(
       connection: connection,
       last_sent_time: epoch_time(),
     ),
-    Message(kind: SUBSCRIBE, obj: capabilities),
+    Message(kind: SUBSCRIBE, obj: handshake),
   )
 
   var ctx_id = ""
@@ -983,19 +996,26 @@ proc tick*(
               old_ctx_id = sub.ctx_id, new_ctx_id = source_str
             self.unsubscribe(sub)
 
+          # Handshake (capabilities, partial, roots) rides in the SUBSCRIBE `obj`.
+          # Empty (older peer) = unfiltered, full replica.
+          var caps: HashSet[int]
+          var is_partial = false
+          var interest: HashSet[string]
+          if msg.obj.len > 0:
+            let (cap_ids, p, roots) =
+              msg.obj.from_flatty((seq[int], bool, seq[string]))
+            caps = cap_ids.to_hash_set
+            is_partial = p
+            interest = roots.to_hash_set
+
           var new_sub = Subscription(
             kind: REMOTE,
             connection: raw_msg.conn,
             ctx_id: source_str,
             last_sent_time: epoch_time(),
-            # Capability handshake: the SUBSCRIBE carries the subscriber's
-            # materializable type-ids in `obj`. We filter all sends to it by
-            # this set. Empty (older peer) = unfiltered, full replica.
-            capabilities:
-              if msg.obj.len > 0:
-                msg.obj.from_flatty(seq[int]).to_hash_set
-              else:
-                init_hash_set[int](),
+            capabilities: caps,
+            partial: is_partial,
+            interest: interest,
           )
           # Register all mappings from the subscribe message
           new_sub.register_mappings(msg.id_mappings)
