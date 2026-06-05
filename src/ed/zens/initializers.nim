@@ -254,6 +254,23 @@ proc defaults[T, O](
     else:
       fail "Can't handle message " & $msg.kind
 
+  self.publish_key = proc(
+      self: ref EdBase, key_bin: string
+  ): tuple[found: bool, msg: Message] {.gcsafe.} =
+    # Per-key fetch: build the ADD op for one entry so a partial subscriber can
+    # pull it without the whole table. Only meaningful for table containers.
+    when O is Pair:
+      let self = Ed[T, O](self)
+      type K = generic_params(O.default.type).get(0)
+      {.gcsafe.}:
+        let key = key_bin.from_flatty(K, self.ctx)
+      if key in self.tracked:
+        let pair = O(key: key, value: self.tracked[key])
+        let change = Change[O](changes: {ADDED}, item: pair)
+        result = (found: true, msg: self.build_message(self, change, self.id, ""))
+    else:
+      discard
+
   assert self.ctx == nil
   self.ctx = ctx
 

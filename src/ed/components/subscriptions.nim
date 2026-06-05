@@ -519,6 +519,20 @@ proc fetch*(self: EdContext, object_id: string) =
     self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
   self.tick_reactor
 
+proc flush_key_requests(self: EdContext) =
+  ## Send the per-key fetches buffered since the last tick — one REQUEST per
+  ## table, carrying the batch of serialized keys in `obj`. The authority replies
+  ## with an ADD op per found key (see the REQUEST handler).
+  if self.pending_key_requests.len == 0:
+    return
+  let pending = self.pending_key_requests
+  self.pending_key_requests.clear
+  for object_id, keys in pending:
+    let msg = Message(kind: REQUEST, object_id: object_id, obj: keys.to_flatty)
+    for sub in self.subscribers:
+      self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
+  self.tick_reactor
+
 proc subscribe*(
     self: EdContext,
     address: string,
@@ -737,14 +751,26 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       if s.ctx_id in source:
         s.interest.incl msg.object_id
   elif msg.kind == REQUEST:
-    # A partial subscriber wants this object. Add it to that subscriber's
-    # interest (so future ops follow) and send it now via publish_create. The
-    # requester is whoever the message came from — match by ctx id in `source`.
+    # A partial subscriber wants data. Two forms:
+    #  - whole-object (`obj` empty): add the object to interest and publish_create
+    #    it (existing behavior — future ops then follow).
+    #  - per-key (`obj` = a batch of serialized table keys): reply with just those
+    #    entries (an ADD op each), without adding the whole table to interest.
+    # The requester is whoever the message came from — match by ctx id in `source`.
     for s in self.subscribers:
-      if s.ctx_id in source:
+      if s.ctx_id notin source:
+        continue
+      if msg.object_id notin self:
+        continue
+      if msg.obj.len > 0:
+        let obj = self.objects[msg.object_id]
+        for key_bin in msg.obj.from_flatty(seq[string]):
+          let reply = obj.publish_key(obj, key_bin)
+          if reply.found:
+            self.send(s, reply.msg, OperationContext(), DEFAULT_FLAGS)
+      else:
         s.interest.incl msg.object_id
-        if msg.object_id in self:
-          self.objects[msg.object_id].publish_create(s)
+        self.objects[msg.object_id].publish_create(s)
   elif msg.kind != BLANK:
     if msg.object_id notin self:
       # :( this should throw an error
@@ -883,6 +909,7 @@ proc tick*(
       get_mono_time() + min_duration
 
   self.flush_buffers
+  self.flush_key_requests # send this frame's batched per-key fetches
 
   # Replay whatever a silent (blocking) materialize deferred — at this tick
   # boundary, before new traffic: first the messages it buffered (apply + fire

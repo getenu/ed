@@ -1,4 +1,4 @@
-import std/[unittest, sets, atomics, os]
+import std/[unittest, sets, atomics, os, tables]
 import ed
 import ed/zens/contexts
 import test_util
@@ -183,6 +183,62 @@ proc run*() =
       check got == "materialized"
       check client["child"].loaded
       client.close
+
+    test "per-key fetch: pull individual table entries, batched, as ADDED":
+      var authority = EdContext.init(id = "pk_auth", is_authority = true)
+      var client = EdContext.init(id = "pk_client")
+      # A seq of tables; the client takes the seq as a root, so each table comes
+      # in as an empty placeholder.
+      var parent = EdSeq[EdTable[int, string]].init(ctx = authority, id = "parent")
+      var child = EdTable[int, string].init(ctx = authority, id = "child")
+      child[1] = "one"
+      child[2] = "two"
+      child[3] = "three"
+      parent += child
+
+      client.subscribe(authority, partial = true, roots = @["parent"])
+      client.tick()
+      let table = EdTable[int, string](client["child"])
+      check "child" in client
+      check not table.loaded(1) # nothing pulled yet
+
+      # Watch records arrivals as ADDED (the pattern enu's renderer uses).
+      var arrived: seq[(int, string)]
+      table.changes:
+        if added:
+          arrived.add (change.item.key, change.item.value)
+
+      # Two requests in one frame → one batched REQUEST on the next tick.
+      table.request(1)
+      table.request(3)
+      client.tick() # flush_key_requests sends the batch
+      authority.tick() # authority replies with entries 1 and 3
+      client.tick() # client applies the ADD ops
+
+      check table.loaded(1)
+      check table.loaded(3)
+      check not table.loaded(2) # never requested → not pulled
+      check table[1] == "one"
+      check table[3] == "three"
+      check arrived.len == 2 # both fills fired as ADDED changes
+      check (1, "one") in arrived
+      check (3, "three") in arrived
+
+      # release evicts locally (loaded -> false) without deleting on the authority.
+      var removed_keys: seq[int]
+      table.changes:
+        if removed:
+          removed_keys.add change.item.key
+      table.release(1)
+      check not table.loaded(1) # dropped locally
+      check removed_keys == @[1] # fired REMOVED so watches un-render
+      check EdTable[int, string](authority["child"]).loaded(1) # still on authority
+      table.request(1) # re-fetch works
+      client.tick()
+      authority.tick()
+      client.tick()
+      check table.loaded(1)
+      check table[1] == "one"
 
     test "blocking scope toggles the flag and restores it":
       var ctx = EdContext.init(id = "mb_ctx")

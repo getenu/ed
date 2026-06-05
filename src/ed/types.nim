@@ -165,6 +165,10 @@ type
     silent*: bool         # silent (blocking) materialize: defer callbacks to next tick
     pending_msgs*: seq[Message]            # received-but-deferred during a silent pump
     pending_fills*: seq[proc() {.gcsafe.}] # Fill callbacks deferred to the next tick
+    # Per-key fetch requests buffered between ticks (table object_id -> serialized
+    # keys). A frame's worth of request() calls collapse into one REQUEST per
+    # table, flushed on the next tick.
+    pending_key_requests*: Table[string, seq[string]]
     changed_callback_eid: EID
     last_id: int
     close_procs: Table[EID, proc() {.gcsafe.}]
@@ -230,6 +234,15 @@ type
 
     change_receiver:
       proc(self: ref EdBase, msg: Message, op_ctx: OperationContext) {.gcsafe.}
+
+    # Per-key fetch (partial EdTable). Given a serialized key, build the ADD op
+    # carrying that key's current value, so a partial subscriber can pull one
+    # entry without the whole table. `found = false` if the key isn't present.
+    # nil for non-table containers.
+    publish_key:
+      proc(self: ref EdBase, key_bin: string): tuple[found: bool, msg: Message] {.
+        gcsafe
+      .}
 
     ctx*: EdContext
 
