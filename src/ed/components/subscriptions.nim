@@ -578,7 +578,10 @@ proc subscribe*(
   # can materialize (capability filter; see ref-registration.md) plus its
   # partial-replica interest (partial flag + root ids). The authority applies all
   # three to the subscription it creates for us.
-  let handshake = (toSeq(type_initializers.keys), partial, roots).to_flatty
+  let type_ids = block:
+    {.gcsafe.}:
+      toSeq(type_initializers.keys)
+  let handshake = (type_ids, partial, roots).to_flatty
   self.send(
     Subscription(
       kind: REMOTE,
