@@ -5,6 +5,16 @@ type
   EID* = uint16
     ## Callback identifier for tracking registered callbacks.
 
+  Lifetime* = ref object
+    ## Owns a set of teardown actions (typically untracking callbacks). An owner
+    ## — a Unit, a scope, and eventually an object proxy — holds a Lifetime and
+    ## `finish`es it on teardown, so everything bound to it cleans up at once with
+    ## no manual `zid` bookkeeping. Standalone on purpose (not welded to EdBase):
+    ## under the future proxy/body split it becomes the proxy's cleanup set with
+    ## no change to call sites.
+    cleanups: seq[proc() {.gcsafe.}]
+    finished: bool
+
   EdFlags* = enum
     ## Flags controlling `Ed` container behavior.
     TRACK_CHILDREN    ## Propagate changes from nested `Ed` objects
@@ -272,6 +282,30 @@ const DEFAULT_FLAGS* = {SYNC_LOCAL, SYNC_REMOTE}
 
 template ed_ignore*() {.pragma.}
   ## Mark a field to be ignored during `Ed` serialization.
+
+proc new_lifetime*(): Lifetime =
+  Lifetime()
+
+proc add*(self: Lifetime, cleanup: proc() {.gcsafe.}) =
+  ## Register a teardown action. If the Lifetime has already finished, the action
+  ## runs immediately (so binding to a dead Lifetime can't leak).
+  if self.finished:
+    cleanup()
+  else:
+    self.cleanups.add cleanup
+
+proc finish*(self: Lifetime) =
+  ## Run every registered teardown action, once. Idempotent.
+  if self.finished:
+    return
+  self.finished = true
+  let cleanups = self.cleanups
+  self.cleanups = @[]
+  for cleanup in cleanups:
+    cleanup()
+
+proc finished*(self: Lifetime): bool =
+  self.finished
 
 proc write_value*[T](w: var JsonWriter, self: set[T]) =
   write_value(w, self.to_seq)

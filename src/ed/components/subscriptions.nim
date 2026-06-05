@@ -832,6 +832,22 @@ proc track*[T, O](
 
   result = zid
 
+proc track*[T, O](
+    self: Ed[T, O],
+    lifetime: Lifetime,
+    callback: proc(changes: seq[Change[O]]) {.gcsafe.},
+): EID {.discardable.} =
+  ## Like `track`, but the callback's removal is owned by `lifetime`: when the
+  ## owner calls `lifetime.finish` the callback untracks automatically — no
+  ## manual `zid` bookkeeping. (Standalone Lifetime, per the lifecycle redesign;
+  ## becomes the proxy's cleanup set under the future proxy/body split.)
+  privileged
+  result = self.track(callback)
+  let zid = result
+  lifetime.add proc() {.gcsafe.} =
+    if not self.destroyed and zid in self.changed_callbacks:
+      self.untrack(zid)
+
 proc untrack_on_destroy*(self: ref EdBase, zid: EID) =
   self.bound_eids.add(zid)
 
