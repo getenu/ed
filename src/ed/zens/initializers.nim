@@ -20,6 +20,17 @@ proc relay_fill*[T, O](item: Ed[T, O], op_ctx: OperationContext) =
   ## initializer expands at the `Ed.bootstrap` call site, where the private
   ## `publish_create` field isn't reachable.
   privileged
+  # The immediate fill runs inside the receive path's owner scope
+  # (`msg.owner_id.own:`), but the placeholder was minted ownerless and the
+  # post-materialize stamp hasn't run yet — stamp before relaying, or second
+  # hops receive the fill unowned (same window as the create-relay fix). The
+  # deferred (subscribe-time) fill runs after the stamp, so `owner_id` is
+  # already set there and `current_owner_id` is empty — both paths covered.
+  if current_owner_id.len > 0 and item.owner_id != current_owner_id:
+    item.owner_id = current_owner_id
+    item.ctx.owned_by.mgetOrPut(current_owner_id, initHashSet[string]()).incl(
+      item.id
+    )
   item.publish_create(broadcast = true, op_ctx = op_ctx)
 
 proc create_initializer[T, O](self: Ed[T, O]) =
