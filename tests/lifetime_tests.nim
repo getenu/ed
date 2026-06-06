@@ -110,3 +110,19 @@ proc run*() =
       outer.lifetime.finish()
       check "outer_items" notin ctx
       check "outer_val" notin ctx
+
+    test "destroy_fields destroys Ed container fields regardless of construction":
+      # The synced-replica path: containers built outside any `own` scope still
+      # tear down via reflection.
+      var ctx = EdContext.init(id = "df_ctx")
+      Ed.thread_ctx = ctx
+      var owner = OwnerTest()
+      owner.items = EdSeq[int].init(ctx = ctx, id = "df_items")   # no own scope
+      owner.val = EdValue[int].init(ctx = ctx, id = "df_val")
+
+      check "df_items" in ctx
+      check "df_val" in ctx
+
+      owner.destroy_fields()
+      check "df_items" notin ctx
+      check "df_val" notin ctx

@@ -343,6 +343,20 @@ proc destroy*[T, O](self: Ed[T, O], publish = true) =
   if publish:
     self.publish_destroy OperationContext(source: [self.ctx.id].toHashSet)
 
+proc destroy_fields*[T: EdRef](self: T) =
+  ## Destroy every Ed *container* field of `self` (the owner-cascade): each fires
+  ## its CLOSED and drops out of `ctx.objects`. Raw ref fields (`parent`,
+  ## `clone_of`, …) aren't `Ed`, so they're skipped — only owned-in-place
+  ## containers are torn down, never referenced objects. Generic over the
+  ## concrete type so `fields` sees the derived fields. Unlike the `own` scope
+  ## (which only catches containers built inside its block), this works whether
+  ## the container was built locally or arrived via sync — so it's the right
+  ## teardown for replicas, whose units skip `init_unit`.
+  for field in self[].fields:
+    when field is Ed:
+      if ?field and not field.destroyed:
+        field.destroy
+
 iterator items*[T](self: EdSet[T] | EdSeq[T]): T =
   privileged
   assert self.valid
