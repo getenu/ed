@@ -840,6 +840,15 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     #  - per-key (`obj` = a batch of serialized table keys): reply with just those
     #    entries (an ADD op each), without adding the whole table to interest.
     # The requester is whoever the message came from — match by ctx id in `source`.
+    #
+    # TODO(request chaining): a hub answers only from its own registry. In enu's
+    # topology (main ctx -> worker -> server), a main-thread fetch of a
+    # server-only id gets a NACK here instead of being resolved — unhelpful.
+    # Design when needed: on a miss, forward the REQUEST upstream (our own
+    # subscribers minus the requester), defer the answer, and NACK only if
+    # upstream NACKs; the reply relays back down via the existing materialize
+    # re-broadcast hop. Until then, fetches should originate on the context
+    # that's actually connected to the authority.
     for s in self.subscribers:
       if s.ctx_id notin source:
         continue
