@@ -154,3 +154,33 @@ proc run*() =
 
       ctx2.destroy_owned("mcp_bot") # ctx2 never built it, but owns the teardown
       check "bot_items" notin ctx2
+
+    test "ownership survives a relay (creator -> hub -> second hop)":
+      # The enu topology: an MCP client builds a bot, the worker (hub) relays it
+      # to the node ctx. The hub's initializer re-broadcasts the CREATE *while*
+      # materializing, so ownership must be stamped inside that window or the
+      # second hop receives the container unowned.
+      var ctx1 = EdContext.init(id = "relay_src", blocking_recv = true)
+      var ctx2 = EdContext.init(id = "relay_hub", blocking_recv = true)
+      var ctx3 = EdContext.init(id = "relay_dst", blocking_recv = true)
+      ctx2.subscribe(ctx1)
+      ctx3.subscribe(ctx2)
+      Ed.thread_ctx = ctx1
+      ctx1.tick(blocking = false)
+
+      var owner = OwnerTest(id: "relay_bot")
+      owner.own:
+        owner.items = EdSeq[int].init(ctx = ctx1, id = "relay_items")
+      owner.items.add 7
+
+      ctx2.tick
+      ctx3.tick
+
+      check "relay_items" in ctx2
+      check "relay_items" in ctx3
+      check EdSeq[int](ctx2["relay_items"]).owner_id == "relay_bot"
+      check EdSeq[int](ctx3["relay_items"]).owner_id == "relay_bot" # second hop
+      check "relay_items" in ctx3.owned_by["relay_bot"]
+
+      ctx3.destroy_owned("relay_bot")
+      check "relay_items" notin ctx3

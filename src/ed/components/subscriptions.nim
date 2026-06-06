@@ -530,14 +530,19 @@ proc subscribe*(
     # Reverse direction (us → authority) stays full: we push our own writes.
     ctx.subscribe(self, bidirectional = false)
 
-proc fetch*(self: EdContext, object_id: string) =
+proc fetch*(self: EdContext, object_id: string, deep = false) =
   ## Ask the authority for `object_id`. It's materialized on a later tick
   ## (placeholder-then-fill); the authority adds it to our interest so future
   ## ops follow. No-op if we already hold it *loaded* — a placeholder (held but
   ## not materialized) still needs fetching.
-  if object_id in self and not self.objects[object_id].placeholder:
+  ##
+  ## `deep` also fetches everything the id *owns* (the synced-ownership closure,
+  ## recursively) — so an owner id (a unit, which isn't itself a container) pulls
+  ## its whole owned state in one request. The already-loaded short-circuit is
+  ## skipped for deep fetches: holding the root says nothing about the closure.
+  if not deep and object_id in self and not self.objects[object_id].placeholder:
     return
-  var msg = Message(kind: REQUEST, object_id: object_id)
+  var msg = Message(kind: REQUEST, object_id: object_id, deep: deep)
   for sub in self.subscribers:
     self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
   self.tick_reactor
@@ -761,20 +766,31 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
 
     {.gcsafe.}:
       let fn = type_initializers[msg.type_id]
-      fn(
-        msg.obj,
-        self,
-        msg.object_id,
-        msg.flags,
-        OperationContext.init(
-          source = source, ctx = self, origin = msg.origin, op_id = msg.op_id
-        ),
-      )
+      # Synced ownership: materialize INSIDE the owner's scope, not after — the
+      # initializer (`defaults`) re-broadcasts the CREATE to our own subscribers
+      # while it runs (a relay: e.g. worker -> node ctx for an object an MCP
+      # client built), so owner_id must be stamped before that re-broadcast or
+      # second-hop contexts receive it unowned.
+      template materialize_it() =
+        fn(
+          msg.obj,
+          self,
+          msg.object_id,
+          msg.flags,
+          OperationContext.init(
+            source = source, ctx = self, origin = msg.origin, op_id = msg.op_id
+          ),
+        )
+
+      if msg.owner_id.len > 0:
+        msg.owner_id.own:
+          materialize_it()
+      else:
+        materialize_it()
       # :(
-    # Synced ownership: record the owner this container was created under, so a
-    # context that didn't construct it (e.g. the server after an MCP client drops)
-    # can still tear it down via the owner's `destroy_owned`. Keyed by owner id,
-    # so arrival order vs. the owner doesn't matter.
+    # Safety net for paths where the initializer fills an existing object (a
+    # placeholder) rather than running `defaults` — stamp + index after the fact.
+    # Keyed by owner id, so arrival order vs. the owner doesn't matter.
     if msg.owner_id.len > 0 and msg.object_id in self.objects and
         ?self.objects[msg.object_id]:
       self.objects[msg.object_id].owner_id = msg.owner_id
@@ -796,15 +812,35 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     for s in self.subscribers:
       if s.ctx_id notin source:
         continue
-      if msg.object_id notin self:
-        continue
       if msg.obj.len > 0:
+        if msg.object_id notin self:
+          continue
         let obj = self.objects[msg.object_id]
         for key_bin in msg.obj.from_flatty(seq[string]):
           let reply = obj.publish_key(obj, key_bin)
           if reply.found:
             self.send(s, reply.msg, OperationContext(), DEFAULT_FLAGS)
+      elif msg.deep:
+        # Deep fetch: the id plus its ownership closure. BFS over `owned_by` —
+        # the requested id may be an *owner* (a unit/EdRef id with no container
+        # of its own), so it expands even when it isn't in `objects`. Each owned
+        # container is published and added to interest; if any of those are
+        # themselves owners someday, the walk follows them too.
+        var ids = @[msg.object_id]
+        var i = 0
+        while i < ids.len:
+          let id = ids[i]
+          inc i
+          if id in self:
+            s.interest.incl id
+            self.objects[id].publish_create(s)
+          if id in self.owned_by:
+            for owned_id in self.owned_by[id]:
+              if owned_id notin ids:
+                ids.add owned_id
       else:
+        if msg.object_id notin self:
+          continue
         s.interest.incl msg.object_id
         self.objects[msg.object_id].publish_create(s)
   elif msg.kind != BLANK:

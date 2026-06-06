@@ -1,6 +1,11 @@
-import std/unittest
+import std/[unittest, sets, tables]
 import ed
 import ed/zens/contexts
+
+type DeepOwner = ref object of EdRef
+  id: string
+  items: EdSeq[int]
+  val: EdValue[int]
 
 proc run*() =
   suite "partial replicas":
@@ -52,6 +57,37 @@ proc run*() =
       y.value = 20
       client.tick()
       check EdValue[int](client["f_y"]).value == 20
+
+    test "deep fetch pulls an owner's full ownership closure":
+      var authority = EdContext.init(id = "d_auth", is_authority = true)
+      var client = EdContext.init(id = "d_client")
+
+      var bot = DeepOwner(id: "d_bot")
+      bot.own:
+        bot.items = EdSeq[int].init(ctx = authority, id = "d_items")
+        bot.val = EdValue[int].init(ctx = authority, id = "d_val")
+      bot.items.add 3
+
+      client.subscribe(authority, partial = true, roots = @[])
+      client.tick()
+      check "d_items" notin client # out of interest
+      check "d_val" notin client
+
+      # The owner id isn't itself a container — a deep fetch expands its
+      # ownership closure on the authority and sends everything it owns.
+      client.fetch("d_bot", deep = true)
+      authority.tick() # serves the REQUEST: walks owned_by, publishes the closure
+      client.tick() # materializes the owned containers
+      check "d_items" in client
+      check "d_val" in client
+      check EdSeq[int](client["d_items"])[0] == 3
+      check EdSeq[int](client["d_items"]).owner_id == "d_bot" # ownership syncs too
+      check "d_items" in client.owned_by["d_bot"]
+
+      # The closure joined the interest set: future ops follow.
+      bot.items.add 4
+      client.tick()
+      check EdSeq[int](client["d_items"]).len == 2
 
     test "objects created after subscribe respect partial interest":
       var authority = EdContext.init(id = "pc_auth", is_authority = true)
