@@ -15,6 +15,30 @@ type
     cleanups: seq[proc() {.gcsafe.}]
     finished: bool
 
+  RefHandle* = ref object
+    ## Per-instance registry-cleanup handle carried by every `EdRef`. When a
+    ## registered ref's last reference drops, ORC destroys its fields and this
+    ## handle's `=destroy` removes the (now-dead) instance from the *correct*
+    ## context's `ref_pool`. It's the one piece that knows the instance's own
+    ## ctx — a bare registered ref carries no context back-ref, and
+    ## `Ed.thread_ctx` is wrong under multiple contexts per thread (load-bearing
+    ## for sync identity: two contexts hold different instances of one ref_id).
+    ## `ctx`/`ref_id` stay unset until the instance's first ADD into a
+    ## `ref_pool`; until then `=destroy` is a no-op, so this is inert (no
+    ## behavior change) until the registry wires it up.
+    ctx* {.cursor.}: EdContext  # non-owning: the context outlives its refs
+    ref_id*: string
+
+  EdRef* = ref object of RootObj
+    ## Base for registered (network-syncable) refs. Carries a `RefHandle` so the
+    ## registry can clean up `ref_pool` when ORC reclaims the instance — keeping
+    ## the registry's (future cursor) hold from dangling, with the Unit's own
+    ## DEFAULT destructor intact (only the trivial `RefHandle` gets a custom
+    ## one, so fields don't leak). enu's `Model` and the test's `RefType`
+    ## inherit this; the eviction-phase proxy/observability hangs off the same
+    ## base.
+    ref_handle*: RefHandle
+
   EdFlags* = enum
     ## Flags controlling `Ed` container behavior.
     TRACK_CHILDREN    ## Propagate changes from nested `Ed` objects
@@ -291,6 +315,18 @@ const DEFAULT_FLAGS* = {SYNC_LOCAL, SYNC_REMOTE}
 
 template ed_ignore*() {.pragma.}
   ## Mark a field to be ignored during `Ed` serialization.
+
+proc `=destroy`(h: var typeof(RefHandle()[])) =
+  ## Registry cleanup for a registered ref. Runs when ORC reclaims the handle
+  ## (its owning `EdRef`'s last reference dropped). Removes the instance from its
+  ## *own* context's `ref_pool`, so the registry's hold can never dangle. A
+  ## custom `=destroy` replaces field destruction, so `ref_id` is freed by hand;
+  ## `ctx` is a cursor (non-owning) and must not be. No-op until the registry
+  ## sets `ctx`/`ref_id` on the instance's first ADD — keeping step 1 inert.
+  if not h.ctx.is_nil and h.ref_id.len > 0:
+    {.cast(gcsafe).}:
+      h.ctx.ref_pool.del(h.ref_id)
+  `=destroy`(h.ref_id)
 
 proc new_lifetime*(): Lifetime =
   Lifetime()
