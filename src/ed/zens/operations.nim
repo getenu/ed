@@ -339,9 +339,13 @@ proc destroy*[T, O](self: Ed[T, O], publish = true) =
   self.ctx.objects[self.id] = nil
   self.ctx.objects_need_packing = true
   self.ctx.latest_op_id.del(self.id)  # drop own-op reconciliation state
-  # Keep the ownership index tidy: drop ourselves from our owner's owned-set.
+  # Keep the ownership index tidy: drop ourselves from our owner's owned-set,
+  # and drop any member index keyed under our own id (an ownerless OWNS_MEMBERS
+  # collection indexes its members that way).
   if self.owner_id.len > 0 and self.owner_id in self.ctx.owned_by:
     self.ctx.owned_by[self.owner_id].excl(self.id)
+  if self.id in self.ctx.owned_by:
+    self.ctx.owned_by.del(self.id)
 
   if publish:
     self.publish_destroy OperationContext(source: [self.ctx.id].toHashSet)

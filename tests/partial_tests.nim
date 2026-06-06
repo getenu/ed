@@ -7,7 +7,48 @@ type DeepOwner = ref object of EdRef
   val: EdValue[int]
 
 proc run*() =
+  Ed.register(DeepOwner, false)
+
   suite "partial replicas":
+    test "OWNS_MEMBERS member closures push to partial subscribers, in order":
+      var authority = EdContext.init(id = "omp_auth", is_authority = true)
+      var client = EdContext.init(id = "omp_client")
+      Ed.thread_ctx = authority
+
+      var u1 = DeepOwner(id: "omp_u1")
+      u1.own:
+        u1.items = EdSeq[int].init(ctx = authority, id = "omp_u1_items")
+      u1.items.add 5
+      var units = EdSeq[DeepOwner].init(
+        ctx = authority, id = "omp_units", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
+      )
+      units.add u1
+
+      # The subscribe pushes u1's closure ahead of the collection: the client's
+      # parse links the member's fields to real containers - no husks.
+      client.subscribe(authority, partial = true, fetch = ["omp_units"])
+      client.tick()
+      check "omp_u1_items" in client
+      let m1 = EdSeq[DeepOwner](client["omp_units"])[0]
+      check m1.items.len == 1
+      check m1.items[0] == 5
+
+      # A member added later: its closure precedes the ADD too.
+      var u2 = DeepOwner(id: "omp_u2")
+      u2.own:
+        u2.items = EdSeq[int].init(ctx = authority, id = "omp_u2_items")
+      u2.items.add 6
+      units.add u2
+      client.tick()
+      check "omp_u2_items" in client
+      let m2 = EdSeq[DeepOwner](client["omp_units"])[1]
+      check m2.items.len == 1
+      check m2.items[0] == 6
+
+      # The closure joined the interest set: members keep syncing.
+      u2.items.add 7
+      client.tick()
+      check m2.items.len == 2
     test "partial subscriber only receives its interest set":
       var authority = EdContext.init(id = "p_authority", is_authority = true)
       var client = EdContext.init(id = "p_client")

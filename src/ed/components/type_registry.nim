@@ -249,14 +249,19 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
     # there and cascades through the EdRef `destroy` method. Runs identically on
     # every context that applies the ADD/REMOVE, so the index needs no extra sync.
     let container = self.objects.getOrDefault(ed_id)
-    if not container.is_nil and OWNS_MEMBERS in container.flags and
-        container.owner_id.len > 0:
+    if not container.is_nil and OWNS_MEMBERS in container.flags:
+      # An ownerless flagged collection (the root units list) indexes members
+      # under its own id instead: nothing cascades into them, but the closure
+      # push / deep fetch can still find them.
+      let owner =
+        if container.owner_id.len > 0:
+          container.owner_id
+        else:
+          ed_id
       if ADDED in change.changes:
-        self.owned_by.mgetOrPut(container.owner_id, initHashSet[string]()).incl(
-          id
-        )
-      if REMOVED in change.changes and container.owner_id in self.owned_by:
-        self.owned_by[container.owner_id].excl(id)
+        self.owned_by.mgetOrPut(owner, initHashSet[string]()).incl(id)
+      if REMOVED in change.changes and owner in self.owned_by:
+        self.owned_by[owner].excl(id)
 
 proc find_ref*[T](self: EdContext, value: var T): bool =
   privileged

@@ -346,6 +346,48 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
 
   self.ctx.tick_reactor
 
+proc publish_closure(
+    self: EdContext, s: Subscription, root_id: string, follow = true
+): bool {.discardable.} =
+  ## Serve an ownership closure to `s`: BFS from `root_id` over `owned_by`,
+  ## publishing every container and following member keys (tid:id) into the
+  ## members' own owned sets. Used to serve deep fetches, and to push an
+  ## OWNS_MEMBERS collection's member closures *before* the collection itself —
+  ## so a partial subscriber's parse links member fields to real containers
+  ## instead of minting unregistered husks. Returns whether anything was found.
+  ## With `follow`, everything published joins `s.interest` so future ops flow.
+  privileged
+  var ids = @[root_id]
+  var to_publish: seq[string]
+  var i = 0
+  while i < ids.len:
+    let id = ids[i]
+    inc i
+    if id in self:
+      result = true
+      to_publish.add id
+    if id in self.owned_by:
+      result = true
+      for owned_id in self.owned_by[id]:
+        if owned_id notin ids:
+          ids.add owned_id
+    let colon = id.find(':')
+    if colon > 0:
+      let plain = id[colon + 1 .. ^1]
+      if plain notin ids:
+        ids.add plain
+  # Publish deepest-first (reverse BFS): a subscribing context defers value
+  # restoration and replays it in arrival order, so a collection's restore —
+  # which fires the app's ADDED watchers — must come *after* its members'
+  # containers have their values, or the watchers read empty state. Mirrors
+  # add_subscriber's newest-first iteration, which is what full replicas rely
+  # on for the same reason.
+  for j in countdown(to_publish.high, 0):
+    let id = to_publish[j]
+    if follow:
+      s.interest.incl id
+    self.objects[id].publish_create(s)
+
 proc pack_messages(msgs: seq[Message]): seq[Message] =
   if msgs.len > 1:
     var packed_msg = Message(
@@ -391,6 +433,22 @@ proc publish_changes*[T, O](
       let id = self.id
       assert id in self.ctx
       let obj = self.ctx.objects[id]
+
+      # OWNS_MEMBERS + partial: a newly added member must arrive *after* its
+      # ownership closure, or the subscriber's parse mints husks for the
+      # member's container fields. Push the closure to each interested partial
+      # target now — these CREATEs are sent immediately, ahead of the ADD ops
+      # fanned out below.
+      when O is ref:
+        if OWNS_MEMBERS in self.flags:
+          for sub in self.ctx.subscribers:
+            if sub.partial and sub.ctx_id notin op_ctx.source and
+                id in sub.interest:
+              for change in changes:
+                if ADDED in change.changes and ?change.item:
+                  let item = RootRef(change.item)
+                  if item of EdRef:
+                    self.ctx.publish_closure(sub, EdRef(item).id)
 
       for change in changes:
         if [ADDED, REMOVED, CREATED, TOUCHED].any_it(it in change.changes):
@@ -468,6 +526,13 @@ proc add_subscriber*(
         from_ctx = self.id, to_ctx = sub.ctx_id, ed_id = id
 
       let zen = self.objects[id]
+      if sub.partial and OWNS_MEMBERS in zen.flags:
+        # Push the members' closures before the collection itself, so the
+        # subscriber's parse links member fields to real containers (no husks).
+        # Members are indexed under the collection's owner — or under the
+        # collection's own id when it's ownerless (the root units list).
+        let member_owner = if zen.owner_id.len > 0: zen.owner_id else: id
+        self.publish_closure(sub, member_owner)
       zen.publish_create sub
     else:
       debug "not sending object because remote ctx already has it",
@@ -861,36 +926,10 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           if reply.found:
             self.send(s, reply.msg, OperationContext(), DEFAULT_FLAGS)
       elif msg.deep:
-        # Deep fetch: the id plus its ownership closure. BFS over `owned_by` —
-        # the requested id may be an *owner* (a unit/EdRef id with no container
-        # of its own), so it expands even when it isn't in `objects`. Each owned
-        # container is published; when `follow`, it also joins the requester's
-        # interest so future ops flow. If any of those are themselves owners
-        # someday, the walk follows them too.
-        var ids = @[msg.object_id]
-        var found = false
-        var i = 0
-        while i < ids.len:
-          let id = ids[i]
-          inc i
-          if id in self:
-            found = true
-            if msg.follow:
-              s.interest.incl id
-            self.objects[id].publish_create(s)
-          if id in self.owned_by:
-            found = true
-            for owned_id in self.owned_by[id]:
-              if owned_id notin ids:
-                ids.add owned_id
-          # An owned *member* entry is a ref_pool key ("tid:plain_id"); recurse
-          # into the member's own owned set — keyed by its plain id — so a deep
-          # fetch of a unit pulls its whole subtree (children's containers too).
-          let colon = id.find(':')
-          if colon > 0:
-            let plain = id[colon + 1 .. ^1]
-            if plain notin ids:
-              ids.add plain
+        # Deep fetch: the id plus its ownership closure (see publish_closure —
+        # the requested id may be an *owner*, a unit id with no container of its
+        # own, and the walk recurses through owned members into their subtrees).
+        let found = self.publish_closure(s, msg.object_id, follow = msg.follow)
         if msg.follow:
           # Follow the root id itself even if nothing exists yet: a later
           # CREATE under this id is then delivered without re-fetching.
