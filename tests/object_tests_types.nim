@@ -4,7 +4,6 @@ type
   ZenString* = EdValue[string]
 
   Beep* = ref object of EdRef
-    id*: string
     name_value*: EdValue[string]
 
   Boop* = ref object of Beep

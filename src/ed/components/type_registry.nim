@@ -242,6 +242,22 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
       if id in self.ref_pool:
         self.ref_pool[id].references.excl(ed_id)
 
+    # Member ownership: an OWNS_MEMBERS collection's EdRef members belong to the
+    # collection's *owner* — membership drives the `owned_by` index, and removal
+    # un-registers, so an independently-removed member just drops out of the
+    # cascade. Entries are ref_pool keys (tid:id); `destroy_owned` resolves them
+    # there and cascades through the EdRef `destroy` method. Runs identically on
+    # every context that applies the ADD/REMOVE, so the index needs no extra sync.
+    let container = self.objects.getOrDefault(ed_id)
+    if not container.is_nil and OWNS_MEMBERS in container.flags and
+        container.owner_id.len > 0:
+      if ADDED in change.changes:
+        self.owned_by.mgetOrPut(container.owner_id, initHashSet[string]()).incl(
+          id
+        )
+      if REMOVED in change.changes and container.owner_id in self.owned_by:
+        self.owned_by[container.owner_id].excl(id)
+
 proc find_ref*[T](self: EdContext, value: var T): bool =
   privileged
 

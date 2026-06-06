@@ -3,9 +3,9 @@ import ed
 import ed/zens/contexts
 
 type OwnerTest = ref object of EdRef
-  id: string
   items: EdSeq[int]
   val: EdValue[int]
+  kids: EdSeq[OwnerTest]
 
 proc run*() =
   suite "lifetime":
@@ -184,3 +184,57 @@ proc run*() =
 
       ctx3.destroy_owned("relay_bot")
       check "relay_items" notin ctx3
+
+    test "EdRef destroy: lifetime, owned containers, destroyed latch":
+      var ctx = EdContext.init(id = "rd_ctx")
+      Ed.thread_ctx = ctx
+      var external = EdValue[int].init(ctx = ctx, id = "rd_ext")
+      var owner = OwnerTest(id: "rd_owner")
+      var fired = 0
+      owner.own:
+        owner.items = EdSeq[int].init(ctx = ctx, id = "rd_items")
+        external.track proc(changes: seq[Change[int]]) {.gcsafe.} =
+          fired.inc
+
+      external.value = 1
+      check fired > 0
+
+      owner.destroy() # the ed-generic teardown
+      check owner.destroyed
+      check "rd_items" notin ctx # owned containers gone
+      let after = fired
+      external.value = 2
+      check fired == after # lifetime finished → callback untracked
+
+    test "OWNS_MEMBERS: destroying the owner cascades into members":
+      var ctx = EdContext.init(id = "om_ctx")
+      Ed.thread_ctx = ctx
+      var child = OwnerTest(id: "om_child")
+      child.own:
+        child.items = EdSeq[int].init(ctx = ctx, id = "om_child_items")
+      var parent = OwnerTest(id: "om_parent")
+      parent.own:
+        parent.kids = EdSeq[OwnerTest].init(
+          ctx = ctx, id = "om_kids", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
+        )
+      parent.kids.add child # membership → owned by parent
+
+      parent.destroy()
+      check child.destroyed # member cascaded via the destroy method
+      check "om_child_items" notin ctx # ...including the child's own containers
+      check "om_kids" notin ctx # parent's container destroyed too
+
+    test "OWNS_MEMBERS: a removed member is not cascaded":
+      var ctx = EdContext.init(id = "om_ctx2")
+      Ed.thread_ctx = ctx
+      var child = OwnerTest(id: "om2_child")
+      var parent = OwnerTest(id: "om2_parent")
+      parent.own:
+        parent.kids = EdSeq[OwnerTest].init(
+          ctx = ctx, id = "om2_kids", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
+        )
+      parent.kids.add child
+      parent.kids -= child # removal un-registers from the owned index
+
+      parent.destroy()
+      check not child.destroyed # independently-removed member untouched

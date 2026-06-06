@@ -45,6 +45,10 @@ type
     ## one, so fields don't leak). enu's `Model` and the test's `RefType`
     ## inherit this; the eviction-phase proxy/observability hangs off the same
     ## base.
+    id*: string
+      ## The ref's identity (sync identity rides on it via `ref_id` = tid:id).
+      ## Lives on the base so runtime code — the `destroy` method, the `own`
+      ## scopes, ownership — can use it without knowing the concrete type.
     ref_handle*: RefHandle
     destroyed* {.ed_ignore.}: bool
       ## Idempotency latch for `destroy`, set at its top. Mirrors
@@ -62,6 +66,12 @@ type
     SYNC_LOCAL        ## Sync changes to other local contexts (threads)
     SYNC_REMOTE       ## Sync changes to remote contexts (network)
     SYNC_ALL_NO_OVERWRITE  ## Sync without overwriting existing data
+    OWNS_MEMBERS      ## This collection's EdRef members are *owned* by the
+                      ## collection's owner: membership registers them in
+                      ## `owned_by` (removal un-registers), so the owner's
+                      ## `destroy_owned` cascades into them. For true child
+                      ## collections (a unit's `units`) — NOT reference
+                      ## collections (a sign's owner, a selection list).
 
   ChangeKind* = enum
     ## Types of changes that can occur on an `Ed` container.

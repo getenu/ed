@@ -3,7 +3,6 @@ import ed
 import ed/zens/contexts
 
 type DeepOwner = ref object of EdRef
-  id: string
   items: EdSeq[int]
   val: EdValue[int]
 

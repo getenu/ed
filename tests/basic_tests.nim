@@ -509,7 +509,6 @@ proc run*() =
   test "sync":
     type
       Thing = ref object of EdRef
-        id: string
 
       Tree = ref object
         zen: EdValue[string]
@@ -616,12 +615,11 @@ proc run*() =
     type Unit = ref object of EdRef
       units: EdSeq[Unit]
       code: EdValue[string]
-      id: int
 
     Ed.register(Unit, false)
     local_and_remote:
-      var u1 = Unit(id: 1)
-      var u2 = Unit(id: 2)
+      var u1 = Unit(id: "1")
+      var u2 = Unit(id: "2")
       u1.init_ed_fields
       u2.init_ed_fields
       ctx2.tick
@@ -634,7 +632,6 @@ proc run*() =
 
   test "zentable of tables":
     type Shared = ref object of EdRef
-      id: string
       edits: EdTable[int, Table[string, string]]
 
     Ed.register(Shared, false)
@@ -700,7 +697,6 @@ proc run*() =
     # its RefHandle.=destroy clears the ref_pool entry. The registered type must
     # inherit EdRef to carry that handle. See docs/step4-body-protocol-sketch.md.
     type RefType = ref object of EdRef
-      id: string
 
     Ed.register(RefType, false)
 
@@ -805,7 +801,6 @@ proc run*() =
   test "object with registered ref":
     type
       RefType2 = ref object of EdRef
-        id: string
 
       RefType3 = ref object of RefType2
 
@@ -837,7 +832,6 @@ proc run*() =
         Highlighted
 
       SyncUnit = ref object of EdRef
-        id: int
         parent: SyncUnit
         units: EdSeq[SyncUnit]
 
@@ -853,8 +847,8 @@ proc run*() =
 
       ctx2.tick
       var dest = State.init_from(src, ctx = ctx2)
-      var src_change_id = 0
-      var dest_change_id = 0
+      var src_change_id = ""
+      var dest_change_id = ""
 
       src.units.changes:
         var change = change
@@ -868,29 +862,29 @@ proc run*() =
           change = Change[SyncUnit](change.triggered_by[0])
         dest_change_id = change.item.id
 
-      let base = SyncUnit(id: 1).init_ed_fields(flags = flags)
+      let base = SyncUnit(id: "1").init_ed_fields(flags = flags)
       src.units.add base
       ctx2.tick
 
-      let child = SyncUnit(id: 3).init_ed_fields(flags = flags)
+      let child = SyncUnit(id: "3").init_ed_fields(flags = flags)
       ctx2.tick
-      src_change_id = 0
-      dest_change_id = 0
+      src_change_id = ""
+      dest_change_id = ""
       base.units.add child
 
       ctx2.tick
-      check src_change_id == 3
-      check dest_change_id == 3
+      check src_change_id == "3"
+      check dest_change_id == "3"
 
       Ed.thread_ctx = ctx2
       let grandchild =
-        SyncUnit(id: 4).init_ed_fields(ctx = ctx2, flags = flags)
+        SyncUnit(id: "4").init_ed_fields(ctx = ctx2, flags = flags)
 
       dest.units[0].units.add grandchild
 
       ctx1.tick
-      check src_change_id == 4
-      check dest_change_id == 4
+      check src_change_id == "4"
+      check dest_change_id == "4"
 
 when is_main_module:
   Ed.bootstrap

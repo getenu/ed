@@ -24,7 +24,6 @@ proc run*() =
     var ctx = EdContext.init(id = "ref_ctx")
     
     type RefObject = ref object of EdRef
-      id: string
       data: int
       
     Ed.register(RefObject, false)
@@ -50,11 +49,9 @@ proc run*() =
     
     type
       NodeA = ref object of EdRef
-        id: string
         b_ref: EdValue[NodeB]
 
       NodeB = ref object of EdRef
-        id: string
         a_ref: EdValue[NodeA]
     
     Ed.register(NodeA, false)

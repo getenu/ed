@@ -883,6 +883,14 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
             for owned_id in self.owned_by[id]:
               if owned_id notin ids:
                 ids.add owned_id
+          # An owned *member* entry is a ref_pool key ("tid:plain_id"); recurse
+          # into the member's own owned set — keyed by its plain id — so a deep
+          # fetch of a unit pulls its whole subtree (children's containers too).
+          let colon = id.find(':')
+          if colon > 0:
+            let plain = id[colon + 1 .. ^1]
+            if plain notin ids:
+              ids.add plain
         if msg.follow:
           # Follow the root id itself even if nothing exists yet: a later
           # CREATE under this id is then delivered without re-fetching.
