@@ -531,19 +531,31 @@ proc subscribe*(
     # Reverse direction (us → authority) stays full: we push our own writes.
     ctx.subscribe(self, bidirectional = false)
 
-proc fetch*(self: EdContext, object_id: string, deep = false) =
-  ## Ask the authority for `object_id`. It's materialized on a later tick
-  ## (placeholder-then-fill); the authority adds it to our interest so future
-  ## ops follow. No-op if we already hold it *loaded* — a placeholder (held but
-  ## not materialized) still needs fetching.
+proc fetch*(
+    self: EdContext, object_id: string, deep = false, follow = true
+): Fetch {.discardable.} =
+  ## Ask the authority for `object_id`. Returns a handle that resolves on a
+  ## later tick: `Found` (with `obj` linking the container) when it arrives, or
+  ## `NotFound` if the authority NACKs. Already holding it loaded resolves
+  ## immediately; fetching an id already in flight returns the same handle.
+  ##
+  ## `follow` (default) registers interest with the authority, so future ops
+  ## follow — and a *missing* id is delivered whenever something creates it
+  ## (the handle still resolves NotFound for "not there right now").
+  ## `follow = false` is a snapshot: current state only, nothing afterwards.
   ##
   ## `deep` also fetches everything the id *owns* (the synced-ownership closure,
   ## recursively) — so an owner id (a unit, which isn't itself a container) pulls
   ## its whole owned state in one request. The already-loaded short-circuit is
   ## skipped for deep fetches: holding the root says nothing about the closure.
   if not deep and object_id in self and not self.objects[object_id].placeholder:
-    return
-  var msg = Message(kind: REQUEST, object_id: object_id, deep: deep)
+    return Fetch(id: object_id, state: Found, obj: self.objects[object_id])
+  if object_id in self.fetches and self.fetches[object_id].state == Pending:
+    return self.fetches[object_id]
+  result = Fetch(id: object_id, state: Pending)
+  self.fetches[object_id] = result
+  var msg =
+    Message(kind: REQUEST, object_id: object_id, deep: deep, follow: follow)
   for sub in self.subscribers:
     self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
   self.tick_reactor
@@ -798,11 +810,29 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       self.owned_by.mgetOrPut(msg.owner_id, initHashSet[string]()).incl(
         msg.object_id
       )
+    # Resolve fetch handles: the object itself and — for a deep fetch of an
+    # *owner* id — the owner its containers point back to (the owner has no
+    # container of its own, so its handle resolves via the arriving closure).
+    if msg.object_id in self.fetches:
+      let pending_fetch = self.fetches[msg.object_id]
+      pending_fetch.state = Found
+      if msg.object_id in self.objects and ?self.objects[msg.object_id]:
+        pending_fetch.obj = self.objects[msg.object_id]
+      self.fetches.del(msg.object_id)
+    if msg.owner_id.len > 0 and msg.owner_id in self.fetches:
+      self.fetches[msg.owner_id].state = Found
+      self.fetches.del(msg.owner_id)
     # The creator is interested in its own object: make sure its canonical ops
     # flow back. Matters for partial subscribers; a no-op for full ones.
     for s in self.subscribers:
       if s.ctx_id in source:
         s.interest.incl msg.object_id
+  elif msg.kind == NOT_FOUND:
+    # The authority NACKed a fetch: resolve the handle so callers (and the
+    # blocking `ctx[]` pump) learn promptly instead of waiting out a deadline.
+    if msg.object_id in self.fetches:
+      self.fetches[msg.object_id].state = NotFound
+      self.fetches.del(msg.object_id)
   elif msg.kind == REQUEST:
     # A partial subscriber wants data. Two forms:
     #  - whole-object (`obj` empty): add the object to interest and publish_create
@@ -825,25 +855,53 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         # Deep fetch: the id plus its ownership closure. BFS over `owned_by` —
         # the requested id may be an *owner* (a unit/EdRef id with no container
         # of its own), so it expands even when it isn't in `objects`. Each owned
-        # container is published and added to interest; if any of those are
-        # themselves owners someday, the walk follows them too.
+        # container is published; when `follow`, it also joins the requester's
+        # interest so future ops flow. If any of those are themselves owners
+        # someday, the walk follows them too.
         var ids = @[msg.object_id]
+        var found = false
         var i = 0
         while i < ids.len:
           let id = ids[i]
           inc i
           if id in self:
-            s.interest.incl id
+            found = true
+            if msg.follow:
+              s.interest.incl id
             self.objects[id].publish_create(s)
           if id in self.owned_by:
+            found = true
             for owned_id in self.owned_by[id]:
               if owned_id notin ids:
                 ids.add owned_id
+        if msg.follow:
+          # Follow the root id itself even if nothing exists yet: a later
+          # CREATE under this id is then delivered without re-fetching.
+          s.interest.incl msg.object_id
+        if not found:
+          self.send(
+            s,
+            Message(kind: NOT_FOUND, object_id: msg.object_id),
+            OperationContext(),
+            DEFAULT_FLAGS,
+          )
       else:
-        if msg.object_id notin self:
-          continue
-        s.interest.incl msg.object_id
-        self.objects[msg.object_id].publish_create(s)
+        if msg.object_id in self:
+          if msg.follow:
+            s.interest.incl msg.object_id
+          self.objects[msg.object_id].publish_create(s)
+        else:
+          if msg.follow:
+            # Not here yet, but wanted: keep the interest so it's delivered the
+            # moment something creates it. The NACK below still tells the
+            # requester it doesn't exist *right now*.
+            s.interest.incl msg.object_id
+          self.send(
+            s,
+            Message(kind: NOT_FOUND, object_id: msg.object_id),
+            OperationContext(),
+            DEFAULT_FLAGS,
+          )
   elif msg.kind != BLANK:
     if msg.object_id notin self:
       # :( this should throw an error
@@ -1187,25 +1245,25 @@ proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
   ## placeholder, same as the non-blocking path. Drains both the local
   ## (cross-thread) and remote (network) transports.
   privileged
-  if id notin self or not self.objects[id].placeholder:
+  if id in self and ?self.objects[id] and not self.objects[id].placeholder:
     return
-  self.fetch(id)
+  let pending_fetch = self.fetch(id)
   if not self.blocking:
     return
 
   template triage(candidate: Message) =
-    # Apply only the target object's CREATE (silently — its callback is
-    # deferred); buffer everything else for the next tick. SUBSCRIBE can't be
-    # replayed sub-less, but a blocking *client* shouldn't receive one.
-    if candidate.object_id == id and candidate.kind == CREATE:
+    # Apply only the target object's CREATE — or its NOT_FOUND NACK, which
+    # resolves the fetch so we stop waiting — silently (callbacks deferred);
+    # buffer everything else for the next tick. SUBSCRIBE can't be replayed
+    # sub-less, but a blocking *client* shouldn't receive one.
+    if candidate.object_id == id and candidate.kind in {CREATE, NOT_FOUND}:
       self.process_message(candidate)
     elif candidate.kind != SUBSCRIBE:
       self.pending_msgs.add candidate
 
   let deadline = get_mono_time() + init_duration(seconds = 5)
   self.silent = true
-  while id in self and self.objects[id].placeholder and
-      get_mono_time() < deadline:
+  while pending_fetch.state == Pending and get_mono_time() < deadline:
     # Local transport.
     var m: Message
     while self.chan.try_recv(m):

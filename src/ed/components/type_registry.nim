@@ -73,7 +73,10 @@ proc register_type(typ: type) =
       for field in self[].fields:
         when field is Ed:
           if ?field and field.id in ctx:
-            field = type(field)(ctx[field.id])
+            # Direct registry read — `ctx[...]` would blocking-materialize in a
+            # `blocking` scope, which deserialization must never do (and a func
+            # can't have side effects).
+            field = type(field)(ctx.objects[field.id])
       result = self
 
   with_lock:

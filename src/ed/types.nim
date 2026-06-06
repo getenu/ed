@@ -88,7 +88,8 @@ type
     TOUCH
     SUBSCRIBE
     PACKED
-    REQUEST  # partial replica asking the authority for an object by id
+    REQUEST    # partial replica asking the authority for an object by id
+    NOT_FOUND  # authority's NACK: the REQUESTed id isn't there (right now)
 
   BaseChange* = ref object of RootObj
     changes*: set[ChangeKind]
@@ -131,6 +132,8 @@ type
     delta*: bool    # true for collection (non-idempotent) ops, false for registers
     deep*: bool     # REQUEST only: also send the ownership closure (everything
                     # the requested id owns via owned_by, recursively)
+    follow*: bool   # REQUEST only: register interest so future ops follow — and,
+                    # for a missing id, so it's delivered when it's created later
     when defined(ed_trace):
       trace*: string
       id*: int
@@ -209,6 +212,23 @@ type
     else:
       discard
 
+  FetchState* = enum
+    ## Where a `fetch` stands. Resolves on a later tick (the request round-trip).
+    Pending   ## request sent; no answer yet
+    Found     ## the object (or, for a deep owner fetch, its closure) arrived
+    NotFound  ## the authority answered NOT_FOUND — it didn't exist *at fetch
+              ## time*. With `follow` (the default) it still arrives later if
+              ## something creates it; the handle stays NotFound either way.
+
+  Fetch* = ref object
+    ## Handle returned by `fetch`. Watch `state`; once `Found`, `obj` links the
+    ## container — except for a deep fetch of an *owner* id (a unit), which has
+    ## no container of its own: state resolves via its arriving closure and
+    ## `obj` stays nil.
+    id*: string
+    state*: FetchState
+    obj*: ref EdBase
+
   EdContext* = ref object
     ## Central coordination object managing `Ed` container lifecycle, subscriptions,
     ## and message passing between threads/network.
@@ -251,6 +271,9 @@ type
     # (`destroy_owned`) in *any* context — including one that didn't construct it
     # (e.g. the server cleaning up an MCP-created bot after the client drops).
     owned_by*: Table[string, HashSet[string]]
+    # In-flight fetches by id; resolved (Found/NotFound) as answers arrive, then
+    # removed. Re-fetching after a NotFound mints a fresh handle.
+    fetches*: Table[string, Fetch]
     ref_pool: Table[string, CountedRef]
     subscribers*: seq[Subscription]
     chan: Chan[Message]
@@ -509,6 +532,7 @@ proc to_flatty*(s: var string, msg: Message) =
   s.to_flatty msg.origin
   s.to_flatty msg.delta
   s.to_flatty msg.deep
+  s.to_flatty msg.follow
   when defined(ed_trace):
     s.to_flatty msg.trace
     s.to_flatty msg.id
@@ -532,6 +556,7 @@ proc from_flatty*(s: string, i: var int, msg: var Message) =
   s.from_flatty(i, msg.origin)
   s.from_flatty(i, msg.delta)
   s.from_flatty(i, msg.deep)
+  s.from_flatty(i, msg.follow)
   when defined(ed_trace):
     s.from_flatty(i, msg.trace)
     s.from_flatty(i, msg.id)

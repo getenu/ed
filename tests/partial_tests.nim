@@ -1,4 +1,4 @@
-import std/[unittest, sets, tables]
+import std/[unittest, sets, tables, times, monotimes]
 import ed
 import ed/zens/contexts
 
@@ -57,6 +57,107 @@ proc run*() =
       y.value = 20
       client.tick()
       check EdValue[int](client["f_y"]).value == 20
+
+    test "fetch returns a handle that resolves Found with the object":
+      var authority = EdContext.init(id = "fh_auth", is_authority = true)
+      var client = EdContext.init(id = "fh_client")
+      var x = EdValue[int].init(ctx = authority, id = "fh_x")
+      x.value = 4
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+
+      let handle = client.fetch("fh_x")
+      check handle.state == Pending
+      authority.tick()
+      client.tick()
+      check handle.state == Found
+      check handle.obj == client["fh_x"]
+
+    test "fetching a missing id resolves NotFound (authority NACK)":
+      var authority = EdContext.init(id = "nf_auth", is_authority = true)
+      var client = EdContext.init(id = "nf_client")
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+
+      let handle = client.fetch("does_not_exist", follow = false)
+      check handle.state == Pending
+      authority.tick()
+      client.tick()
+      check handle.state == NotFound
+      check "does_not_exist" notin client
+
+    test "follow (default): a missing fetch is delivered when created later":
+      var authority = EdContext.init(id = "fl_auth", is_authority = true)
+      var client = EdContext.init(id = "fl_client")
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+
+      let handle = client.fetch("late_obj")
+      authority.tick()
+      client.tick()
+      check handle.state == NotFound # didn't exist at fetch time...
+
+      var late = EdValue[int].init(ctx = authority, id = "late_obj")
+      late.value = 9
+      client.tick()
+      check "late_obj" in client # ...but the kept interest delivered it
+      check EdValue[int](client["late_obj"]).value == 9
+
+    test "follow = false: snapshot only — no future ops, no late delivery":
+      var authority = EdContext.init(id = "sn_auth", is_authority = true)
+      var client = EdContext.init(id = "sn_client")
+      var snap = EdValue[int].init(ctx = authority, id = "snap_x")
+      snap.value = 1
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+
+      let handle = client.fetch("snap_x", follow = false)
+      authority.tick()
+      client.tick()
+      check handle.state == Found
+      check EdValue[int](client["snap_x"]).value == 1
+
+      snap.value = 2
+      client.tick()
+      check EdValue[int](client["snap_x"]).value == 1 # frozen: no interest
+
+      let missing = client.fetch("snap_later", follow = false)
+      authority.tick()
+      client.tick()
+      check missing.state == NotFound
+      var later = EdValue[int].init(ctx = authority, id = "snap_later")
+      later.value = 3
+      client.tick()
+      check "snap_later" notin client # never arrives without follow
+
+    test "blocking ctx[] pulls an unknown id; a NACK fails fast":
+      var authority = EdContext.init(id = "bk_auth", is_authority = true)
+      var client = EdContext.init(id = "bk_client")
+      var x = EdValue[int].init(ctx = authority, id = "bk_x")
+      x.value = 7
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      check "bk_x" notin client
+
+      # Single-threaded choreography: queue the answer into the client's channel
+      # first; the blocking read's pump then drains it (the fetch dedups onto
+      # the in-flight handle rather than re-sending).
+      discard client.fetch("bk_x")
+      authority.tick()
+      var got: ref EdBase
+      client.blocking:
+        got = client["bk_x"]
+      check EdValue[int](got).value == 7
+
+      # Unknown id: the NACK resolves the blocking wait promptly (KeyError),
+      # well inside the pump's safety deadline.
+      discard client.fetch("bk_missing", follow = false)
+      authority.tick()
+      let started = get_mono_time()
+      expect KeyError:
+        client.blocking:
+          discard client["bk_missing"]
+      check get_mono_time() - started < init_duration(seconds = 2)
 
     test "deep fetch pulls an owner's full ownership closure":
       var authority = EdContext.init(id = "d_auth", is_authority = true)
