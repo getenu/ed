@@ -19,7 +19,7 @@ proc run*() =
       y.value = 2
 
       # Interested only in obj_x.
-      client.subscribe(authority, partial = true, roots = @["obj_x"])
+      client.subscribe(authority, partial = true, fetch = ["obj_x"])
       client.tick()
 
       check "obj_x" in client # pushed (in interest)
@@ -42,7 +42,7 @@ proc run*() =
       x.value = 1
       y.value = 2
 
-      client.subscribe(authority, partial = true, roots = @["f_x"])
+      client.subscribe(authority, partial = true, fetch = ["f_x"])
       client.tick()
       check "f_y" notin client
 
@@ -68,7 +68,7 @@ proc run*() =
         bot.val = EdValue[int].init(ctx = authority, id = "d_val")
       bot.items.add 3
 
-      client.subscribe(authority, partial = true, roots = @[])
+      client.subscribe(authority, partial = true, fetch = [])
       client.tick()
       check "d_items" notin client # out of interest
       check "d_val" notin client
@@ -92,7 +92,7 @@ proc run*() =
     test "objects created after subscribe respect partial interest":
       var authority = EdContext.init(id = "pc_auth", is_authority = true)
       var client = EdContext.init(id = "pc_client")
-      client.subscribe(authority, partial = true, roots = @["pc_root"])
+      client.subscribe(authority, partial = true, fetch = ["pc_root"])
       client.tick()
 
       # Created after the subscribe — the broadcast CREATE must still be filtered.
@@ -105,7 +105,7 @@ proc run*() =
     test "a partial client's own object syncs back from the authority":
       var authority = EdContext.init(id = "po_auth", is_authority = true)
       var client = EdContext.init(id = "po_client")
-      client.subscribe(authority, partial = true, roots = @[])
+      client.subscribe(authority, partial = true, fetch = [])
       client.tick()
 
       # Client creates its own object; the authority should pick it up and

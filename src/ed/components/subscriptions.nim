@@ -497,11 +497,12 @@ proc subscribe*(
     ctx: EdContext,
     bidirectional = true,
     partial = false,
-    roots: seq[string] = @[],
+    fetch: open_array[string] = [],
 ) =
   ## Subscribe to another local context for cross-thread sync. When `partial`,
-  ## we only receive objects in `roots` (and ids we later fetch) — the
-  ## authority→us direction is filtered; our own writes still flow to it.
+  ## we only receive the objects in `fetch` (and ids we `fetch` later) — the
+  ## authority→us direction is filtered; our own writes still flow to it. The
+  ## fetched ids land in the registry, so `ctx[id]` works for them afterwards.
   privileged
   debug "local subscribe", ctx = self.id
   self.materialize = materialize_impl # enable materialize-on-access
@@ -516,7 +517,7 @@ proc subscribe*(
       chan: self.chan,
       ctx_id: self.id,
       partial: partial,
-      interest: roots.toHashSet,
+      interest: fetch.toHashSet,
     ),
     push_all = bidirectional,
     remote_objects,
@@ -566,13 +567,13 @@ proc subscribe*(
     address: string,
     bidirectional = true,
     partial = false,
-    roots: seq[string] = @[],
+    fetch: open_array[string] = [],
     callback: proc() {.gcsafe.} = nil,
 ) =
   ## Subscribe to a remote context for network sync. Address format: "host" or
-  ## "host:port". When `partial`, the authority only sends objects in `roots`
+  ## "host:port". When `partial`, the authority only sends the objects in `fetch`
   ## (and ids fetched later); the reference graph + materialize-on-access pull the
-  ## rest. Mirrors the local `subscribe(partial = ..., roots = ...)`.
+  ## rest. Mirrors the local `subscribe(partial = ..., fetch = ...)`.
   var address = address
   var port = 9632
 
@@ -598,7 +599,7 @@ proc subscribe*(
   let type_ids = block:
     {.gcsafe.}:
       toSeq(type_initializers.keys)
-  let handshake = (type_ids, partial, roots).to_flatty
+  let handshake = (type_ids, partial, @fetch).to_flatty
   self.send(
     Subscription(
       kind: REMOTE,
@@ -1126,17 +1127,17 @@ proc tick*(
               old_ctx_id = sub.ctx_id, new_ctx_id = source_str
             self.unsubscribe(sub)
 
-          # Handshake (capabilities, partial, roots) rides in the SUBSCRIBE `obj`.
+          # Handshake (capabilities, partial, fetch ids) rides in the SUBSCRIBE `obj`.
           # Empty (older peer) = unfiltered, full replica.
           var caps: HashSet[int]
           var is_partial = false
           var interest: HashSet[string]
           if msg.obj.len > 0:
-            let (cap_ids, p, roots) =
+            let (cap_ids, p, fetch_ids) =
               msg.obj.from_flatty((seq[int], bool, seq[string]))
             caps = cap_ids.to_hash_set
             is_partial = p
-            interest = roots.to_hash_set
+            interest = fetch_ids.to_hash_set
 
           var new_sub = Subscription(
             kind: REMOTE,

@@ -35,6 +35,12 @@ type EdClient* = ref object
   id*: string
   address*: string
   chan_size*: int
+  partial*: bool
+    ## Subscribe as a partial replica: only the ids in `fetch` (and anything
+    ## fetched later) sync; the rest is filtered at the authority.
+  fetch*: seq[string]
+    ## Ids fetched as part of each (re)subscribe (partial only). They land in
+    ## the registry, so `ctx[id]` works for them afterwards.
   on_connect*: proc()
     ## (Re)create this client's objects after each (re)connect. Runs with
     ## `Ed.thread_ctx` set to the fresh context. Single-threaded — runs on
@@ -57,7 +63,7 @@ proc connect*(self: EdClient) =
   self.ctx = EdContext.init(chan_size = chan_size, buffer = false, id = self.id)
   Ed.thread_ctx = self.ctx
   try:
-    self.ctx.subscribe(self.address)
+    self.ctx.subscribe(self.address, partial = self.partial, fetch = self.fetch)
     if self.on_connect != nil:
       self.on_connect()
   except ConnectionError as e:
