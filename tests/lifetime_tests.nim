@@ -117,6 +117,21 @@ proc run*() =
       check "outer_items" notin ctx
       check "outer_val" notin ctx
 
+    test "id.own: (string form) attributes containers to the id at construction":
+      var ctx = EdContext.init(id = "own_str_ctx")
+      Ed.thread_ctx = ctx
+      let bid = "build_42"
+      bid.own: # owner id known before the owner object exists
+        discard EdSeq[int].init(ctx = ctx, id = "bi_items")
+        discard EdValue[int].init(ctx = ctx, id = "bi_val")
+
+      check EdSeq[int](ctx["bi_items"]).owner_id == "build_42"
+      check "bi_items" in ctx.owned_by["build_42"]
+
+      ctx.destroy_owned("build_42")
+      check "bi_items" notin ctx
+      check "bi_val" notin ctx
+
     test "owner_id syncs; a non-creator context tears down via the owned index":
       # The MCP case: one context builds an owned container; another (which never
       # constructed it) destroys it via the synced ownership.

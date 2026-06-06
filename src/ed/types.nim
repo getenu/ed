@@ -444,6 +444,21 @@ var current_owner_id* {.threadvar.}: string
   ## `lifetime` carries callbacks while container ownership is the baked-in
   ## `owner_id`. "" outside a scope → containers are unowned.
 
+template own*(owner_id: string, body: untyped) =
+  ## Like `self.own:`, but keyed by an owner *id* you already hold rather than the
+  ## owner object — for construction, where you know the id (it's a parameter) but
+  ## the owner doesn't exist yet. Every Ed container created in the block records
+  ## `owner_id`. Wrap the whole construction (`id.own:`); anything it calls —
+  ## `init_unit`, nested constructors — inherits the scope through the threadvar,
+  ## so their containers are owned too with no scope of their own. No lifetime is
+  ## set (callbacks bind via the EdRef form once the owner exists).
+  let prev_owner_id = current_owner_id
+  current_owner_id = owner_id
+  try:
+    body
+  finally:
+    current_owner_id = prev_owner_id
+
 template own*[T: EdRef](self: T, body: untyped) =
   ## Within this scope, every Ed container created records `self` as its owner
   ## (so `self`'s teardown destroys them via `destroy_owned`), and every callback
