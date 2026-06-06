@@ -26,7 +26,9 @@ proc run*() =
 
       # The subscribe pushes u1's closure ahead of the collection: the client's
       # parse links the member's fields to real containers - no husks.
-      client.subscribe(authority, partial = true, fetch = ["omp_units"])
+      client.subscribe(
+        authority, partial = true, fetch = ["omp_units"], deep = true
+      )
       client.tick()
       check "omp_u1_items" in client
       let m1 = EdSeq[DeepOwner](client["omp_units"])[0]
@@ -49,6 +51,34 @@ proc run*() =
       u2.items.add 7
       client.tick()
       check m2.items.len == 2
+
+    test "deep = false (default): no member closures, fetch what you touch":
+      var authority = EdContext.init(id = "omd_auth", is_authority = true)
+      var client = EdContext.init(id = "omd_client")
+      Ed.thread_ctx = authority
+
+      var u1 = DeepOwner(id: "omd_u1")
+      u1.own:
+        u1.items = EdSeq[int].init(ctx = authority, id = "omd_u1_items")
+      var units = EdSeq[DeepOwner].init(
+        ctx = authority, id = "omd_units", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
+      )
+      units.add u1
+
+      # Narrow subscriber (an enu_mcp-style utility): the directory arrives,
+      # the members' closures don't.
+      client.subscribe(authority, partial = true, fetch = ["omd_units"])
+      client.tick()
+      check "omd_units" in client
+      # The member's container arrives only as a placeholder stand-in (the
+      # inline reference mints one) — its value was not pushed.
+      check not client["omd_u1_items"].loaded
+
+      # It pulls what it touches, explicitly.
+      client.fetch("omd_u1", deep = true)
+      authority.tick()
+      client.tick()
+      check client["omd_u1_items"].loaded
     test "partial subscriber only receives its interest set":
       var authority = EdContext.init(id = "p_authority", is_authority = true)
       var client = EdContext.init(id = "p_client")

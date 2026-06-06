@@ -442,7 +442,7 @@ proc publish_changes*[T, O](
       when O is ref:
         if OWNS_MEMBERS in self.flags:
           for sub in self.ctx.subscribers:
-            if sub.partial and sub.ctx_id notin op_ctx.source and
+            if sub.partial and sub.deep and sub.ctx_id notin op_ctx.source and
                 id in sub.interest:
               for change in changes:
                 if ADDED in change.changes and ?change.item:
@@ -526,7 +526,7 @@ proc add_subscriber*(
         from_ctx = self.id, to_ctx = sub.ctx_id, ed_id = id
 
       let zen = self.objects[id]
-      if sub.partial and OWNS_MEMBERS in zen.flags:
+      if sub.partial and sub.deep and OWNS_MEMBERS in zen.flags:
         # Push the members' closures before the collection itself, so the
         # subscriber's parse links member fields to real containers (no husks).
         # Members are indexed under the collection's owner — or under the
@@ -563,6 +563,7 @@ proc subscribe*(
     bidirectional = true,
     partial = false,
     fetch: open_array[string] = [],
+    deep = false,
 ) =
   ## Subscribe to another local context for cross-thread sync. When `partial`,
   ## we only receive the objects in `fetch` (and ids we `fetch` later) — the
@@ -582,6 +583,7 @@ proc subscribe*(
       chan: self.chan,
       ctx_id: self.id,
       partial: partial,
+      deep: deep,
       interest: fetch.toHashSet,
     ),
     push_all = bidirectional,
@@ -645,6 +647,7 @@ proc subscribe*(
     bidirectional = true,
     partial = false,
     fetch: open_array[string] = [],
+    deep = false,
     callback: proc() {.gcsafe.} = nil,
 ) =
   ## Subscribe to a remote context for network sync. Address format: "host" or
@@ -676,7 +679,7 @@ proc subscribe*(
   let type_ids = block:
     {.gcsafe.}:
       toSeq(type_initializers.keys)
-  let handshake = (type_ids, partial, @fetch).to_flatty
+  let handshake = (type_ids, partial, @fetch, deep).to_flatty
   self.send(
     Subscription(
       kind: REMOTE,
@@ -1246,11 +1249,13 @@ proc tick*(
           var caps: HashSet[int]
           var is_partial = false
           var interest: HashSet[string]
+          var is_deep = false
           if msg.obj.len > 0:
-            let (cap_ids, p, fetch_ids) =
-              msg.obj.from_flatty((seq[int], bool, seq[string]))
+            let (cap_ids, p, fetch_ids, d) =
+              msg.obj.from_flatty((seq[int], bool, seq[string], bool))
             caps = cap_ids.to_hash_set
             is_partial = p
+            is_deep = d
             interest = fetch_ids.to_hash_set
 
           var new_sub = Subscription(
@@ -1260,6 +1265,7 @@ proc tick*(
             last_sent_time: epoch_time(),
             capabilities: caps,
             partial: is_partial,
+            deep: is_deep,
             interest: interest,
           )
           # Register all mappings from the subscribe message

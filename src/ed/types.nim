@@ -197,6 +197,13 @@ type
     # `interest` (its roots + ids it has fetched). Default (not partial) gets
     # everything — the existing full-replica behavior.
     partial*: bool
+    # Partial + deep: push the ownership closure of OWNS_MEMBERS collection
+    # members (ahead of the collection / the member ADD). A game client wants
+    # this — units arrive render-ready; a narrow utility (enu_mcp) doesn't, and
+    # deep-fetches the few things it touches. Explicit per subscription for now;
+    # the default may later defer to a per-object preference (an EdFlags bit),
+    # making it tri-state.
+    deep*: bool
     interest*: HashSet[string]
     # Capability filter: the set of container type-ids this subscriber can
     # materialize (its registered `type_initializers`). The authority skips any

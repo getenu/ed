@@ -41,6 +41,9 @@ type EdClient* = ref object
   fetch*: seq[string]
     ## Ids fetched as part of each (re)subscribe (partial only). They land in
     ## the registry, so `ctx[id]` works for them afterwards.
+  deep*: bool
+    ## Ask the authority to push OWNS_MEMBERS member closures (a game client
+    ## wants units render-ready; a narrow utility fetches what it touches).
   on_connect*: proc()
     ## (Re)create this client's objects after each (re)connect. Runs with
     ## `Ed.thread_ctx` set to the fresh context. Single-threaded — runs on
@@ -63,7 +66,9 @@ proc connect*(self: EdClient) =
   self.ctx = EdContext.init(chan_size = chan_size, buffer = false, id = self.id)
   Ed.thread_ctx = self.ctx
   try:
-    self.ctx.subscribe(self.address, partial = self.partial, fetch = self.fetch)
+    self.ctx.subscribe(
+      self.address, partial = self.partial, fetch = self.fetch, deep = self.deep
+    )
     if self.on_connect != nil:
       self.on_connect()
   except ConnectionError as e:
