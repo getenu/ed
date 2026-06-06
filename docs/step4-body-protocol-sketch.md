@@ -191,6 +191,22 @@ Registered types carry it via an ed base they inherit:
 `EdRef = ref object of RootObj` (holds the `RefHandle`). enu: `Model of EdRef`; the
 test's `RefType of EdRef`.
 
+> **IMPLEMENTED — divergence from the sketch above (ed `8d91d20`).** The `ctx
+> {.cursor.}` + `ctx.ref_pool.del` shape shown here is a **UAF** and was NOT used.
+> At teardown ORC can cycle-collect a context together with its registered refs and
+> free the *context first*, so the ref's `=destroy` then reads a freed `EdContext`
+> (ASan caught it on the first run). The destructor must dereference **nothing**.
+> Shipped shape: `RefHandle = ref object { ctx_uid: int; ref_id: string }` (a context
+> uid by *value*, no ref). `=destroy` only **records** `(ctx_uid, ref_id)` into a
+> thread-local `pending_dead_refs`; each context prunes its own dead ids from
+> `ref_pool` **before every identity read** (`find_ref`, `from_flatty` dedup) and on
+> `tick`. The uid is a new per-instance `EdContext.uid` (threadvar counter at init),
+> *not* the reusable string `id` — otherwise a deferred-collected old context would
+> prune a *new* same-id context's live entry. So cleanup is deferred + pull-based, and
+> the cursor-dangling read window is closed by the prune-before-read. (A flatty skip
+> for `RefHandle` is also needed — its fields are local state, re-minted on the
+> receiver by `ref_count`.)
+
 When the registered ref's last reference drops, ORC runs its **default** destructor →
 destroys its fields → the `RefHandle`'s tiny `=destroy` cleans the *correct* `ref_pool`.
 
@@ -205,11 +221,15 @@ Why this is the chosen shape:
 
 ### Implementation sequence
 1. ed: `RefHandle` + `EdRef` base + destructors (self-contained, compile-only).
-2. ed: `ref_pool` obj → `{.cursor.}`; `ref_count` sets `handle.ctx/ref_id` on first
-   ADD; delete the grace (`freeable_refs`/`free_refs` sweep). ← UAF-gated.
-3. enu: `Model of EdRef`; retire explicit `ctx.free`/`queue_free`.
+   ✅ DONE (ed `6b91d5b`).
+2. ed: `ref_pool` obj → `{.cursor.}`; `ref_count` wires the handle (`ctx_uid`/`ref_id`)
+   on first ADD; delete the grace (`freeable_refs`/`free_refs` sweep). ← UAF-gated.
+   ✅ DONE (ed `8d91d20`) — with the deferred/uid divergence noted above.
+3. enu: `Model of EdRef`; retire explicit `ctx.free`/`queue_free`. ← NEXT.
 4. test: rewrite "free refs" to "freed when unreferenced"; `RefType of EdRef`.
+   ✅ DONE (folded into 2; all ed test types migrated to `EdRef`).
 5. ASan (UAF half) + flag the leak half for Linux/Valgrind follow-up.
+   ✅ UAF half DONE (`tests/asan.sh` clean, 0 errors); leak half still Linux/Valgrind.
 
 ## Deferred to the partial-replica/eviction phase
 
