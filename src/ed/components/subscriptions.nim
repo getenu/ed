@@ -831,6 +831,17 @@ proc untrack*[T, O](self: Ed[T, O], zid: EID) =
   else:
     error "no change callback for zid", zid = zid
 
+proc bind_lifetime*[T, O](self: Ed[T, O], lifetime: Lifetime, zid: EID) =
+  ## Bind an already-registered callback (`zid`) to `lifetime`, so it untracks
+  ## when the lifetime finishes. Lets sugar that mints its own zid (`changes`,
+  ## enu's `watch`) route teardown through an owner's Lifetime without exposing
+  ## the privileged untrack path. Guarded so a manual untrack first — or the
+  ## owner dying first — is safe and idempotent.
+  privileged
+  lifetime.add proc() {.gcsafe.} =
+    if not self.destroyed and zid in self.changed_callbacks:
+      self.untrack(zid)
+
 proc track*[T, O](
     self: Ed[T, O], callback: proc(changes: seq[Change[O]]) {.gcsafe.}
 ): EID {.discardable.} =
@@ -848,6 +859,14 @@ proc track*[T, O](
     self.untrack(zid)
   result = zid
 
+  # Inside an `own` scope, route this callback's untrack through the owner's
+  # lifetime too, so it's torn down when the owner is destroyed (the typical
+  # case: a subscription on something the owner doesn't itself own). No scope
+  # open → no-op. Idempotent if also bound explicitly.
+  {.gcsafe.}:
+    if not current_lifetime.is_nil:
+      self.bind_lifetime(current_lifetime, zid)
+
 proc track*[T, O](
     self: Ed[T, O], callback: proc(changes: seq[Change[O]], zid: EID) {.gcsafe.}
 ): EID {.discardable.} =
@@ -857,17 +876,6 @@ proc track*[T, O](
     callback(changes, zid)
 
   result = zid
-
-proc bind_lifetime*[T, O](self: Ed[T, O], lifetime: Lifetime, zid: EID) =
-  ## Bind an already-registered callback (`zid`) to `lifetime`, so it untracks
-  ## when the lifetime finishes. Lets sugar that mints its own zid (`changes`,
-  ## enu's `watch`) route teardown through an owner's Lifetime without exposing
-  ## the privileged untrack path. Guarded so a manual untrack first — or the
-  ## owner dying first — is safe and idempotent.
-  privileged
-  lifetime.add proc() {.gcsafe.} =
-    if not self.destroyed and zid in self.changed_callbacks:
-      self.untrack(zid)
 
 proc track*[T, O](
     self: Ed[T, O],

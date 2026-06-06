@@ -1,6 +1,9 @@
 import ed/[deps]
 import pkg/[serialization, json_serialization]
 
+template ed_ignore*() {.pragma.}
+  ## Mark a field to be ignored during `Ed` serialization.
+
 type
   EID* = uint16
     ## Callback identifier for tracking registered callbacks.
@@ -43,6 +46,15 @@ type
     ## inherit this; the eviction-phase proxy/observability hangs off the same
     ## base.
     ref_handle*: RefHandle
+    destroyed* {.ed_ignore.}: bool
+      ## Idempotency latch for `destroy`, set at its top. Mirrors
+      ## `EdBase.destroyed` (containers). `ed_ignore`: it's local teardown state,
+      ## never synced (a freshly received ref must arrive un-destroyed).
+    lifetime*: Lifetime
+      ## Owns this ref's teardown actions — external subscriptions, and (via the
+      ## `own` scope) its owned containers. `destroy` runs `lifetime.finish`. Local
+      ## state: it's a ref, so stringify nils it, and the `Lifetime` flatty skip
+      ## covers the rest — never synced.
 
   EdFlags* = enum
     ## Flags controlling `Ed` container behavior.
@@ -333,9 +345,6 @@ type
 const DEFAULT_FLAGS* = {SYNC_LOCAL, SYNC_REMOTE}
   ## Default flags for `Ed` containers: sync both locally and remotely.
 
-template ed_ignore*() {.pragma.}
-  ## Mark a field to be ignored during `Ed` serialization.
-
 var next_ctx_uid* {.threadvar.}: int
   ## Thread-local source of `EdContext.uid`. Per-thread is enough: a context is
   ## created on, ticks on, and frees its refs on, one home thread, and
@@ -408,6 +417,29 @@ proc finish*(self: Lifetime) =
 
 proc finished*(self: Lifetime): bool =
   self.finished
+
+var current_lifetime* {.threadvar.}: Lifetime
+  ## The lifetime an open `own` scope binds new work to (thread-local; nil = no
+  ## scope). Container `init` (defaults) and `track` consult it: anything created
+  ## or tracked inside `self.own:` registers its teardown on `self.lifetime`, so
+  ## `lifetime.finish` tears it all down at once. nil outside a scope → no
+  ## auto-binding (existing behavior unchanged).
+
+template own*(self: EdRef, body: untyped) =
+  ## Within this scope, every Ed container created and every callback tracked
+  ## binds its teardown to `self.lifetime` (lazily created). Pair it with
+  ## `self.lifetime.finish()` in destroy. Scopes nest by save/restore — the
+  ## innermost open `own` wins, and control returns to the enclosing owner on
+  ## exit. It's a *dynamic* scope: things constructed in procs called from the
+  ## body bind here too, so keep blocks tight.
+  if self.lifetime.is_nil:
+    self.lifetime = new_lifetime()
+  let prev = current_lifetime
+  current_lifetime = self.lifetime
+  try:
+    body
+  finally:
+    current_lifetime = prev
 
 proc write_value*[T](w: var JsonWriter, self: set[T]) =
   write_value(w, self.to_seq)

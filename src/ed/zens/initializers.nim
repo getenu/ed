@@ -90,6 +90,16 @@ proc defaults[T, O](
     ctx.pack_objects
   ctx.objects[self.id] = self
 
+  # If created inside an `own` scope, bind this container's teardown to the
+  # owner's lifetime, so `lifetime.finish` destroys it (removes it from
+  # ctx.objects + fires CLOSED). No scope open → no-op, behavior unchanged.
+  {.gcsafe.}:
+    if not current_lifetime.is_nil:
+      let obj = self
+      current_lifetime.add proc() {.gcsafe.} =
+        if ?obj and not obj.destroyed:
+          obj.destroy
+
   self.publish_create = proc(
       sub: Subscription, broadcast: bool, op_ctx = OperationContext()
   ) =
