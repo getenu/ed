@@ -771,6 +771,16 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         ),
       )
       # :(
+    # Synced ownership: record the owner this container was created under, so a
+    # context that didn't construct it (e.g. the server after an MCP client drops)
+    # can still tear it down via the owner's `destroy_owned`. Keyed by owner id,
+    # so arrival order vs. the owner doesn't matter.
+    if msg.owner_id.len > 0 and msg.object_id in self.objects and
+        ?self.objects[msg.object_id]:
+      self.objects[msg.object_id].owner_id = msg.owner_id
+      self.owned_by.mgetOrPut(msg.owner_id, initHashSet[string]()).incl(
+        msg.object_id
+      )
     # The creator is interested in its own object: make sure its canonical ops
     # flow back. Matters for partial subscribers; a no-op for full ones.
     for s in self.subscribers:

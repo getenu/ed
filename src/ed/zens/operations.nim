@@ -339,23 +339,32 @@ proc destroy*[T, O](self: Ed[T, O], publish = true) =
   self.ctx.objects[self.id] = nil
   self.ctx.objects_need_packing = true
   self.ctx.latest_op_id.del(self.id)  # drop own-op reconciliation state
+  # Keep the ownership index tidy: drop ourselves from our owner's owned-set.
+  if self.owner_id.len > 0 and self.owner_id in self.ctx.owned_by:
+    self.ctx.owned_by[self.owner_id].excl(self.id)
 
   if publish:
     self.publish_destroy OperationContext(source: [self.ctx.id].toHashSet)
 
-proc destroy_fields*[T: EdRef](self: T) =
-  ## Destroy every Ed *container* field of `self` (the owner-cascade): each fires
-  ## its CLOSED and drops out of `ctx.objects`. Raw ref fields (`parent`,
-  ## `clone_of`, …) aren't `Ed`, so they're skipped — only owned-in-place
-  ## containers are torn down, never referenced objects. Generic over the
-  ## concrete type so `fields` sees the derived fields. Unlike the `own` scope
-  ## (which only catches containers built inside its block), this works whether
-  ## the container was built locally or arrived via sync — so it's the right
-  ## teardown for replicas, whose units skip `init_unit`.
-  for field in self[].fields:
-    when field is Ed:
-      if ?field and not field.destroyed:
-        field.destroy
+proc destroy_owned*(ctx: EdContext, owner_id: string) =
+  ## Destroy every container owned by `owner_id` (per the `owned_by` index): each
+  ## fires its CLOSED, drops from `ctx.objects`, and broadcasts DESTROY so
+  ## replicas tear down their mirrors. Works in *any* context — including one that
+  ## didn't construct the object — because ownership is synced (the containers'
+  ## `owner_id`), not derived from the constructing context. The owner's
+  ## `lifetime.finish` handles its callbacks separately. The objects are
+  ## type-erased here (`ref EdBase`), so we destroy via each one's
+  ## `change_receiver` (the same path a received DESTROY takes).
+  private_access EdBase
+  if owner_id in ctx.owned_by:
+    # Snapshot: each destroy excls itself from the set we're iterating.
+    let owned = ctx.owned_by[owner_id]
+    for id in owned:
+      if id in ctx.objects and ?ctx.objects[id]:
+        let obj = ctx.objects[id]
+        if not obj.change_receiver.is_nil:
+          obj.change_receiver(obj, Message(kind: DESTROY), OperationContext())
+    ctx.owned_by.del(owner_id)
 
 iterator items*[T](self: EdSet[T] | EdSeq[T]): T =
   privileged

@@ -113,6 +113,8 @@ type
   Message = object
     kind*: MessageKind
     object_id*: string
+    owner_id*: string  # CREATE only: the EdRef that owns this container (synced
+                       # ownership; "" = unowned). Lets a non-creator destroy it.
     change_object_id*: string
     type_id*: int
     ref_id*: int
@@ -241,6 +243,12 @@ type
     close_procs: Table[EID, proc() {.gcsafe.}]
     objects*: OrderedTable[string, ref EdBase]
     objects_need_packing*: bool
+    # Ownership index: owner EdRef id -> ids of the containers it owns (whose
+    # `owner_id` points back here). Built as containers are created/materialized,
+    # pruned as they're destroyed. Lets an owner tear down what it owns
+    # (`destroy_owned`) in *any* context — including one that didn't construct it
+    # (e.g. the server cleaning up an MCP-created bot after the client drops).
+    owned_by*: Table[string, HashSet[string]]
     ref_pool: Table[string, CountedRef]
     subscribers*: seq[Subscription]
     chan: Chan[Message]
@@ -280,6 +288,12 @@ type
   EdBase* = object of RootObj
     ## Base type for all `Ed` containers. Not used directly.
     id*: string
+    # The EdRef (by id) that owns this container, or "" if unowned. Set when the
+    # container is created inside an `own` scope, and on materialize from the
+    # synced CREATE envelope, so it's the same in every context. Indexed in
+    # `EdContext.owned_by`; the owner's `destroy_owned` tears these down. Mutable
+    # on purpose — ownership transfer (re-home a live object) will reset it.
+    owner_id*: string
     destroyed*: bool
     # Partial replicas: a placeholder is a non-broadcasting stand-in for a
     # not-yet-materialized object (its contents are empty until fetched). Reading
@@ -419,27 +433,36 @@ proc finished*(self: Lifetime): bool =
   self.finished
 
 var current_lifetime* {.threadvar.}: Lifetime
-  ## The lifetime an open `own` scope binds new work to (thread-local; nil = no
-  ## scope). Container `init` (defaults) and `track` consult it: anything created
-  ## or tracked inside `self.own:` registers its teardown on `self.lifetime`, so
-  ## `lifetime.finish` tears it all down at once. nil outside a scope → no
-  ## auto-binding (existing behavior unchanged).
+  ## The lifetime an open `own` scope binds *callbacks* to (thread-local; nil = no
+  ## scope). `track` consults it: a callback registered inside `self.own:` untracks
+  ## when `self.lifetime.finish` runs. nil outside a scope → no auto-binding.
 
-template own*(self: EdRef, body: untyped) =
-  ## Within this scope, every Ed container created and every callback tracked
-  ## binds its teardown to `self.lifetime` (lazily created). Pair it with
-  ## `self.lifetime.finish()` in destroy. Scopes nest by save/restore — the
-  ## innermost open `own` wins, and control returns to the enclosing owner on
-  ## exit. It's a *dynamic* scope: things constructed in procs called from the
-  ## body bind here too, so keep blocks tight.
+var current_owner_id* {.threadvar.}: string
+  ## The id of the EdRef an open `own` scope attributes new *containers* to. A
+  ## container created inside the scope records it (`owner_id` + the `owned_by`
+  ## index); the owner's `destroy_owned` then tears those containers down. So
+  ## `lifetime` carries callbacks while container ownership is the baked-in
+  ## `owner_id`. "" outside a scope → containers are unowned.
+
+template own*[T: EdRef](self: T, body: untyped) =
+  ## Within this scope, every Ed container created records `self` as its owner
+  ## (so `self`'s teardown destroys them via `destroy_owned`), and every callback
+  ## tracked binds its untrack to `self.lifetime` (lazily created). Generic on the
+  ## concrete type so `self.id` resolves (EdRef has no `id` of its own). Scopes
+  ## nest by save/restore — innermost wins, control returns to the enclosing owner
+  ## on exit. It's a *dynamic* scope: things constructed in procs called from the
+  ## body attribute here too, so keep blocks tight.
   if self.lifetime.is_nil:
     self.lifetime = new_lifetime()
-  let prev = current_lifetime
+  let prev_lifetime = current_lifetime
+  let prev_owner_id = current_owner_id
   current_lifetime = self.lifetime
+  current_owner_id = self.id
   try:
     body
   finally:
-    current_lifetime = prev
+    current_lifetime = prev_lifetime
+    current_owner_id = prev_owner_id
 
 proc write_value*[T](w: var JsonWriter, self: set[T]) =
   write_value(w, self.to_seq)
@@ -454,6 +477,7 @@ proc write_value*(w: var JsonWriter, self: Subscription) =
 proc to_flatty*(s: var string, msg: Message) =
   s.to_flatty msg.kind
   s.to_flatty msg.object_id
+  s.to_flatty msg.owner_id
   s.to_flatty msg.change_object_id
   s.to_flatty msg.type_id
   s.to_flatty msg.ref_id
@@ -475,6 +499,7 @@ proc to_flatty*(s: var string, msg: Message) =
 proc from_flatty*(s: string, i: var int, msg: var Message) =
   s.from_flatty(i, msg.kind)
   s.from_flatty(i, msg.object_id)
+  s.from_flatty(i, msg.owner_id)
   s.from_flatty(i, msg.change_object_id)
   s.from_flatty(i, msg.type_id)
   s.from_flatty(i, msg.ref_id)

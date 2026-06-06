@@ -1,8 +1,9 @@
-import std/[unittest, sets]
+import std/[unittest, sets, tables]
 import ed
 import ed/zens/contexts
 
 type OwnerTest = ref object of EdRef
+  id: string
   items: EdSeq[int]
   val: EdValue[int]
 
@@ -54,28 +55,29 @@ proc run*() =
       check ran == 1
 
   suite "own scope":
-    test "containers created in an own scope are torn down by finish":
+    test "own scope records ownership; destroy_owned tears containers down":
       var ctx = EdContext.init(id = "own_ctx")
       Ed.thread_ctx = ctx
-      var owner = OwnerTest()
+      var owner = OwnerTest(id: "owner1")
       owner.own:
         owner.items = EdSeq[int].init(ctx = ctx, id = "own_items")
         owner.val = EdValue[int].init(ctx = ctx, id = "own_val")
 
       check "own_items" in ctx
       check "own_val" in ctx
-      check not owner.lifetime.is_nil
+      check owner.items.owner_id == "owner1"        # ownership baked into the object
+      check "own_items" in ctx.owned_by["owner1"]   # and indexed
 
-      owner.lifetime.finish()
-      check "own_items" notin ctx     # destroyed → removed from ctx.objects
+      ctx.destroy_owned("owner1")
+      check "own_items" notin ctx                   # destroyed → out of ctx.objects
       check "own_val" notin ctx
-      check owner.items.destroyed
+      check "owner1" notin ctx.owned_by
 
     test "callbacks tracked in an own scope untrack on finish":
       var ctx = EdContext.init(id = "own_ctx2")
       Ed.thread_ctx = ctx
       var external = EdValue[int].init(ctx = ctx, id = "ext")
-      var owner = OwnerTest()
+      var owner = OwnerTest(id: "owner2")
 
       var fired = 0
       owner.own:
@@ -88,13 +90,13 @@ proc run*() =
       owner.lifetime.finish()
       let after = fired
       external.value = 2
-      check fired == after            # untracked by finish
+      check fired == after            # untracked by finish (lifetime = callbacks)
 
-    test "nested own scopes bind to the innermost owner":
+    test "nested own scopes attribute containers to the innermost owner":
       var ctx = EdContext.init(id = "own_ctx3")
       Ed.thread_ctx = ctx
-      var outer = OwnerTest()
-      var inner = OwnerTest()
+      var outer = OwnerTest(id: "outer")
+      var inner = OwnerTest(id: "inner")
 
       outer.own:
         outer.items = EdSeq[int].init(ctx = ctx, id = "outer_items")
@@ -102,27 +104,38 @@ proc run*() =
           inner.items = EdSeq[int].init(ctx = ctx, id = "inner_items")
         outer.val = EdValue[int].init(ctx = ctx, id = "outer_val") # back to outer
 
-      inner.lifetime.finish()
+      check inner.items.owner_id == "inner"
+      check outer.items.owner_id == "outer"
+      check outer.val.owner_id == "outer"
+
+      ctx.destroy_owned("inner")
       check "inner_items" notin ctx
       check "outer_items" in ctx      # outer's still alive
       check "outer_val" in ctx
 
-      outer.lifetime.finish()
+      ctx.destroy_owned("outer")
       check "outer_items" notin ctx
       check "outer_val" notin ctx
 
-    test "destroy_fields destroys Ed container fields regardless of construction":
-      # The synced-replica path: containers built outside any `own` scope still
-      # tear down via reflection.
-      var ctx = EdContext.init(id = "df_ctx")
-      Ed.thread_ctx = ctx
-      var owner = OwnerTest()
-      owner.items = EdSeq[int].init(ctx = ctx, id = "df_items")   # no own scope
-      owner.val = EdValue[int].init(ctx = ctx, id = "df_val")
+    test "owner_id syncs; a non-creator context tears down via the owned index":
+      # The MCP case: one context builds an owned container; another (which never
+      # constructed it) destroys it via the synced ownership.
+      var ctx1 = EdContext.init(id = "own_src", blocking_recv = true)
+      var ctx2 = EdContext.init(id = "own_dst", blocking_recv = true)
+      ctx2.subscribe(ctx1)
+      Ed.thread_ctx = ctx1
+      ctx1.tick(blocking = false)
 
-      check "df_items" in ctx
-      check "df_val" in ctx
+      var owner = OwnerTest(id: "mcp_bot")
+      owner.own:
+        owner.items = EdSeq[int].init(ctx = ctx1, id = "bot_items")
+      owner.items.add 42 # a change, so it syncs
 
-      owner.destroy_fields()
-      check "df_items" notin ctx
-      check "df_val" notin ctx
+      ctx2.tick
+
+      check "bot_items" in ctx2
+      check EdSeq[int](ctx2["bot_items"]).owner_id == "mcp_bot" # rode the CREATE
+      check "bot_items" in ctx2.owned_by["mcp_bot"]             # indexed on the replica
+
+      ctx2.destroy_owned("mcp_bot") # ctx2 never built it, but owns the teardown
+      check "bot_items" notin ctx2
