@@ -146,6 +146,15 @@ proc to_flatty*(s: var string, x: proc) =
 proc from_flatty*(s: string, i: var int, p: proc) =
   discard
 
+proc to_flatty*(s: var string, x: Lifetime) =
+  ## A Lifetime is thread-local handle state (a set of cleanup closures), never
+  ## part of the synced value. Skip it — flatty can't serialize `seq[proc]`, and
+  ## the receiver mints its own. Mirrors the `proc` override above.
+  discard
+
+proc from_flatty*(s: string, i: var int, x: var Lifetime) =
+  discard
+
 proc to_flatty*(s: var string, p: ptr) =
   s.to_flatty(cast[int](p))
 
@@ -846,6 +855,17 @@ proc track*[T, O](
 
   result = zid
 
+proc bind_lifetime*[T, O](self: Ed[T, O], lifetime: Lifetime, zid: EID) =
+  ## Bind an already-registered callback (`zid`) to `lifetime`, so it untracks
+  ## when the lifetime finishes. Lets sugar that mints its own zid (`changes`,
+  ## enu's `watch`) route teardown through an owner's Lifetime without exposing
+  ## the privileged untrack path. Guarded so a manual untrack first — or the
+  ## owner dying first — is safe and idempotent.
+  privileged
+  lifetime.add proc() {.gcsafe.} =
+    if not self.destroyed and zid in self.changed_callbacks:
+      self.untrack(zid)
+
 proc track*[T, O](
     self: Ed[T, O],
     lifetime: Lifetime,
@@ -855,12 +875,8 @@ proc track*[T, O](
   ## owner calls `lifetime.finish` the callback untracks automatically — no
   ## manual `zid` bookkeeping. (Standalone Lifetime, per the lifecycle redesign;
   ## becomes the proxy's cleanup set under the future proxy/body split.)
-  privileged
   result = self.track(callback)
-  let zid = result
-  lifetime.add proc() {.gcsafe.} =
-    if not self.destroyed and zid in self.changed_callbacks:
-      self.untrack(zid)
+  self.bind_lifetime(lifetime, result)
 
 proc untrack_on_destroy*(self: ref EdBase, zid: EID) =
   self.bound_eids.add(zid)
