@@ -254,7 +254,16 @@ type
         gcsafe
       .}
 
-    ctx*: EdContext
+    # Back-reference to the owning context. `{.cursor.}` (non-owning): the
+    # context owns its objects via `objects*` (a strong OrderedTable), so this
+    # is the back-edge of that cycle. Marking it a cursor breaks the
+    # object<->context reference cycle so a freed object/subtree is reclaimed
+    # promptly instead of waiting on ORC's cycle collector. Safe because the
+    # context strictly outlives its objects (it holds the only registry refs;
+    # teardown that touches `self.ctx` — untrack/destroy — is explicit and runs
+    # while the context is alive, and no Ed object has an ORC `=destroy` that
+    # dereferences `ctx`). Validated under AddressSanitizer (tests/asan.sh).
+    ctx* {.cursor.}: EdContext
 
   ChangeCallback[O] = proc(changes: seq[Change[O]]) {.gcsafe.}
 
