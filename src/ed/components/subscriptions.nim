@@ -388,6 +388,51 @@ proc publish_closure(
       s.interest.incl id
     self.objects[id].publish_create(s)
 
+proc serve_key_wants(self: EdContext, object_id: string) =
+  ## Serve chained per-key wants that can now be answered — entries for
+  ## `object_id` may have just arrived (see forward_request).
+  privileged
+  if object_id notin self.pending_key_wants or object_id notin self:
+    return
+  let obj = self.objects[object_id]
+  var done: seq[string]
+  for key_bin, waiters in self.pending_key_wants[object_id]:
+    let reply = obj.publish_key(obj, key_bin)
+    if reply.found:
+      for waiter in waiters:
+        self.send(waiter, reply.msg, OperationContext(), DEFAULT_FLAGS)
+      done.add key_bin
+  for key_bin in done:
+    self.pending_key_wants[object_id].del key_bin
+  if self.pending_key_wants[object_id].len == 0:
+    self.pending_key_wants.del object_id
+
+proc forward_request(self: EdContext, requester: Subscription, msg: Message) =
+  ## Chain a request we can't serve: send it to our other peers (upstream).
+  ## The forward makes *us* the requester there, so the answer lands here and
+  ## the want-serving hooks relay it back to the original asker. The authority
+  ## never forwards (its miss is a real NOT_FOUND), which also terminates any
+  ## forwarding cycle in a bidirectional pair.
+  var fwd = msg
+  fwd.source = @[]
+  fwd.id_mappings = @[]
+  for sub in self.subscribers:
+    if sub.ctx_id == requester.ctx_id:
+      continue
+    self.send(sub, fwd, OperationContext(), DEFAULT_FLAGS)
+
+proc add_obj_want(self: EdContext, requester: Subscription, msg: Message) =
+  ## Remember + chain a whole-object want. Dedup: only the first want for an
+  ## id forwards upstream; later askers just join the waiters.
+  if msg.object_id in self.pending_obj_wants:
+    for want in self.pending_obj_wants[msg.object_id]:
+      if want.sub.ctx_id == requester.ctx_id:
+        return
+    self.pending_obj_wants[msg.object_id].add (requester, msg.deep, msg.follow)
+  else:
+    self.pending_obj_wants[msg.object_id] = @[(requester, msg.deep, msg.follow)]
+    self.forward_request(requester, msg)
+
 proc pack_messages(msgs: seq[Message]): seq[Message] =
   if msgs.len > 1:
     var packed_msg = Message(
@@ -546,6 +591,27 @@ proc unsubscribe*(self: EdContext, sub: Subscription) =
     discard
   self.subscribers.delete self.subscribers.find(sub)
   self.unsubscribed.add sub.ctx_id
+  # Purge the subscriber's chained wants so nothing is served to a dead sub.
+  var empty_ids: seq[string]
+  for id, wants in self.pending_obj_wants.mpairs:
+    wants = wants.filter_it(it.sub.ctx_id != sub.ctx_id)
+    if wants.len == 0:
+      empty_ids.add id
+  for id in empty_ids:
+    self.pending_obj_wants.del id
+  var empty_objs: seq[string]
+  for id, keys in self.pending_key_wants.mpairs:
+    var empty_keys: seq[string]
+    for key_bin, waiters in keys.mpairs:
+      waiters = waiters.filter_it(it.ctx_id != sub.ctx_id)
+      if waiters.len == 0:
+        empty_keys.add key_bin
+    for key_bin in empty_keys:
+      keys.del key_bin
+    if keys.len == 0:
+      empty_objs.add id
+  for id in empty_objs:
+    self.pending_key_wants.del id
 
 # Defined after `tick` (which it pumps); forward-declared so `subscribe` can wire
 # it onto each subscribing context.
@@ -890,6 +956,26 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     if msg.owner_id.len > 0 and msg.owner_id in self.fetches:
       self.fetches[msg.owner_id].state = Found
       self.fetches.del(msg.owner_id)
+    # Serve chained wants (see forward_request): whoever asked while we didn't
+    # have it. Deep wants serve the closure — its CREATEs precede this one
+    # (deepest-first publish); owner-only ids resolve via msg.owner_id.
+    template serve_obj_wants(id: string) =
+      if id in self.pending_obj_wants:
+        let wants = self.pending_obj_wants[id]
+        self.pending_obj_wants.del(id)
+        for want in wants:
+          if want.follow:
+            want.sub.interest.incl id
+          if want.deep:
+            discard self.publish_closure(want.sub, id, follow = want.follow)
+          elif id in self.objects and ?self.objects[id]:
+            self.objects[id].publish_create(want.sub)
+
+    serve_obj_wants(msg.object_id)
+    if msg.owner_id.len > 0:
+      serve_obj_wants(msg.owner_id)
+    # A fill can bring table entries chained key-waiters are waiting on.
+    self.serve_key_wants(msg.object_id)
     # The creator is interested in its own object: make sure its canonical ops
     # flow back. Matters for partial subscribers; a no-op for full ones.
     for s in self.subscribers:
@@ -897,10 +983,41 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         s.interest.incl msg.object_id
   elif msg.kind == NOT_FOUND:
     # The authority NACKed a fetch: resolve the handle so callers (and the
-    # blocking `ctx[]` pump) learn promptly instead of waiting out a deadline.
-    if msg.object_id in self.fetches:
-      self.fetches[msg.object_id].state = NotFound
-      self.fetches.del(msg.object_id)
+    # blocking `ctx[]` pump) learn promptly instead of waiting out a deadline,
+    # and relay the answer to any chained waiters (see forward_request).
+    if msg.obj.len > 0:
+      # Per-key NACK: a missing key is a *normal* answer (an empty-space voxel
+      # chunk). Relay per waiter and clear the wants so nothing dangles.
+      if msg.object_id in self.pending_key_wants:
+        for key_bin in msg.obj.from_flatty(seq[string]):
+          if key_bin in self.pending_key_wants[msg.object_id]:
+            for waiter in self.pending_key_wants[msg.object_id][key_bin]:
+              self.send(
+                waiter,
+                Message(
+                  kind: NOT_FOUND,
+                  object_id: msg.object_id,
+                  obj: @[key_bin].to_flatty,
+                ),
+                OperationContext(),
+                DEFAULT_FLAGS,
+              )
+            self.pending_key_wants[msg.object_id].del key_bin
+        if self.pending_key_wants[msg.object_id].len == 0:
+          self.pending_key_wants.del msg.object_id
+    else:
+      if msg.object_id in self.fetches:
+        self.fetches[msg.object_id].state = NotFound
+        self.fetches.del(msg.object_id)
+      if msg.object_id in self.pending_obj_wants:
+        for want in self.pending_obj_wants[msg.object_id]:
+          self.send(
+            want.sub,
+            Message(kind: NOT_FOUND, object_id: msg.object_id),
+            OperationContext(),
+            DEFAULT_FLAGS,
+          )
+        self.pending_obj_wants.del msg.object_id
   elif msg.kind == REQUEST:
     # A partial subscriber wants data. Two forms:
     #  - whole-object (`obj` empty): add the object to interest and publish_create
@@ -909,25 +1026,54 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     #    entries (an ADD op each), without adding the whole table to interest.
     # The requester is whoever the message came from — match by ctx id in `source`.
     #
-    # TODO(request chaining): a hub answers only from its own registry. In enu's
-    # topology (main ctx -> worker -> server), a main-thread fetch of a
-    # server-only id gets a NACK here instead of being resolved — unhelpful.
-    # Design when needed: on a miss, forward the REQUEST upstream (our own
-    # subscribers minus the requester), defer the answer, and NACK only if
-    # upstream NACKs; the reply relays back down via the existing materialize
-    # re-broadcast hop. Until then, fetches should originate on the context
-    # that's actually connected to the authority.
+    # Request chaining: a hub that can't serve a request forwards it to its
+    # other peers (becoming the requester there) and remembers who asked; the
+    # answer — data or NOT_FOUND — relays back down hop by hop. Only misses
+    # forward, and only the first want for an id/key does; the authority never
+    # forwards (its miss is the real NOT_FOUND).
     for s in self.subscribers:
       if s.ctx_id notin source:
         continue
       if msg.obj.len > 0:
-        if msg.object_id notin self:
-          continue
-        let obj = self.objects[msg.object_id]
-        for key_bin in msg.obj.from_flatty(seq[string]):
-          let reply = obj.publish_key(obj, key_bin)
-          if reply.found:
-            self.send(s, reply.msg, OperationContext(), DEFAULT_FLAGS)
+        # Per-key: serve what we have, chain or NACK the rest.
+        var missing: seq[string]
+        if msg.object_id in self:
+          let obj = self.objects[msg.object_id]
+          for key_bin in msg.obj.from_flatty(seq[string]):
+            let reply = obj.publish_key(obj, key_bin)
+            if reply.found:
+              self.send(s, reply.msg, OperationContext(), DEFAULT_FLAGS)
+            else:
+              missing.add key_bin
+        else:
+          missing = msg.obj.from_flatty(seq[string])
+        if missing.len > 0:
+          if self.is_authority:
+            self.send(
+              s,
+              Message(
+                kind: NOT_FOUND,
+                object_id: msg.object_id,
+                obj: missing.to_flatty,
+              ),
+              OperationContext(),
+              DEFAULT_FLAGS,
+            )
+          else:
+            var to_forward: seq[string]
+            for key_bin in missing:
+              if msg.object_id notin self.pending_key_wants:
+                self.pending_key_wants[msg.object_id] =
+                  init_table[string, seq[Subscription]]()
+              if key_bin notin self.pending_key_wants[msg.object_id]:
+                to_forward.add key_bin
+                self.pending_key_wants[msg.object_id][key_bin] = @[s]
+              elif s notin self.pending_key_wants[msg.object_id][key_bin]:
+                self.pending_key_wants[msg.object_id][key_bin].add s
+            if to_forward.len > 0:
+              var fwd = msg
+              fwd.obj = to_forward.to_flatty
+              self.forward_request(s, fwd)
       elif msg.deep:
         # Deep fetch: the id plus its ownership closure (see publish_closure —
         # the requested id may be an *owner*, a unit id with no container of its
@@ -938,29 +1084,36 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           # CREATE under this id is then delivered without re-fetching.
           s.interest.incl msg.object_id
         if not found:
-          self.send(
-            s,
-            Message(kind: NOT_FOUND, object_id: msg.object_id),
-            OperationContext(),
-            DEFAULT_FLAGS,
-          )
+          if self.is_authority:
+            self.send(
+              s,
+              Message(kind: NOT_FOUND, object_id: msg.object_id),
+              OperationContext(),
+              DEFAULT_FLAGS,
+            )
+          else:
+            self.add_obj_want(s, msg)
       else:
-        if msg.object_id in self:
+        if msg.object_id in self and not self.objects[msg.object_id].placeholder:
           if msg.follow:
             s.interest.incl msg.object_id
           self.objects[msg.object_id].publish_create(s)
         else:
+          # Missing — or held only as an unloaded placeholder, which would
+          # serve empty state; chain instead so the real data comes back.
           if msg.follow:
-            # Not here yet, but wanted: keep the interest so it's delivered the
-            # moment something creates it. The NACK below still tells the
-            # requester it doesn't exist *right now*.
+            # Keep the interest so a later CREATE under this id is delivered
+            # without re-fetching.
             s.interest.incl msg.object_id
-          self.send(
-            s,
-            Message(kind: NOT_FOUND, object_id: msg.object_id),
-            OperationContext(),
-            DEFAULT_FLAGS,
-          )
+          if self.is_authority:
+            self.send(
+              s,
+              Message(kind: NOT_FOUND, object_id: msg.object_id),
+              OperationContext(),
+              DEFAULT_FLAGS,
+            )
+          else:
+            self.add_obj_want(s, msg)
   elif msg.kind != BLANK:
     if msg.object_id notin self:
       # :( this should throw an error
@@ -976,6 +1129,8 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     )
     if msg.lsn > self.applied_lsn:
       self.applied_lsn = msg.lsn
+    # Ops (table ADDs) may have brought entries chained key-waiters want.
+    self.serve_key_wants(msg.object_id)
   else:
     fail "Can't recv a blank message"
 

@@ -229,6 +229,82 @@ proc run*() =
           discard client["bk_missing"]
       check get_mono_time() - started < init_duration(seconds = 2)
 
+    test "request chaining: a hub forwards a miss and relays the answer":
+      var a = EdContext.init(id = "ch_auth", is_authority = true)
+      var b = EdContext.init(id = "ch_hub")
+      var c = EdContext.init(id = "ch_leaf")
+      var x = EdValue[int].init(ctx = a, id = "ch_x")
+      x.value = 11
+      b.subscribe(a, partial = true, fetch = [])
+      b.tick()
+      c.subscribe(b, partial = true, fetch = [])
+      c.tick()
+      check "ch_x" notin b # the hub doesn't have it either
+
+      let handle = c.fetch("ch_x")
+      b.tick() # hub: miss -> remembers the want, forwards upstream
+      a.tick() # authority serves the hub
+      b.tick() # hub materializes, serves the waiting leaf
+      c.tick() # leaf receives
+      check handle.state == Found
+      check EdValue[int](c["ch_x"]).value == 11
+      check "ch_x" in b # the hub holds it now too
+
+    test "request chaining: an authority miss NACKs back down the chain":
+      var a = EdContext.init(id = "chn_auth", is_authority = true)
+      var b = EdContext.init(id = "chn_hub")
+      var c = EdContext.init(id = "chn_leaf")
+      b.subscribe(a, partial = true, fetch = [])
+      b.tick()
+      c.subscribe(b, partial = true, fetch = [])
+      c.tick()
+
+      let handle = c.fetch("chn_missing", follow = false)
+      b.tick() # forward
+      a.tick() # authority: real miss -> NOT_FOUND
+      b.tick() # relay to the waiter
+      c.tick()
+      check handle.state == NotFound
+
+    test "request chaining: per-key through a placeholder hub":
+      var a = EdContext.init(id = "chk_auth", is_authority = true)
+      var b = EdContext.init(id = "chk_hub")
+      var c = EdContext.init(id = "chk_leaf")
+      var tbl = EdTable[int, string].init(ctx = a, id = "chk_tbl")
+      tbl[1] = "one"
+      var parent = EdSeq[EdValue[string]].init(ctx = a, id = "chk_parent")
+      # Reference the table indirectly so partial subscribers mint placeholders
+      # for it (the voxel topology: worker holds the table unloaded).
+      var pointer_value = EdValue[string].init(ctx = a, id = "chk_ptr")
+      parent += pointer_value
+      b.subscribe(a, partial = true, fetch = ["chk_parent", "chk_tbl_ph"])
+      b.tick()
+      c.subscribe(b, partial = true, fetch = ["chk_parent"])
+      c.tick()
+
+      # Mint the placeholder relationship directly: leaf + hub hold the table
+      # id but not its data.
+      discard c.fetch("chk_tbl") # chains: b -> a; both materialize
+      b.tick()
+      a.tick()
+      b.tick()
+      c.tick()
+      check "chk_tbl" in c
+      let leaf_tbl = EdTable[int, string](c["chk_tbl"])
+      check leaf_tbl.loaded(1) == false or leaf_tbl[1] == "one"
+        # whole-object fetch may carry the value; the per-key path below is
+        # exercised against key 2, added after the fetch
+      tbl[2] = "two"
+      b.tick() # hub may or may not see it (interest-dependent); leaf requests:
+      leaf_tbl.request(2)
+      c.tick() # flush the key request
+      b.tick() # hub serves (if loaded) or chains
+      a.tick() # authority serves
+      b.tick() # hub applies + serves the waiter
+      c.tick() # leaf applies
+      check leaf_tbl.loaded(2)
+      check leaf_tbl[2] == "two"
+
     test "deep fetch pulls an owner's full ownership closure":
       var authority = EdContext.init(id = "d_auth", is_authority = true)
       var client = EdContext.init(id = "d_client")

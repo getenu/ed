@@ -291,6 +291,14 @@ type
     # In-flight fetches by id; resolved (Found/NotFound) as answers arrive, then
     # removed. Re-fetching after a NotFound mints a fresh handle.
     fetches*: Table[string, Fetch]
+    # Request chaining (hubs): wants we couldn't serve locally, forwarded
+    # upstream and remembered here. Served when the data arrives; NACK-relayed
+    # when the upstream answers NOT_FOUND. The authority never forwards — a
+    # miss there is a real NOT_FOUND.
+    pending_obj_wants*:
+      Table[string, seq[tuple[sub: Subscription, deep: bool, follow: bool]]]
+    # object_id -> key_bin -> waiting subscribers (per-key table requests).
+    pending_key_wants*: Table[string, Table[string, seq[Subscription]]]
     ref_pool: Table[string, CountedRef]
     subscribers*: seq[Subscription]
     chan: Chan[Message]
