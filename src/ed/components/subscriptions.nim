@@ -122,6 +122,9 @@ proc from_flatty*[T: ref RootObj](s: string, i: var int, value: var T) =
       var val: FlatRef
       flatty.from_flatty(s, i, val)
 
+      # Prune reclaimed instances before the dedup read so the cursor we reuse
+      # can't be dangling (see prune_dead_refs / RefHandle).
+      flatty_ctx.prune_dead_refs()
       if val.ref_id in flatty_ctx.ref_pool:
         value = value.type()(flatty_ctx.ref_pool[val.ref_id].obj)
       else:

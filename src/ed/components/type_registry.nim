@@ -202,6 +202,18 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
   for change in changes:
     if not ?change.item:
       continue
+    # Only registered refs belong in `ref_pool`. It's the serialization identity
+    # index (from_flatty dedup / find_ref), and now a *cursor* index, so an
+    # instance in it must carry a `RefHandle` to clean itself out on free — i.e.
+    # it must be an `EdRef`. Non-registered refs that happen to live in an Ed
+    # container are never looked up and have no cleanup handle, so they must
+    # never enter the pool (their cursor would dangle on free). Widen to the
+    # common base first: `change.item`'s static type may be an unrelated ref
+    # (a sibling of EdRef), which can't be converted to EdRef directly — but the
+    # runtime `of` check + downcast through RootRef is always valid.
+    let item = RootRef(change.item)
+    if not (item of EdRef):
+      continue
     let id = change.item.ref_id
     if ADDED in change.changes:
       if id notin self.ref_pool:
@@ -209,15 +221,30 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
         self.ref_pool[id] = CountedRef()
       self.ref_pool[id].references.incl(ed_id)
       self.ref_pool[id].obj = change.item
+      # Wire the per-instance cleanup handle the first time we see this instance.
+      # The pool's `obj` hold is non-owning (cursor); this handle is what keeps
+      # it from dangling — when ORC reclaims the instance its RefHandle.=destroy
+      # dels this exact context's `ref_pool` entry. The handle carries the
+      # instance's own ctx, the one thing a bare registered ref can't know under
+      # multiple contexts per thread.
+      let handle_owner = EdRef(item)
+      if handle_owner.ref_handle.is_nil:
+        handle_owner.ref_handle = RefHandle(ctx_uid: self.uid, ref_id: id)
     if REMOVED in change.changes:
-      assert id in self.ref_pool
-      self.ref_pool[id].references.excl(ed_id)
-      if self.ref_pool[id].references.card == 0:
-        self.freeable_refs[id] = get_mono_time() + init_duration(seconds = 10)
+      # REMOVE only unlinks — it never frees. A body is freed by ORC when its
+      # last real reference drops (RefHandle then cleans `ref_pool`), or later by
+      # eviction; a container removal just updates the reachability hint. This is
+      # what gives move-identity for free: a removed-then-readded replica re-links
+      # the same instance for any gap, with no grace timer.
+      if id in self.ref_pool:
+        self.ref_pool[id].references.excl(ed_id)
 
 proc find_ref*[T](self: EdContext, value: var T): bool =
   privileged
 
+  # Drop entries for instances ORC already reclaimed before reading `obj` — the
+  # cursor would otherwise dangle (see prune_dead_refs / RefHandle).
+  self.prune_dead_refs()
   if ?value:
     let id = value.ref_id
     if id in self.ref_pool:
@@ -232,13 +259,16 @@ proc can_free*(
 ): tuple[freeable: bool, references: seq[string], missing: bool] =
   privileged
 
-  result.freeable = true
-  if id notin self.freeable_refs:
-    result.freeable = false
-    if id in self.ref_pool:
-      result.references = self.ref_pool[id].references.to_seq
-    else:
-      result.missing = true
+  # "Freeable" now means: registered, and no container still holds it. (The old
+  # model gated on a 10s timer in `freeable_refs`; that grace is gone — see
+  # docs/step4-body-protocol-sketch.md.) Deregistering only drops the cursor
+  # index entry; ORC owns the memory and reclaims when the last holder releases.
+  if id notin self.ref_pool:
+    result.missing = true
+  elif self.ref_pool[id].references.card == 0:
+    result.freeable = true
+  else:
+    result.references = self.ref_pool[id].references.to_seq
 
 proc free_impl(self: EdContext, value: ref RootObj, id: string) =
   privileged
@@ -250,18 +280,19 @@ proc free_impl(self: EdContext, value: ref RootObj, id: string) =
     when defined(zen_lax_free):
       error "Free error", id, references = query.references
       self.ref_pool.del(id)
-      self.freeable_refs.del(id)
       return
 
     if not query.missing:
       fail \"ref `{id}` has {query.references.len} references from " &
         \"{references}. Can't free."
     else:
-      fail \"unable to find ref_id `{id}` in freeable refs. Double free?"
+      fail \"unable to find ref_id `{id}` in ref_pool. Double free?"
 
-  assert self.ref_pool[id].references.card == 0
+  # Deregister the index entry. Memory is ORC-owned, so this doesn't free the
+  # instance — it just forgets it. If the instance is still alive (e.g. an app
+  # handle held it), its later RefHandle.=destroy will `del` again, which is a
+  # harmless no-op on an absent key.
   self.ref_pool.del(id)
-  self.freeable_refs.del(id)
 
 proc free*[T: ref RootObj](self: EdContext, value: T) =
   self.free_impl(value, value.ref_id)
@@ -290,22 +321,20 @@ proc free_refs*(self: EdContext) =
       write_file(self.id & "-counts", counts)
       self.dump_at = now + init_duration(seconds = 10)
 
+  # Prune entries for instances ORC reclaimed since the last tick (RefHandle
+  # can't touch ref_pool itself — see prune_dead_refs).
+  self.prune_dead_refs()
+
+  # Drain any explicitly queued frees. The old 10s-grace sweep over
+  # `freeable_refs` is gone: an unreferenced ref is no longer time-freed here —
+  # ORC reclaims it when its last holder drops, and RefHandle.=destroy records
+  # the index entry for pruning. (`free_queue` survives for the explicit
+  # `queue_free` path, which enu is retiring; once retired this loop is empty.)
   let queue = self.free_queue
   self.free_queue.set_len(0)
   for id in queue:
     if id in self.ref_pool:
       self.free_impl(self.ref_pool[id].obj, id)
-
-  var to_remove: seq[string]
-  for id, free_at in self.freeable_refs:
-    if self.ref_pool[id].references.card == 0 and free_at < get_mono_time():
-      self.ref_pool.del(id)
-      to_remove.add(id)
-    elif self.ref_pool[id].references.card > 0:
-      to_remove.add(id)
-  for id in to_remove:
-    debug "freeing ref", id
-    self.freeable_refs.del(id)
 
 when is_main_module:
   import ./subscriptions

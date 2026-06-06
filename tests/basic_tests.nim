@@ -508,7 +508,7 @@ proc run*() =
 
   test "sync":
     type
-      Thing = ref object of RootObj
+      Thing = ref object of EdRef
         id: string
 
       Tree = ref object
@@ -613,7 +613,7 @@ proc run*() =
       check ctx2.len == 0
 
   test "sync nested":
-    type Unit = ref object of RootObj
+    type Unit = ref object of EdRef
       units: EdSeq[Unit]
       code: EdValue[string]
       id: int
@@ -633,7 +633,7 @@ proc run*() =
       check ru1.units[0].code.ctx == ctx2
 
   test "zentable of tables":
-    type Shared = ref object of RootObj
+    type Shared = ref object of EdRef
       id: string
       edits: EdTable[int, Table[string, string]]
 
@@ -691,58 +691,70 @@ proc run*() =
 
       check shared.chunks[1]["hello"] == "goodbye"
 
-  test "free refs":
-    type RefType = ref object of RootObj
+  test "refs freed when unreferenced":
+    # New lifecycle contract (replaces the old 10s-grace "free refs" test). A
+    # container REMOVE only unlinks — it never schedules a free. A registered
+    # ref's body persists while anything still holds it, so a remove-then-readd
+    # re-links the *same* instance for any gap (move-identity, no timer). The
+    # body is freed only when its last real reference drops: ORC reclaims it and
+    # its RefHandle.=destroy clears the ref_pool entry. The registered type must
+    # inherit EdRef to carry that handle. See docs/step4-body-protocol-sketch.md.
+    type RefType = ref object of EdRef
       id: string
 
     Ed.register(RefType, false)
 
     local_and_remote:
       var src = EdSeq[RefType].init
-
       var obj = RefType(id: "1")
+      let id = obj.ref_id
 
       src += obj
-
       ctx2.tick
       var dest = EdSeq[RefType](ctx2[src])
 
       private_access EdContext
       private_access CountedRef
 
-      check obj.ref_id in ctx1.ref_pool
-      check obj.ref_id in ctx2.ref_pool
-      check obj.ref_id notin ctx2.freeable_refs
+      check id in ctx1.ref_pool
+      check id in ctx2.ref_pool
 
-      let orig_dest_obj = RefType(ctx2.ref_pool[obj.ref_id].obj)
+      # Hold the dest-side instance so it can't be reclaimed across the remove.
+      var orig = RefType(ctx2.ref_pool[id].obj)
+
+      # REMOVE unlinks only: the body persists (still held by `orig`), the
+      # reachability count drops to zero, and nothing is scheduled for free.
       src -= obj
       ctx2.tick
-      check obj.ref_id in ctx2.ref_pool
-      check obj.ref_id in ctx2.freeable_refs
-      check ctx2.ref_pool[obj.ref_id].references.card == 0
-
-      src += obj
-      ctx2.tick
-      check obj.ref_id in ctx2.ref_pool
-      check obj.ref_id in ctx2.freeable_refs
-      check ctx2.ref_pool[obj.ref_id].references.card == 1
-      check dest[0] == orig_dest_obj
-      src -= obj
-      ctx2.tick
-
-      # after a timeout the unreferenced object will be removed
-      # from the dest ref_pool and freeable_refs, and if we add
-      # it back to src a new object will be created in dest
-      ctx2.freeable_refs[obj.ref_id] = MonoTime.low
-      ctx2.tick(blocking = false)
-      check obj.ref_id notin ctx2.ref_pool
-      check obj.ref_id notin ctx2.freeable_refs
       check dest.len == 0
+      check id in ctx2.ref_pool
+      check ctx2.ref_pool[id].references.card == 0
 
+      # Re-add across the gap re-links the very same instance — move-identity with
+      # no grace window (strictly better than the 10s timer it replaces).
       src += obj
       ctx2.tick
-      check dest[0].id == orig_dest_obj.id
-      check dest[0] != orig_dest_obj
+      check dest.len == 1
+      check dest[0] == orig
+      check ctx2.ref_pool[id].references.card == 1
+
+      # Drop every reference to the dest-side body: unlink it from the container
+      # and release the local handle. ORC reclaims it and its RefHandle records
+      # the id for the context to prune (the destructor never touches ref_pool) —
+      # freed exactly when unreferenced, no timer.
+      src -= obj
+      ctx2.tick
+      check dest.len == 0
+      orig = nil
+      ctx2.prune_dead_refs()
+      check id notin ctx2.ref_pool
+
+      # So a later re-add can only materialize a fresh instance.
+      src += obj
+      ctx2.tick
+      check dest.len == 1
+      check dest[0].id == "1"
+      check id in ctx2.ref_pool
 
   test "sync set":
     type Flags = enum
@@ -792,7 +804,7 @@ proc run*() =
 
   test "object with registered ref":
     type
-      RefType2 = ref object of RootObj
+      RefType2 = ref object of EdRef
         id: string
 
       RefType3 = ref object of RefType2
@@ -824,7 +836,7 @@ proc run*() =
         Targeted
         Highlighted
 
-      SyncUnit = ref object of RootRef
+      SyncUnit = ref object of EdRef
         id: int
         parent: SyncUnit
         units: EdSeq[SyncUnit]

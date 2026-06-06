@@ -18,21 +18,26 @@ type
   RefHandle* = ref object
     ## Per-instance registry-cleanup handle carried by every `EdRef`. When a
     ## registered ref's last reference drops, ORC destroys its fields and this
-    ## handle's `=destroy` removes the (now-dead) instance from the *correct*
-    ## context's `ref_pool`. It's the one piece that knows the instance's own
-    ## ctx — a bare registered ref carries no context back-ref, and
-    ## `Ed.thread_ctx` is wrong under multiple contexts per thread (load-bearing
-    ## for sync identity: two contexts hold different instances of one ref_id).
-    ## `ctx`/`ref_id` stay unset until the instance's first ADD into a
-    ## `ref_pool`; until then `=destroy` is a no-op, so this is inert (no
-    ## behavior change) until the registry wires it up.
-    ctx* {.cursor.}: EdContext  # non-owning: the context outlives its refs
+    ## handle's `=destroy` records the (now-dead) instance for removal from its
+    ## context's `ref_pool`. It identifies the context by *value* — a uid, not a
+    ## reference — on purpose: the destructor must never dereference its
+    ## `EdContext`, because at teardown the context can be reclaimed in the *same*
+    ## ORC cycle-collection batch as the ref (a dangling-cursor UAF, caught by
+    ## ASan). So instead of touching `ctx.ref_pool` directly it appends to a
+    ## thread-local pending list (`pending_dead_refs`); each context prunes its
+    ## own dead ids before any identity read and on tick. A bare registered ref
+    ## carries no such handle — and `Ed.thread_ctx` is wrong under multiple
+    ## contexts per thread (load-bearing for sync identity: two contexts hold
+    ## different instances of one ref_id) — which is why the uid lives here.
+    ## `ctx_uid`/`ref_id` stay unset until the instance's first ADD into a
+    ## `ref_pool`; until then `=destroy` is a no-op.
+    ctx_uid*: int  # owning context's per-instance uid (0 = unset). NOT the id.
     ref_id*: string
 
   EdRef* = ref object of RootObj
     ## Base for registered (network-syncable) refs. Carries a `RefHandle` so the
     ## registry can clean up `ref_pool` when ORC reclaims the instance — keeping
-    ## the registry's (future cursor) hold from dangling, with the Unit's own
+    ## the registry's non-owning (cursor) hold from dangling, with the Unit's own
     ## DEFAULT destructor intact (only the trivial `RefHandle` gets a custom
     ## one, so fields don't leak). enu's `Model` and the test's `RefType`
     ## inherit this; the eviction-phase proxy/observability hangs off the same
@@ -133,7 +138,17 @@ type
     value*: V
 
   CountedRef = object
-    obj*: ref RootObj
+    # Non-owning index entry: `obj` is a `{.cursor.}`, so `ref_pool` no longer
+    # keeps a registered ref alive (it once did — the old strong hold + 10s
+    # grace). Memory is ORC-owned; the real holders are the containers that
+    # `track` it (strong) plus the app/Godot node. When the last real reference
+    # drops, ORC reclaims the instance and its `RefHandle.=destroy` dels this
+    # entry — so the cursor can never dangle (ref_pool[id] non-nil ⟺ instance
+    # alive). Requires every registered type to inherit `EdRef`.
+    obj* {.cursor.}: ref RootObj
+    # Which Ed containers currently hold this ref. REFRAMED: a reachability hint
+    # only (used by the future evictor), NOT a free trigger — `card == 0` no
+    # longer schedules anything.
     references*: HashSet[string]
 
   RegisteredType = object
@@ -182,6 +197,12 @@ type
     ## Central coordination object managing `Ed` container lifecycle, subscriptions,
     ## and message passing between threads/network.
     id*: string
+    # Per-instance unique id (distinct from `id`, which is user-supplied and
+    # reused across contexts). Keys `pending_dead_refs` so a registered ref freed
+    # after its context is gone can't prune a *new* same-`id` context's ref_pool.
+    # Assigned from a thread-local counter at init; refs are freed on their
+    # context's home thread, so the counter and the pending list stay consistent.
+    uid*: int
     # Phase 1: global LSN + appointed leader (docs/phase-1-keystone-spike.md)
     is_authority*: bool   # this context is the sequencer (leader) for its objects
     leader_id*: string    # ctx_id of the authority (own id when is_authority)
@@ -211,7 +232,6 @@ type
     ref_pool: Table[string, CountedRef]
     subscribers*: seq[Subscription]
     chan: Chan[Message]
-    freeable_refs: Table[string, MonoTime]
     last_msg_id: Table[string, int]
     last_received_id: Table[string, int]
     reactor*: Reactor
@@ -316,17 +336,54 @@ const DEFAULT_FLAGS* = {SYNC_LOCAL, SYNC_REMOTE}
 template ed_ignore*() {.pragma.}
   ## Mark a field to be ignored during `Ed` serialization.
 
+var next_ctx_uid* {.threadvar.}: int
+  ## Thread-local source of `EdContext.uid`. Per-thread is enough: a context is
+  ## created on, ticks on, and frees its refs on, one home thread, and
+  ## `pending_dead_refs` is thread-local too — so uids only ever collide across
+  ## threads, where the separate pending tables keep them apart.
+
+var pending_dead_refs* {.threadvar.}: Table[int, seq[string]]
+  ## ctx uid -> ref_ids whose registered instance ORC has reclaimed. Populated by
+  ## `RefHandle.=destroy`, which must NOT touch its `EdContext` (it may already be
+  ## freed — even within the same cycle-collection batch). Each context drains its
+  ## own uid via `prune_dead_refs` before any `ref_pool` identity read and on tick.
+  ## Entries for a context that dies without draining just linger (bounded; freed
+  ## at thread exit) and can't be misattributed, since the key is the uid.
+
 proc `=destroy`(h: var typeof(RefHandle()[])) =
   ## Registry cleanup for a registered ref. Runs when ORC reclaims the handle
-  ## (its owning `EdRef`'s last reference dropped). Removes the instance from its
-  ## *own* context's `ref_pool`, so the registry's hold can never dangle. A
-  ## custom `=destroy` replaces field destruction, so `ref_id` is freed by hand;
-  ## `ctx` is a cursor (non-owning) and must not be. No-op until the registry
-  ## sets `ctx`/`ref_id` on the instance's first ADD — keeping step 1 inert.
-  if not h.ctx.is_nil and h.ref_id.len > 0:
+  ## (its owning `EdRef`'s last reference dropped). It must not dereference the
+  ## context (see RefHandle), so it only *records* the dead instance for the
+  ## context to prune later. A custom `=destroy` replaces field destruction, so
+  ## `ref_id` is freed by hand (`ctx_uid` is a plain int, nothing to free). No-op
+  ## until the registry sets `ctx_uid`/`ref_id` on the instance's first ADD.
+  if h.ctx_uid != 0 and h.ref_id.len > 0:
     {.cast(gcsafe).}:
-      h.ctx.ref_pool.del(h.ref_id)
+      pending_dead_refs.mget_or_put(h.ctx_uid, @[]).add(h.ref_id)
   `=destroy`(h.ref_id)
+
+proc prune_dead_refs*(self: EdContext) =
+  ## Remove from `ref_pool` the entries whose instances ORC has reclaimed (see
+  ## `pending_dead_refs`). Must run before any `ref_pool` identity lookup so a
+  ## dangling cursor is never read, and on tick to keep the pool tidy. Idempotent;
+  ## cheap when nothing is pending.
+  if self.uid in pending_dead_refs:
+    {.cast(gcsafe).}:
+      for ref_id in pending_dead_refs[self.uid]:
+        self.ref_pool.del(ref_id)
+      pending_dead_refs.del(self.uid)
+
+proc to_flatty*(s: var string, x: RefHandle) =
+  ## The registry-cleanup handle is per-context-local state (a context uid + id),
+  ## never part of the synced value — its uid is meaningless in another context.
+  ## Skip it; `ref_count` re-mints the handle on the receiver's first ADD. Defined
+  ## here (with the Message overrides) so it's visible where `type_registry`'s
+  ## `stringify` instantiates flatty. Mirrors the Lifetime/proc skips in
+  ## subscriptions.nim.
+  discard
+
+proc from_flatty*(s: string, i: var int, x: var RefHandle) =
+  discard
 
 proc new_lifetime*(): Lifetime =
   Lifetime()
