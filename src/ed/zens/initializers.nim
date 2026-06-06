@@ -12,6 +12,16 @@ var initialized = false
 proc ctx(): EdContext =
   Ed.thread_ctx
 
+proc relay_fill*[T, O](item: Ed[T, O], op_ctx: OperationContext) =
+  ## Re-broadcast a just-filled placeholder to our own subscribers: they hold
+  ## the same id as a placeholder (minted from the same inline ref), and the
+  ## relayed CREATE fills theirs and clears their flag — `loaded` then means
+  ## the same thing on every hop. Exported because the generated type
+  ## initializer expands at the `Ed.bootstrap` call site, where the private
+  ## `publish_create` field isn't reachable.
+  privileged
+  item.publish_create(broadcast = true, op_ctx = op_ctx)
+
 proc create_initializer[T, O](self: Ed[T, O]) =
   const ed_type_id = self.type.tid
 
@@ -34,10 +44,13 @@ proc create_initializer[T, O](self: Ed[T, O]) =
             debug "restoring received object", id
             var value = bin.from_flatty(T, ctx)
             let item = Ed[T, O](ctx[id])
-            ctx.filling = item.placeholder # fill of a placeholder → tag Fill
+            let was_placeholder = item.placeholder
+            ctx.filling = was_placeholder # fill of a placeholder → tag Fill
             item.placeholder = false # fill: real state arrived
             `value=`(item, value, op_ctx = op_ctx)
             ctx.filling = false
+            if was_placeholder:
+              relay_fill(item, op_ctx)
           else:
             if id notin ctx:
               discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
@@ -47,10 +60,13 @@ proc create_initializer[T, O](self: Ed[T, O]) =
               {.gcsafe.}:
                 let value = bin.from_flatty(T, ctx)
               let item = Ed[T, O](ctx[id])
-              ctx.filling = item.placeholder # fill of a placeholder → tag Fill
+              let was_placeholder = item.placeholder
+              ctx.filling = was_placeholder # fill of a placeholder → tag Fill
               item.placeholder = false # fill: real state arrived
               `value=`(item, value, op_ctx = op_ctx)
               ctx.filling = false
+              if was_placeholder:
+                relay_fill(item, op_ctx)
             ctx.value_initializers.add(initializer)
         elif id notin ctx:
           discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
