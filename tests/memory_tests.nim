@@ -167,6 +167,25 @@ proc run*() =
     obj.value = "no_trigger"
     check callback_count == 0
 
+  test "dropped proxy without self-capture frees promptly (no GC needed)":
+    # A raw `track` whose body never touches the object doesn't capture the
+    # proxy — no cycle, so the proxy frees at refcount zero and its callbacks
+    # stop immediately, before any cycle collection.
+    var ctx = EdContext.init(id = "pc_ctx")
+    Ed.thread_ctx = ctx
+    var fired = 0
+    block:
+      var obj = EdValue[string].init(ctx = ctx, id = "pc_obj")
+      discard obj.track proc(changes: seq[Change[string]]) {.gcsafe.} =
+        inc fired # no reference to obj: no self-capture, no cycle
+      obj.value = "one"
+      check fired >= 1
+      fired = 0
+    # No GC_full_collect: plain refcounting already freed the proxy.
+    var again = EdValue[string](ctx["pc_obj"])
+    again.value = "two"
+    check fired == 0
+
 when is_main_module:
   Ed.bootstrap
   run()

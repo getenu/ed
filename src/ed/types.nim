@@ -316,7 +316,12 @@ type
     warned_missing*: HashSet[string]
     changed_callback_eid: EID
     last_id: int
-    close_procs: Table[EID, proc() {.gcsafe.}]
+    # zid -> object id, for context-level `untrack(zid)`. Plain data on
+    # purpose: the old shape stored a closure capturing the proxy, which made
+    # the context strong-hold every tracked proxy until explicit untrack —
+    # never-collected callbacks (caught by the memory tests). Stale entries
+    # for proxies that died untracked linger as tiny strings, pinning nothing.
+    close_index: Table[EID, string]
     # The body registry: canonical, registry-owned state per id (phase 2 of the
     # proxy/body split). Proxies are minted on demand over these — see
     # `resolve_proxy`; `ctx[id]` still returns the proxy, so the public API is
@@ -453,6 +458,10 @@ type
     # Typed proxy factory, wired in `defaults` (the only place the concrete
     # Ed[T, O] is known). Mints over this body, sets the backref + handle.
     mint: proc(): ref EdBase {.gcsafe.}
+    # Typed context-level untrack (see EdContext.close_index): untracks `zid`
+    # on the live proxy, or no-ops — a dead proxy already took its callbacks
+    # with it. Captures only the body (the mint pattern).
+    untrack_zid: proc(zid: EID) {.gcsafe.}
 
   EdBody*[T] = ref object of EdBodyBase
     ## Typed body: the canonical data lives here.

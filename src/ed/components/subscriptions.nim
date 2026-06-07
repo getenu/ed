@@ -1353,7 +1353,7 @@ proc untrack*[T, O](self: Ed[T, O], zid: EID) =
     let callback = self.changed_callbacks[zid]
     if zid notin self.paused_eids:
       callback(@[Change.init(O, {CLOSED})])
-    self.ctx.close_procs.del(zid)
+    self.ctx.close_index.del(zid)
     debug "removing close proc", zid
     self.changed_callbacks.del(zid)
   else:
@@ -1382,9 +1382,7 @@ proc track*[T, O](
   inc self.ctx.changed_callback_eid
   let zid = self.ctx.changed_callback_eid
   self.changed_callbacks[zid] = callback
-  debug "adding close proc", zid
-  self.ctx.close_procs[zid] = proc() =
-    self.untrack(zid)
+  self.ctx.close_index[zid] = self.id
   result = zid
 
   # Inside an `own` scope, route this callback's untrack through the owner's

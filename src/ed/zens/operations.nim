@@ -10,7 +10,7 @@ proc untrack_all*[T, O](self: Ed[T, O]) =
   assert self.valid
   self.trigger_callbacks(@[Change.init(O, {CLOSED})])
   for zid, _ in self.changed_callbacks.pairs:
-    self.ctx.close_procs.del(zid)
+    self.ctx.close_index.del(zid)
 
   for zid in self.bound_eids:
     self.ctx.untrack(zid)
@@ -19,14 +19,17 @@ proc untrack_all*[T, O](self: Ed[T, O]) =
 
 proc untrack*(ctx: EdContext, zid: EID) =
   private_access EdContext
+  private_access EdBodyBase
 
-  # :(
-  if zid in ctx.close_procs:
-    ctx.close_procs[zid]()
-    debug "deleting close proc", zid
-    ctx.close_procs.del(zid)
+  if zid in ctx.close_index:
+    let object_id = ctx.close_index[zid]
+    ctx.close_index.del(zid)
+    if object_id in ctx.objects and ctx.objects[object_id] != nil:
+      let body = ctx.objects[object_id]
+      if body.untrack_zid != nil:
+        body.untrack_zid(zid)
   else:
-    debug "No close proc for zid", zid = zid
+    debug "No close index entry for zid", zid = zid
 
 proc contains*[T, O](self: Ed[T, O], child: O): bool =
   privileged

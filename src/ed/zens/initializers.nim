@@ -145,6 +145,20 @@ proc defaults[T, O](
     )
     body.proxy = proxy
     proxy
+  body.untrack_zid = proc(zid: EID) {.gcsafe.} =
+    # Context-level untrack: only meaningful while a proxy is live — a dead
+    # proxy's callbacks died with it. Prune first so the backref read is safe.
+    if body.ctx != nil:
+      body.ctx.prune_dead_proxies
+    if body.proxy != nil:
+      # Mirrors proxy-level `untrack` (defined downstream in subscriptions —
+      # not importable here): CLOSED notification, then drop the callback.
+      let p = Ed[T, O](body.proxy)
+      if zid in p.changed_callbacks:
+        let callback = p.changed_callbacks[zid]
+        if zid notin p.paused_eids:
+          callback(@[Change.init(O, {CLOSED})])
+        p.changed_callbacks.del(zid)
   body.proxy_gen = 1
   body.proxy = self
   self.proxy_handle =
