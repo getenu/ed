@@ -104,6 +104,12 @@ type
     PACKED
     REQUEST    # partial replica asking the authority for an object by id
     NOT_FOUND  # authority's NACK: the REQUESTed id isn't there (right now)
+    RELEASE    # per-key paging: a replica dropped table keys (obj = key batch).
+               # Receivers decide by role: a registered partial subscriber's
+               # RELEASE retracts its key interest; one arriving from *upstream*
+               # is an eviction notice — drop the keys locally and relay
+               # downstream. Full clones forward without evicting; the
+               # authority terminates it.
 
   BaseChange* = ref object of RootObj
     changes*: set[ChangeKind]
@@ -148,6 +154,10 @@ type
                     # the requested id owns via owned_by, recursively)
     follow*: bool   # REQUEST only: register interest so future ops follow — and,
                     # for a missing id, so it's delivered when it's created later
+    key_bin*: string # Table ops only: the serialized key, stamped by
+                     # build_message so fanout can filter per-key (LAZY tables /
+                     # key interest) without deserializing `obj`. Sender-side
+                     # only — blanked from the remote body.
     when defined(ed_trace):
       trace*: string
       id*: int
@@ -209,6 +219,12 @@ type
     # making it tri-state.
     deep*: bool
     interest*: HashSet[string]
+    # Per-key interest (LAZY tables): object_id -> serialized keys this
+    # subscriber has requested. A requested key streams its future ops — even
+    # one that was missing at request time (an empty-space voxel chunk someone
+    # later builds in). RELEASE retracts. Orthogonal to `interest`: a table in
+    # `interest` streams *all* its keys.
+    key_interest*: Table[string, HashSet[string]]
     # Capability filter: the set of container type-ids this subscriber can
     # materialize (its registered `type_initializers`). The authority skips any
     # object whose `type_id` isn't here, so a peer never receives an object it
@@ -281,6 +297,16 @@ type
     # keys). A frame's worth of request() calls collapse into one REQUEST per
     # table, flushed on the next tick.
     pending_key_requests*: Table[string, seq[string]]
+    # Per-key releases buffered between ticks, mirroring pending_key_requests:
+    # one RELEASE per table per tick. Broadcast to all peers — upstream reads it
+    # as an interest retract, downstream as an eviction notice.
+    pending_key_releases*: Table[string, seq[string]]
+    # Contexts we subscribed *to* (our data sources). An eviction notice
+    # (RELEASE) is honored only when it arrives from upstream — we are a clone
+    # of that context, so a key it dropped is gone for us too. This is how
+    # partiality inherits down a clone chain (a full clone of a full source
+    # never receives one); the authority has no upstream and terminates.
+    upstream_ctx_ids*: HashSet[string]
     changed_callback_eid: EID
     last_id: int
     close_procs: Table[EID, proc() {.gcsafe.}]
@@ -363,7 +389,10 @@ type
     ): Message {.gcsafe.}
 
     publish_create: proc(
-      sub = Subscription(), broadcast = false, op_ctx = OperationContext()
+      sub = Subscription(),
+      broadcast = false,
+      op_ctx = OperationContext(),
+      contents = true, # false = handle only (empty-body CREATE; LAZY push)
     ) {.gcsafe.}
 
     change_receiver:
@@ -379,6 +408,16 @@ type
       proc(
         self: ref EdBase, key_bin: string
       ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.}
+
+    # Per-key eviction (paging). Given a serialized key, drop the entry locally
+    # — fires REMOVED callbacks, no publish — and report whether it was present
+    # plus the ids of Ed containers nested in its value (so the caller can shed
+    # interest / relay them). The local half of `release` and the receiving half
+    # of a RELEASE eviction notice. nil for non-table containers.
+    evict_key:
+      proc(
+        self: ref EdBase, key_bin: string
+      ): tuple[found: bool, nested: seq[string]] {.gcsafe.}
 
     # Back-reference to the owning context. `{.cursor.}` (non-owning): the
     # context owns its objects via `objects*` (a strong OrderedTable), so this

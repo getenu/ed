@@ -305,7 +305,7 @@ proc run*() =
       check leaf_tbl.loaded(2)
       check leaf_tbl[2] == "two"
 
-    test "LAZY containers are pull-only (skipped by closure pushes)":
+    test "LAZY containers arrive as pull-only handles (no contents)":
       var authority = EdContext.init(id = "lz_auth", is_authority = true)
       var client = EdContext.init(id = "lz_client")
       Ed.thread_ctx = authority
@@ -323,12 +323,124 @@ proc run*() =
       authority.tick()
       client.tick()
       check "lz_items" in client # normal container came with the closure
-      check "lz_big" notin client # LAZY skipped — pull-only
+      check "lz_big" in client # LAZY came too — but only as a handle
+      let big = EdTable[int, string](client["lz_big"])
+      check not big.loaded # placeholder: shape unknown, entries page in
+      check not big.loaded(1) # the entry did NOT ride along
+      check big.value.len == 0 # and reading doesn't materialize (LAZY: no touch)
 
-      discard client.fetch("lz_big") # explicit pull still works
+      discard client.fetch("lz_big") # explicit whole-table pull still works
       authority.tick()
       client.tick()
-      check EdTable[int, string](client["lz_big"])[1] == "huge"
+      check big.loaded
+      check big[1] == "huge"
+
+    test "per-key interest: requested keys stream, missing keys pop in":
+      var authority = EdContext.init(id = "ki_auth", is_authority = true)
+      var client = EdContext.init(id = "ki_client")
+      Ed.thread_ctx = authority
+      var owner = DeepOwner(id: "ki_owner")
+      var tbl: EdTable[int, string]
+      owner.own:
+        tbl = EdTable[int, string].init(
+          ctx = authority, id = "ki_tbl", flags = DEFAULT_FLAGS + {LAZY}
+        )
+      tbl[1] = "one"
+
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      discard client.fetch("ki_owner", deep = true) # handle rides the closure
+      authority.tick()
+      client.tick()
+      let ctbl = EdTable[int, string](client["ki_tbl"])
+      check not ctbl.loaded(1) # handle only — entries page in on request
+
+      # Requesting a present key loads it — and subscribes to it: a later
+      # write to that key streams without re-requesting.
+      ctbl.request(1)
+      client.tick()
+      authority.tick()
+      client.tick()
+      check ctbl.loaded(1)
+      check ctbl[1] == "one"
+      tbl[1] = "one, live"
+      authority.tick()
+      client.tick()
+      check ctbl[1] == "one, live"
+
+      # Requesting a missing key is a normal answer (empty space) — but the
+      # interest sticks, so the key pops in when someone builds there.
+      ctbl.request(2)
+      client.tick()
+      authority.tick()
+      client.tick()
+      check not ctbl.loaded(2)
+      tbl[2] = "two"
+      authority.tick()
+      client.tick()
+      check ctbl.loaded(2)
+      check ctbl[2] == "two"
+
+      # A key never requested doesn't stream.
+      tbl[3] = "three"
+      authority.tick()
+      client.tick()
+      check not ctbl.loaded(3)
+
+    test "release: evicts locally, retracts upstream, downstream clones shed":
+      var authority = EdContext.init(id = "rl_auth", is_authority = true)
+      var pager = EdContext.init(id = "rl_pager")
+      var clone = EdContext.init(id = "rl_clone")
+      Ed.thread_ctx = authority
+      var owner = DeepOwner(id: "rl_owner")
+      var tbl: EdTable[int, string]
+      owner.own:
+        tbl = EdTable[int, string].init(
+          ctx = authority, id = "rl_tbl", flags = DEFAULT_FLAGS + {LAZY}
+        )
+      tbl[1] = "one"
+
+      pager.subscribe(authority, partial = true, fetch = [])
+      pager.tick()
+      clone.subscribe(pager) # full clone of the partial pager (a node ctx)
+      clone.tick()
+      discard pager.fetch("rl_owner", deep = true) # handle rides the closure
+      authority.tick()
+      pager.tick()
+      clone.tick()
+      let ptbl = EdTable[int, string](pager["rl_tbl"])
+      let ntbl = EdTable[int, string](clone["rl_tbl"])
+      check not ptbl.loaded(1) # handle only
+
+      ptbl.request(1) # page in
+      pager.tick()
+      authority.tick()
+      pager.tick()
+      clone.tick()
+      check ptbl.loaded(1)
+      check ntbl.loaded(1) # the fill relayed to the clone
+
+      ptbl.release(1) # page out
+      check not ptbl.loaded(1) # evicted locally, immediately
+      pager.tick() # flush the RELEASE broadcast
+      authority.tick()
+      clone.tick()
+      check not ntbl.loaded(1) # eviction notice reached the clone
+
+      tbl[1] = "one, unseen" # interest was retracted: this must NOT stream
+      authority.tick()
+      pager.tick()
+      clone.tick()
+      check not ptbl.loaded(1)
+      check not ntbl.loaded(1)
+
+      ptbl.request(1) # paging back in re-fetches and re-subscribes
+      pager.tick()
+      authority.tick()
+      pager.tick()
+      clone.tick()
+      check ptbl[1] == "one, unseen"
+      check ntbl[1] == "one, unseen"
 
     test "per-key replies carry nested containers (chunk-deep)":
       var authority = EdContext.init(id = "kd_auth", is_authority = true)

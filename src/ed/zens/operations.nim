@@ -69,7 +69,9 @@ template touch_placeholder(self: untyped) =
   ## Materialize-on-access: if `self` is an unmaterialized placeholder, ask its
   ## context to materialize it (kick a fetch; block until filled when
   ## `ctx.blocking`). No-op for a loaded object or a context without the hook.
-  if self.placeholder and self.ctx.materialize != nil:
+  ## LAZY containers are exempt: they're pull-only by design — entries arrive
+  ## per-key (`request`), so reading one must never materialize the whole table.
+  if self.placeholder and LAZY notin self.flags and self.ctx.materialize != nil:
     self.ctx.materialize(self.ctx, self.id)
 
 proc value*[T, O](self: Ed[T, O]): T =
@@ -107,15 +109,19 @@ proc request*[K, V](self: EdTable[K, V], keys: openArray[K]) =
     self.request(key)
 
 proc release*[K, V](self: EdTable[K, V], key: K) =
-  ## Drop a locally-materialized entry to free memory (eviction). Local only —
-  ## fires a REMOVED change (so watches un-render) but does NOT delete on the
-  ## authority; `request(key)` re-fetches it. No-op if not loaded.
+  ## Drop a locally-materialized entry to free memory (paging out). Never
+  ## deletes on the authority; `request(key)` re-fetches. Three effects:
+  ## evict locally (REMOVED fires, watches un-render), retract our per-key
+  ## interest upstream (ops for this key stop flowing), and notify downstream
+  ## clones so they evict too — all via one batched RELEASE on the next tick.
+  ## Also retracts a pending interest in a key that never loaded (a requested
+  ## empty-space chunk).
   privileged
   assert self.valid
+  let key_bin = key.to_flatty
   if key in self.tracked:
-    let pair = Pair[K, V](key: key, value: self.tracked[key])
-    self.tracked.del key
-    self.trigger_callbacks(@[Change[Pair[K, V]](changes: {REMOVED}, item: pair)])
+    discard self.evict_key(self, key_bin)
+  self.ctx.pending_key_releases.mgetOrPut(self.id, @[]).add key_bin
 
 proc release*[K, V](self: EdTable[K, V], keys: openArray[K]) =
   for key in keys:

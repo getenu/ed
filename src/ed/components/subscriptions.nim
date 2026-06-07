@@ -212,6 +212,7 @@ proc remote_body(msg: Message, no_overwrite: bool): string =
   var body_msg = msg
   body_msg.source = @[]
   body_msg.id_mappings = @[]
+  body_msg.key_bin = "" # sender-side per-key filter tag; not wire data
   if no_overwrite:
     body_msg.obj = ""
   result = body_msg.to_flatty.ed_compress
@@ -365,8 +366,7 @@ proc publish_closure(
     inc i
     if id in self:
       result = true
-      if LAZY notin self.objects[id].flags:
-        to_publish.add id
+      to_publish.add id
     if id in self.owned_by:
       result = true
       for owned_id in self.owned_by[id]:
@@ -385,9 +385,16 @@ proc publish_closure(
   # on for the same reason.
   for j in countdown(to_publish.high, 0):
     let id = to_publish[j]
-    if follow:
-      s.interest.incl id
-    self.objects[id].publish_create(s)
+    let zen = self.objects[id]
+    if LAZY in zen.flags:
+      # Pull-only: send a *handle* (empty-body CREATE — id, type, flags) and
+      # don't follow it. The receiver registers a placeholder and pages
+      # entries with request/release; a whole-table push would defeat LAZY.
+      zen.publish_create(s, contents = false)
+    else:
+      if follow:
+        s.interest.incl id
+      zen.publish_create(s)
 
 proc serve_key_wants(self: EdContext, object_id: string) =
   ## Serve chained per-key wants that can now be answered — entries for
@@ -402,9 +409,11 @@ proc serve_key_wants(self: EdContext, object_id: string) =
     if reply.found:
       for waiter in waiters:
         # Per-key deep: nested containers (a chunk's delta seq) go first so
-        # the receiver's parse links them.
+        # the receiver's parse links them — and they're followed, so their
+        # future ops stream.
         for nested_id in reply.nested:
           if nested_id in self and not self.objects[nested_id].placeholder:
+            waiter.interest.incl nested_id
             self.objects[nested_id].publish_create(waiter)
         self.send(waiter, reply.msg, OperationContext(), DEFAULT_FLAGS)
       done.add key_bin
@@ -413,8 +422,20 @@ proc serve_key_wants(self: EdContext, object_id: string) =
   if self.pending_key_wants[object_id].len == 0:
     self.pending_key_wants.del object_id
 
+proc request_targets(self: EdContext): seq[Subscription] =
+  ## Who to send a REQUEST to: our upstreams (the contexts we page from).
+  ## Never downstream — a clone's copy of us is stale-by-definition, and
+  ## letting it answer can overwrite fresher local state with its echo.
+  ## No known upstream (a one-way local subscribe never told us) falls back
+  ## to everyone, preserving the old behavior for legacy topologies.
+  for sub in self.subscribers:
+    if sub.ctx_id in self.upstream_ctx_ids:
+      result.add sub
+  if result.len == 0:
+    result = self.subscribers
+
 proc forward_request(self: EdContext, requester: Subscription, msg: Message) =
-  ## Chain a request we can't serve: send it to our other peers (upstream).
+  ## Chain a request we can't serve: send it to our upstream(s).
   ## The forward makes *us* the requester there, so the answer lands here and
   ## the want-serving hooks relay it back to the original asker. The authority
   ## never forwards (its miss is a real NOT_FOUND), which also terminates any
@@ -422,7 +443,7 @@ proc forward_request(self: EdContext, requester: Subscription, msg: Message) =
   var fwd = msg
   fwd.source = @[]
   fwd.id_mappings = @[]
-  for sub in self.subscribers:
+  for sub in self.request_targets:
     if sub.ctx_id == requester.ctx_id:
       continue
     self.send(sub, fwd, OperationContext(), DEFAULT_FLAGS)
@@ -516,8 +537,6 @@ proc publish_changes*[T, O](
               ""
           msgs.add obj.build_message(obj, change, id, trace)
 
-      msgs = pack_messages(msgs)
-
       # Tag each op with its origin (the original writer) so writers can dedup
       # their own returned delta ops. Forwards preserve the incoming origin;
       # original mutations stamp our own id.
@@ -533,6 +552,36 @@ proc publish_changes*[T, O](
       let originating = op_ctx.op_id == 0
       let out_op_id =
         if originating: self.ctx.next_op_id else: op_ctx.op_id
+
+      # Per-key interest (LAZY tables): a partial subscriber without
+      # whole-object interest still receives ops for keys it has requested —
+      # including a key that was missing at request time (an empty-space chunk
+      # someone later builds in). Filtered per-sub on the pre-pack messages
+      # (each sub's key set differs) and sent unordered (lsn 0), matching
+      # per-key pulls. The canonical fanout below skips these subs — the
+      # object isn't in their `interest`.
+      for sub in self.ctx.subscribers:
+        if sub.partial and id notin sub.interest and
+            id in sub.key_interest and sub.ctx_id notin op_ctx.source:
+          for msg in msgs.mitems:
+            if msg.key_bin.len > 0 and msg.key_bin in sub.key_interest[id]:
+              if sub.capabilities.len > 0 and msg.type_id != 0 and
+                  msg.type_id notin sub.capabilities:
+                continue
+              if msg.kind == ASSIGN and msg.change_object_id.len > 0 and
+                  msg.change_object_id in self.ctx and
+                  msg.change_object_id notin sub.interest:
+                # Ed-valued entry (a chunk's delta seq): send the nested
+                # container ahead of the ADD so the receiver links it, and
+                # follow it so its future ops stream. RELEASE sheds it.
+                sub.interest.incl msg.change_object_id
+                self.ctx.objects[msg.change_object_id].publish_create(sub)
+              var keyed = msg
+              keyed.origin = out_origin
+              keyed.op_id = out_op_id
+              self.ctx.send(sub, keyed, op_ctx, self.flags)
+
+      msgs = pack_messages(msgs)
 
       # Authority stamps each ordered op with its global LSN, once, before
       # fanout so every subscriber receives the same LSN.
@@ -636,14 +685,20 @@ proc subscribe*(
     partial = false,
     fetch: open_array[string] = [],
     deep = false,
+    upstream = true,
 ) =
   ## Subscribe to another local context for cross-thread sync. When `partial`,
   ## we only receive the objects in `fetch` (and ids we `fetch` later) — the
   ## authority→us direction is filtered; our own writes still flow to it. The
   ## fetched ids land in the registry, so `ctx[id]` works for them afterwards.
+  ## `ctx` is recorded as our upstream (we're a clone of it — eviction notices
+  ## from it are honored); the internal reverse leg passes `upstream = false`
+  ## because receiving a client's own writes doesn't make it our data source.
   privileged
   debug "local subscribe", ctx = self.id
   self.materialize = materialize_impl # enable materialize-on-access
+  if upstream:
+    self.upstream_ctx_ids.incl ctx.id
   self.pack_objects
   var remote_objects: HashSet[string]
   for id in self.objects.keys:
@@ -668,7 +723,7 @@ proc subscribe*(
 
   if bidirectional:
     # Reverse direction (us → authority) stays full: we push our own writes.
-    ctx.subscribe(self, bidirectional = false)
+    ctx.subscribe(self, bidirectional = false, upstream = false)
 
 proc fetch*(
     self: EdContext, object_id: string, deep = false, follow = true
@@ -695,7 +750,7 @@ proc fetch*(
   self.fetches[object_id] = result
   var msg =
     Message(kind: REQUEST, object_id: object_id, deep: deep, follow: follow)
-  for sub in self.subscribers:
+  for sub in self.request_targets:
     self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
   self.tick_reactor
 
@@ -709,6 +764,21 @@ proc flush_key_requests(self: EdContext) =
   self.pending_key_requests.clear
   for object_id, keys in pending:
     let msg = Message(kind: REQUEST, object_id: object_id, obj: keys.to_flatty)
+    for sub in self.request_targets:
+      self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
+  self.tick_reactor
+
+proc flush_key_releases(self: EdContext) =
+  ## Send the per-key releases buffered since the last tick — one RELEASE per
+  ## table, broadcast to every peer. Upstream reads it as an interest retract
+  ## (ops for those keys stop flowing); downstream clones read it as an
+  ## eviction notice and drop the keys too (see the RELEASE handler).
+  if self.pending_key_releases.len == 0:
+    return
+  let pending = self.pending_key_releases
+  self.pending_key_releases.clear
+  for object_id, keys in pending:
+    let msg = Message(kind: RELEASE, object_id: object_id, obj: keys.to_flatty)
     for sub in self.subscribers:
       self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
   self.tick_reactor
@@ -803,6 +873,10 @@ proc subscribe*(
   # Create bidirectional subscription BEFORE processing messages so mappings get registered
   var bi_sub: Subscription = nil
   if bidirectional:
+    # The remote is our upstream: we're a clone of (a subset of) it, so its
+    # eviction notices apply to us. One-way remote subscribes never learn the
+    # peer's ctx_id (no ACK parse), so they can't be eviction targets yet.
+    self.upstream_ctx_ids.incl ctx_id
     bi_sub = Subscription(
       kind: REMOTE,
       connection: connection,
@@ -1024,6 +1098,56 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
             DEFAULT_FLAGS,
           )
         self.pending_obj_wants.del msg.object_id
+  elif msg.kind == RELEASE:
+    # Per-key paging notice (see `release`). Role decides the meaning:
+    #  - From a subscriber that pages from us: an interest retract — stop
+    #    streaming those keys (and the nested containers that rode in with
+    #    them). Our copy is untouched; we may serve others.
+    #  - From *upstream*: an eviction notice — our data source dropped the
+    #    keys, and we're a clone of it, so they're gone for us too. Evict
+    #    locally (REMOVED fires, watches un-render) and relay downstream.
+    # A full clone of a full source never receives one (full sources don't
+    # release); the authority has no upstream, so it only ever retracts.
+    let keys = msg.obj.from_flatty(seq[string])
+    var retracted = false
+    for s in self.subscribers:
+      if s.ctx_id notin source:
+        continue
+      if msg.object_id in s.key_interest:
+        retracted = true
+        for key_bin in keys:
+          s.key_interest[msg.object_id].excl key_bin
+          # Shed the keys' nested containers (the chunk's delta seq) from the
+          # follow set, so their ops stop streaming as well.
+          if msg.object_id in self:
+            let obj = self.objects[msg.object_id]
+            let reply = obj.publish_key(obj, key_bin)
+            for nested_id in reply.nested:
+              s.interest.excl nested_id
+        if s.key_interest[msg.object_id].len == 0:
+          s.key_interest.del msg.object_id
+    if not retracted:
+      var from_upstream = false
+      for src in source:
+        if src in self.upstream_ctx_ids:
+          from_upstream = true
+          break
+      if from_upstream:
+        if msg.object_id in self:
+          let obj = self.objects[msg.object_id]
+          if obj.evict_key != nil:
+            for key_bin in keys:
+              discard obj.evict_key(obj, key_bin)
+        if not self.is_authority:
+          # Relay to our own subscribers (downstream clones); the accumulated
+          # source stops it echoing back the way it came.
+          var fwd_source = source
+          fwd_source.incl self.id
+          for s in self.subscribers:
+            if s.ctx_id notin fwd_source:
+              self.send(
+                s, msg, OperationContext(source: fwd_source), DEFAULT_FLAGS
+              )
   elif msg.kind == REQUEST:
     # A partial subscriber wants data. Two forms:
     #  - whole-object (`obj` empty): add the object to interest and publish_create
@@ -1033,15 +1157,30 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     # The requester is whoever the message came from — match by ctx id in `source`.
     #
     # Request chaining: a hub that can't serve a request forwards it to its
-    # other peers (becoming the requester there) and remembers who asked; the
+    # upstream(s) (becoming the requester there) and remembers who asked; the
     # answer — data or NOT_FOUND — relays back down hop by hop. Only misses
     # forward, and only the first want for an id/key does; the authority never
     # forwards (its miss is the real NOT_FOUND).
+    #
+    # Never serve a REQUEST from our own upstream: our copy is a stale subset
+    # of theirs, and answering would echo old state back over fresher data.
+    # (Requests are routed upstream-only, so this shouldn't arrive; guard
+    # against legacy senders.)
+    for src in source:
+      if src in self.upstream_ctx_ids:
+        return
     for s in self.subscribers:
       if s.ctx_id notin source:
         continue
       if msg.obj.len > 0:
-        # Per-key: serve what we have, chain or NACK the rest.
+        # Per-key: serve what we have, chain or NACK the rest. Every requested
+        # key joins the subscriber's key interest — found or missing — so its
+        # future ops stream (a missing chunk pops in when someone builds
+        # there). RELEASE retracts.
+        for key_bin in msg.obj.from_flatty(seq[string]):
+          s.key_interest.mgetOrPut(msg.object_id, initHashSet[string]()).incl(
+            key_bin
+          )
         var missing: seq[string]
         if msg.object_id in self:
           let obj = self.objects[msg.object_id]
@@ -1049,9 +1188,11 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
             let reply = obj.publish_key(obj, key_bin)
             if reply.found:
               # Per-key deep: nested containers (a chunk's delta seq) go
-              # first so the receiver's parse links them.
+              # first so the receiver's parse links them — and they're
+              # followed, so their future ops (delta appends) stream.
               for nested_id in reply.nested:
                 if nested_id in self and not self.objects[nested_id].placeholder:
+                  s.interest.incl nested_id
                   self.objects[nested_id].publish_create(s)
               self.send(s, reply.msg, OperationContext(), DEFAULT_FLAGS)
             else:
@@ -1297,6 +1438,7 @@ proc tick*(
 
   self.flush_buffers
   self.flush_key_requests # send this frame's batched per-key fetches
+  self.flush_key_releases # ...and its batched per-key releases (paging out)
 
   # Replay whatever a silent (blocking) materialize deferred — at this tick
   # boundary, before new traffic: first the messages it buffered (apply + fire

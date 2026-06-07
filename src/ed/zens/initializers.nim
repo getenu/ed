@@ -81,10 +81,18 @@ proc create_initializer[T, O](self: Ed[T, O]) =
             ctx.value_initializers.add(initializer)
         elif id notin ctx:
           discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
+          if LAZY in flags:
+            # A LAZY container's empty-body CREATE is a *handle*, not a fill:
+            # contents arrive per-key (request/release). Placeholder keeps
+            # `loaded` false; touch skips LAZY, so reads never materialize the
+            # whole table by accident.
+            Ed[T, O](ctx[id]).placeholder = true
         else:
           # Empty-body CREATE for an object we were holding as a placeholder:
-          # it exists for real now, just with no value yet.
-          Ed[T, O](ctx[id]).placeholder = false
+          # it exists for real now, just with no value yet. LAZY excepted — its
+          # empty-body CREATE is a handle push and says nothing about contents.
+          if LAZY notin flags:
+            Ed[T, O](ctx[id]).placeholder = false
 
 proc defaults[T, O](
     self: Ed[T, O],
@@ -127,13 +135,19 @@ proc defaults[T, O](
       ctx.owned_by.mgetOrPut(current_owner_id, initHashSet[string]()).incl(self.id)
 
   self.publish_create = proc(
-      sub: Subscription, broadcast: bool, op_ctx = OperationContext()
+      sub: Subscription,
+      broadcast: bool,
+      op_ctx = OperationContext(),
+      contents = true,
   ) =
     log_defaults "ed publishing"
     trace "publish_create", sub
 
     {.gcsafe.}:
-      let bin = self.tracked.to_flatty
+      # `contents = false` sends a handle: an empty-body CREATE (id + flags,
+      # no data). Used to push LAZY containers to partial subscribers — the
+      # receiver registers a placeholder and pulls entries per-key.
+      let bin = if contents: self.tracked.to_flatty else: ""
     let id = self.id
     let owner_id = self.owner_id
     let flags = self.flags
@@ -183,6 +197,11 @@ proc defaults[T, O](
     assert ADDED in change.changes or REMOVED in change.changes or
       TOUCHED in change.changes
     let change = Change[O](change)
+    when change.item is Pair:
+      # Sender-side per-key filter tag (LAZY tables / key interest) — blanked
+      # from the remote body, so it costs nothing on the wire.
+      {.gcsafe.}:
+        msg.key_bin = change.item.key.to_flatty
     when change.item is Ed:
       msg.change_object_id = change.item.id
     elif change.item is Pair[auto, Ed]:
@@ -323,6 +342,36 @@ proc defaults[T, O](
           msg: self.build_message(self, change, self.id, ""),
           nested: nested,
         )
+    else:
+      discard
+
+  self.evict_key = proc(
+      self: ref EdBase, key_bin: string
+  ): tuple[found: bool, nested: seq[string]] {.gcsafe.} =
+    # Per-key eviction: drop the entry locally (REMOVED callbacks fire so
+    # watchers un-render; nothing publishes — the authority keeps the data) and
+    # report nested Ed containers so the caller can shed them. The local half
+    # of `release` and the receiving half of an eviction notice.
+    when O is Pair:
+      let self = Ed[T, O](self)
+      type K = generic_params(O.default.type).get(0)
+      {.gcsafe.}:
+        let key = key_bin.from_flatty(K, self.ctx)
+      if key in self.tracked:
+        let pair = O(key: key, value: self.tracked[key])
+        var nested: seq[string]
+        when pair.value is Ed:
+          if ?pair.value:
+            nested.add pair.value.id
+        elif pair.value is ref:
+          if ?pair.value:
+            for _, field in pair.value[].field_pairs:
+              when field is Ed:
+                if ?field:
+                  nested.add field.id
+        self.tracked.del key
+        self.trigger_callbacks(@[Change[O](changes: {REMOVED}, item: pair)])
+        result = (found: true, nested: nested)
     else:
       discard
 
