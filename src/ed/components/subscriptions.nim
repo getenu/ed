@@ -408,6 +408,10 @@ proc serve_key_wants(self: EdContext, object_id: string) =
     let reply = obj.publish_key(obj, key_bin)
     if reply.found:
       for waiter in waiters:
+        # Handle-first (see the REQUEST handler): the waiter may not hold the
+        # container, and an ADD for an unknown object drops silently.
+        if not obj.placeholder:
+          obj.publish_create(waiter, contents = false)
         # Per-key deep: nested containers (a chunk's delta seq) go first so
         # the receiver's parse links them — and they're followed, so their
         # future ops stream.
@@ -1217,6 +1221,14 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         var missing: seq[string]
         if msg.object_id in self:
           let obj = self.objects[msg.object_id]
+          # Handle-first: the requester (or a hub between us) may not hold the
+          # container yet — a chained request can outrun the closure push that
+          # carries it. An ADD for an unknown object is dropped on arrival and
+          # the want dangles (only the first want per key forwards), so the
+          # entry would never load. The empty-body CREATE is idempotent and
+          # makes the ADDs below always applicable.
+          if not obj.placeholder:
+            obj.publish_create(s, contents = false)
           for key_bin in msg.obj.from_flatty(seq[string]):
             let reply = obj.publish_key(obj, key_bin)
             if reply.found:
@@ -1301,8 +1313,14 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
             self.add_obj_want(s, msg)
   elif msg.kind != BLANK:
     if msg.object_id notin self:
-      # :( this should throw an error
-      debug "missing object", object_id = msg.object_id
+      # An op for an object we don't hold is dropped. Usually benign
+      # (partial replica, version skew), but a drop on a paging path means a
+      # requested entry silently never loads — surface the first one per
+      # object so a stalled chain is visible in the logs.
+      if msg.object_id notin self.warned_missing:
+        self.warned_missing.incl msg.object_id
+        notice "dropping op for missing object",
+          object_id = msg.object_id, kind = msg.kind
       return
     let obj = self.objects[msg.object_id]
     obj.change_receiver(

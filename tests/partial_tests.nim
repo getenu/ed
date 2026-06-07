@@ -504,6 +504,40 @@ proc run*() =
       check htbl[1] == "one, unseen"
       check ltbl[1] == "one, unseen"
 
+    test "per-key chain outruns the closure push (handle-first replies)":
+      # A leaf can request keys before the hub holds the table (the closure
+      # push carrying the LAZY handle hasn't landed). Without handle-first
+      # replies the per-key ADD drops at the hub as an op for a missing
+      # object, the want dangles (only the first want per key forwards), and
+      # the entry never loads — the invisible-tower bug.
+      var authority = EdContext.init(id = "hf_auth", is_authority = true)
+      var hub = EdContext.init(id = "hf_hub")
+      var leaf = EdContext.init(id = "hf_leaf")
+      Ed.thread_ctx = authority
+      var tbl = EdTable[int, string].init(
+        ctx = authority, id = "hf_tbl", flags = DEFAULT_FLAGS + {LAZY}
+      )
+      tbl[1] = "one"
+
+      hub.subscribe(authority, partial = true, fetch = [])
+      hub.tick()
+      leaf.subscribe(hub)
+      leaf.tick()
+      # The leaf knows the table only by its derived id — neither it nor the
+      # hub holds the container.
+      let ltbl = EdTable[int, string].init_placeholder(leaf, "hf_tbl")
+      check "hf_tbl" notin hub
+
+      ltbl.request(1)
+      leaf.tick() # flush: chains through the hub, which lacks the table
+      hub.tick() # miss: forward upstream
+      authority.tick() # serve: handle first, then the entry
+      hub.tick() # apply handle + entry; serve the waiting leaf
+      leaf.tick() # apply
+      check "hf_tbl" in hub
+      check EdTable[int, string](hub["hf_tbl"]).loaded(1)
+      check ltbl[1] == "one"
+
     test "per-key replies carry nested containers (chunk-deep)":
       var authority = EdContext.init(id = "kd_auth", is_authority = true)
       var client = EdContext.init(id = "kd_client")

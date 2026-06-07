@@ -312,6 +312,8 @@ type
     # downstream interest in a key drops its own copy and chains the release
     # upstream; a *full* clone never sheds (it wants everything).
     partial_replica*: bool
+    # Objects we've already logged a dropped-op notice for (once per id).
+    warned_missing*: HashSet[string]
     changed_callback_eid: EID
     last_id: int
     close_procs: Table[EID, proc() {.gcsafe.}]
