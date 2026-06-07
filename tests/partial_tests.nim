@@ -305,6 +305,58 @@ proc run*() =
       check leaf_tbl.loaded(2)
       check leaf_tbl[2] == "two"
 
+    test "LAZY containers are pull-only (skipped by closure pushes)":
+      var authority = EdContext.init(id = "lz_auth", is_authority = true)
+      var client = EdContext.init(id = "lz_client")
+      Ed.thread_ctx = authority
+      var owner = DeepOwner(id: "lz_owner")
+      owner.own:
+        owner.items = EdSeq[int].init(ctx = authority, id = "lz_items")
+        discard EdTable[int, string].init(
+          ctx = authority, id = "lz_big", flags = DEFAULT_FLAGS + {LAZY}
+        )
+      EdTable[int, string](authority["lz_big"])[1] = "huge"
+
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      discard client.fetch("lz_owner", deep = true)
+      authority.tick()
+      client.tick()
+      check "lz_items" in client # normal container came with the closure
+      check "lz_big" notin client # LAZY skipped — pull-only
+
+      discard client.fetch("lz_big") # explicit pull still works
+      authority.tick()
+      client.tick()
+      check EdTable[int, string](client["lz_big"])[1] == "huge"
+
+    test "per-key replies carry nested containers (chunk-deep)":
+      var authority = EdContext.init(id = "kd_auth", is_authority = true)
+      var client = EdContext.init(id = "kd_client")
+      var tbl = EdTable[int, EdSeq[int]].init(ctx = authority, id = "kd_tbl")
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      discard client.fetch("kd_tbl", follow = false) # snapshot: empty, no interest
+      authority.tick()
+      client.tick()
+      check "kd_tbl" in client
+
+      var entry = EdSeq[int].init(ctx = authority, id = "kd_entry")
+      entry.add 7
+      tbl[1] = entry # not streamed: the client holds no interest
+      client.tick()
+      let ctbl = EdTable[int, EdSeq[int]](client["kd_tbl"])
+      check not ctbl.loaded(1)
+
+      ctbl.request(1)
+      client.tick() # flush the key request
+      authority.tick() # serve: nested seq first, then the entry
+      client.tick() # apply
+      check ctbl.loaded(1)
+      check "kd_entry" in client
+      check EdSeq[int](client["kd_entry"]).len == 1 # nested arrived loaded
+      check ctbl[1][0] == 7 # and the entry links to it
+
     test "deep fetch pulls an owner's full ownership closure":
       var authority = EdContext.init(id = "d_auth", is_authority = true)
       var client = EdContext.init(id = "d_client")

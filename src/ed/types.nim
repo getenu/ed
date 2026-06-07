@@ -66,6 +66,10 @@ type
     SYNC_LOCAL        ## Sync changes to other local contexts (threads)
     SYNC_REMOTE       ## Sync changes to remote contexts (network)
     SYNC_ALL_NO_OVERWRITE  ## Sync without overwriting existing data
+    LAZY              ## Pull-only: closure pushes / deep-fetch serving skip
+                      ## this container — it syncs via explicit fetch or per-key
+                      ## requests (big voxel tables). Arrives as a placeholder
+                      ## otherwise.
     OWNS_MEMBERS      ## This collection's EdRef members are *owned* by the
                       ## collection's owner: membership registers them in
                       ## `owned_by` (removal un-registers), so the owner's
@@ -368,11 +372,13 @@ type
     # Per-key fetch (partial EdTable). Given a serialized key, build the ADD op
     # carrying that key's current value, so a partial subscriber can pull one
     # entry without the whole table. `found = false` if the key isn't present.
-    # nil for non-table containers.
+    # `nested` lists Ed containers inside the value (a chunk's delta seq) — the
+    # server publishes those *before* the entry so the receiver links them
+    # (per-key deep, one round trip). nil for non-table containers.
     publish_key:
-      proc(self: ref EdBase, key_bin: string): tuple[found: bool, msg: Message] {.
-        gcsafe
-      .}
+      proc(
+        self: ref EdBase, key_bin: string
+      ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.}
 
     # Back-reference to the owning context. `{.cursor.}` (non-owning): the
     # context owns its objects via `objects*` (a strong OrderedTable), so this

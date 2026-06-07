@@ -365,7 +365,8 @@ proc publish_closure(
     inc i
     if id in self:
       result = true
-      to_publish.add id
+      if LAZY notin self.objects[id].flags:
+        to_publish.add id
     if id in self.owned_by:
       result = true
       for owned_id in self.owned_by[id]:
@@ -400,6 +401,11 @@ proc serve_key_wants(self: EdContext, object_id: string) =
     let reply = obj.publish_key(obj, key_bin)
     if reply.found:
       for waiter in waiters:
+        # Per-key deep: nested containers (a chunk's delta seq) go first so
+        # the receiver's parse links them.
+        for nested_id in reply.nested:
+          if nested_id in self and not self.objects[nested_id].placeholder:
+            self.objects[nested_id].publish_create(waiter)
         self.send(waiter, reply.msg, OperationContext(), DEFAULT_FLAGS)
       done.add key_bin
   for key_bin in done:
@@ -1042,6 +1048,11 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           for key_bin in msg.obj.from_flatty(seq[string]):
             let reply = obj.publish_key(obj, key_bin)
             if reply.found:
+              # Per-key deep: nested containers (a chunk's delta seq) go
+              # first so the receiver's parse links them.
+              for nested_id in reply.nested:
+                if nested_id in self and not self.objects[nested_id].placeholder:
+                  self.objects[nested_id].publish_create(s)
               self.send(s, reply.msg, OperationContext(), DEFAULT_FLAGS)
             else:
               missing.add key_bin

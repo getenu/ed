@@ -294,9 +294,12 @@ proc defaults[T, O](
 
   self.publish_key = proc(
       self: ref EdBase, key_bin: string
-  ): tuple[found: bool, msg: Message] {.gcsafe.} =
+  ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.} =
     # Per-key fetch: build the ADD op for one entry so a partial subscriber can
-    # pull it without the whole table. Only meaningful for table containers.
+    # pull it without the whole table. `nested` carries the ids of Ed
+    # containers inside the value (a chunk's delta seq) so the caller can
+    # publish them ahead of the entry — per-key deep. Only meaningful for
+    # table containers.
     when O is Pair:
       let self = Ed[T, O](self)
       type K = generic_params(O.default.type).get(0)
@@ -304,8 +307,22 @@ proc defaults[T, O](
         let key = key_bin.from_flatty(K, self.ctx)
       if key in self.tracked:
         let pair = O(key: key, value: self.tracked[key])
+        var nested: seq[string]
+        when pair.value is Ed:
+          if ?pair.value:
+            nested.add pair.value.id
+        elif pair.value is ref:
+          if ?pair.value:
+            for _, field in pair.value[].field_pairs:
+              when field is Ed:
+                if ?field:
+                  nested.add field.id
         let change = Change[O](changes: {ADDED}, item: pair)
-        result = (found: true, msg: self.build_message(self, change, self.id, ""))
+        result = (
+          found: true,
+          msg: self.build_message(self, change, self.id, ""),
+          nested: nested,
+        )
     else:
       discard
 
