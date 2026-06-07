@@ -212,7 +212,6 @@ proc remote_body(msg: Message, no_overwrite: bool): string =
   var body_msg = msg
   body_msg.source = @[]
   body_msg.id_mappings = @[]
-  body_msg.key_bin = "" # sender-side per-key filter tag; not wire data
   if no_overwrite:
     body_msg.obj = ""
   result = body_msg.to_flatty.ed_compress
@@ -1444,11 +1443,14 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     # its resident size. Cheap, and only when a memory limit is set.
     if self.mem_limit > 0:
       inc obj.updates
-      if msg.delta:
-        if msg.kind in {ASSIGN, TOUCH}:
-          self.set_body_bytes(obj, obj.bytes + msg.obj.len)
+      if msg.delta and msg.key_bin.len > 0:
+        # Table entry: account per-key so per-key evict can subtract exactly.
+        if msg.kind == ASSIGN:
+          self.set_key_bytes(obj, msg.key_bin, msg.obj.len)
         elif msg.kind == UNASSIGN:
-          self.set_body_bytes(obj, max(0, obj.bytes - msg.obj.len))
+          self.forget_key_bytes(obj, msg.key_bin)
+      elif msg.delta and msg.kind == ASSIGN:
+        self.set_body_bytes(obj, obj.bytes + msg.obj.len)
     obj.change_receiver(
       obj,
       msg,

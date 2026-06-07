@@ -421,6 +421,7 @@ proc defaults[T, O](
                 if ?field:
                   nested.add field.id
         self.tracked.del key
+        body.ctx.forget_key_bytes(body, key_bin) # shrink used_bytes on evict
         self.trigger_callbacks(@[Change[O](changes: {REMOVED}, item: pair)])
         result = (found: true, nested: nested)
     else:

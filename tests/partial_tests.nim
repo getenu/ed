@@ -442,6 +442,46 @@ proc run*() =
       check ptbl[1] == "one, unseen"
       check ntbl[1] == "one, unseen"
 
+    test "evictor: per-key release shrinks used_bytes (paging out frees mem)":
+      # The voxel case: a LAZY table grows per-key as chunks page in, and
+      # releasing a chunk must subtract exactly what it added — otherwise the
+      # memory figure only ever climbs (the bug Scott saw: ed mem up on
+      # move-in, never down on move-out).
+      var authority = EdContext.init(id = "pk_auth", is_authority = true)
+      var client = EdContext.init(id = "pk_client", mem_limit = 1024 * 1024)
+      Ed.thread_ctx = authority
+      var owner = DeepOwner(id: "pk_owner")
+      var tbl: EdTable[int, string]
+      owner.own:
+        tbl = EdTable[int, string].init(
+          ctx = authority, id = "pk_tbl", flags = DEFAULT_FLAGS + {LAZY}
+        )
+      tbl[1] = 'x'.repeat(200)
+      tbl[2] = 'y'.repeat(200)
+
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      discard client.fetch("pk_owner", deep = true) # the LAZY handle rides in
+      authority.tick()
+      client.tick()
+      let ctbl = EdTable[int, string](client["pk_tbl"])
+      check client.used_bytes == 0 # handle only, no entries yet
+
+      ctbl.request(1)
+      ctbl.request(2)
+      client.tick()
+      authority.tick()
+      client.tick()
+      check ctbl.loaded(1) and ctbl.loaded(2)
+      let loaded = client.used_bytes
+      check loaded >= 400 # both entries accounted
+
+      ctbl.release(1) # page one chunk out
+      client.tick()
+      check not ctbl.loaded(1)
+      check client.used_bytes < loaded # ...and the memory actually dropped
+      check client.used_bytes >= 200 # the still-loaded entry remains accounted
+
     test "evictor: pressure sheds the least-recently-read body":
       # mem_limit turns on the partial-replica evictor. Snapshot three bodies
       # we don't keep open, go over budget, and watch the stalest shed first.

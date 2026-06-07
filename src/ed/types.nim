@@ -415,6 +415,11 @@ type
     last_read*: MonoTime  # stamped on a read-touch (value/[]/items/pairs)
     bytes*: int           # wire-weight, stamped where we serialize (drift-ok)
     updates*: int         # arriving ops since the last read — the churn signal
+    # Per-key wire bytes for a table (key_bin -> last ASSIGN obj.len). Lets a
+    # per-key evict/release subtract exactly what the entry added to `bytes`,
+    # so paging out actually shrinks `used_bytes` (whole-body fill leaves this
+    # empty — only delta-grown tables populate it).
+    key_bytes*: Table[string, int]
     build_message: proc(
       body: ref EdBodyBase, change: BaseChange, id: string, trace: string
     ): Message {.gcsafe.}
@@ -725,6 +730,24 @@ proc forget_body_bytes*(self: EdContext, body: ref EdBodyBase) =
   self.used_bytes -= body.bytes
   body.bytes = 0
 
+proc set_key_bytes*(
+    self: EdContext, body: ref EdBodyBase, key_bin: string, n: int
+) =
+  ## Account a table entry's wire size, keyed so it can be subtracted exactly on
+  ## per-key evict. An update replaces the previous figure (no double-count).
+  if self.mem_limit == 0 or key_bin.len == 0:
+    return
+  let prev = body.key_bytes.getOrDefault(key_bin, 0)
+  self.set_body_bytes(body, body.bytes + n - prev)
+  body.key_bytes[key_bin] = n
+
+proc forget_key_bytes*(self: EdContext, body: ref EdBodyBase, key_bin: string) =
+  ## Subtract a per-key entry's accounted bytes on evict/release.
+  if self.mem_limit == 0 or key_bin notin body.key_bytes:
+    return
+  self.set_body_bytes(body, max(0, body.bytes - body.key_bytes[key_bin]))
+  body.key_bytes.del key_bin
+
 proc drop_nested_bodies*(self: EdContext, nested: seq[string]) =
   ## Unregister the nested container bodies an evicted entry carried (a paged-
   ## out chunk's delta seq): the registry releases its strong hold, so the
@@ -868,6 +891,7 @@ proc to_flatty*(s: var string, msg: Message) =
   s.to_flatty msg.delta
   s.to_flatty msg.deep
   s.to_flatty msg.follow
+  s.to_flatty msg.key_bin
   when defined(ed_trace):
     s.to_flatty msg.trace
     s.to_flatty msg.id
@@ -892,6 +916,7 @@ proc from_flatty*(s: string, i: var int, msg: var Message) =
   s.from_flatty(i, msg.delta)
   s.from_flatty(i, msg.deep)
   s.from_flatty(i, msg.follow)
+  s.from_flatty(i, msg.key_bin)
   when defined(ed_trace):
     s.from_flatty(i, msg.trace)
     s.from_flatty(i, msg.id)
