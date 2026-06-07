@@ -458,9 +458,9 @@ proc add_obj_want(self: EdContext, requester: Subscription, msg: Message) =
     for want in self.pending_obj_wants[msg.object_id]:
       if want.sub.ctx_id == requester.ctx_id:
         return
-    self.pending_obj_wants[msg.object_id].add (requester, msg.deep, msg.follow)
+    self.pending_obj_wants[msg.object_id].add (requester, msg.deep)
   else:
-    self.pending_obj_wants[msg.object_id] = @[(requester, msg.deep, msg.follow)]
+    self.pending_obj_wants[msg.object_id] = @[(requester, msg.deep)]
     self.forward_request(requester, msg)
 
 proc pack_messages(msgs: seq[Message]): seq[Message] =
@@ -787,14 +787,22 @@ const churn_limit = 8
   ## much traffic, and refill is a single fetch. A see-it-work default.
 
 proc evict_sweep*(self: EdContext) =
-  ## Partial-replica eviction (docs/proxy-body-design.md phase 4). Two rules,
-  ## both gated on `evict_candidate`: churn (a dormant body taking ops is pure
-  ## waste — drop it regardless of memory) and pressure (over `mem_limit`, shed
-  ## least-recently-read first until back under). No limit → no-op; the
-  ## authority and full clones never set one.
-  if self.mem_limit == 0:
+  ## Partial-replica eviction (docs/proxy-body-design.md phase 4), by mode (see
+  ## EdContext.mem_limit): < 0 never evict; 0 evict every unclaimed body now;
+  ## > 0 churn + LRU-to-budget. All eviction is gated on `evict_candidate`.
+  if self.mem_limit < 0:
     return
   self.prune_dead_proxies
+  if self.mem_limit == 0:
+    # No cache: shed everything that isn't live, this tick. No byte accounting.
+    var gone: seq[string]
+    for id, body in self.objects:
+      if self.evict_candidate(body):
+        gone.add id
+    for id in gone:
+      debug "evicting (no-cache)", object_id = id
+      self.evict_body(id)
+    return
   # Churn pass — always on. One linear scan; cheap (field reads).
   var churned: seq[string]
   for id, body in self.objects:
@@ -820,17 +828,18 @@ proc evict_sweep*(self: EdContext) =
     self.evict_body(id)
 
 proc fetch*(
-    self: EdContext, object_id: string, deep = false, follow = true
+    self: EdContext, object_id: string, deep = false
 ): Fetch {.discardable.} =
   ## Ask the authority for `object_id`. Returns a handle that resolves on a
   ## later tick: `Found` (with `obj` linking the container) when it arrives, or
   ## `NotFound` if the authority NACKs. Already holding it loaded resolves
   ## immediately; fetching an id already in flight returns the same handle.
   ##
-  ## `follow` (default) registers interest with the authority, so future ops
-  ## follow — and a *missing* id is delivered whenever something creates it
-  ## (the handle still resolves NotFound for "not there right now").
-  ## `follow = false` is a snapshot: current state only, nothing afterwards.
+  ## Always registers interest, so future ops follow — and a *missing* id is
+  ## delivered whenever something creates it (the handle still resolves NotFound
+  ## for "not there right now"). To stop following, drop your reference: with no
+  ## live proxy the object becomes an eviction candidate and its interest is
+  ## retracted upstream when it's reclaimed (see the evictor / `mem_limit`).
   ##
   ## `deep` also fetches everything the id *owns* (the synced-ownership closure,
   ## recursively) — so an owner id (a unit, which isn't itself a container) pulls
@@ -846,8 +855,7 @@ proc fetch*(
     return self.fetches[object_id]
   result = Fetch(id: object_id, state: Pending)
   self.fetches[object_id] = result
-  var msg =
-    Message(kind: REQUEST, object_id: object_id, deep: deep, follow: follow)
+  var msg = Message(kind: REQUEST, object_id: object_id, deep: deep)
   for sub in self.request_targets:
     self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
   self.tick_reactor
@@ -1144,10 +1152,9 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         let wants = self.pending_obj_wants[id]
         self.pending_obj_wants.del(id)
         for want in wants:
-          if want.follow:
-            want.sub.interest.incl id
+          want.sub.interest.incl id
           if want.deep:
-            discard self.publish_closure(want.sub, id, follow = want.follow)
+            discard self.publish_closure(want.sub, id, follow = true)
           elif id in self.objects and ?self.objects[id]:
             self.objects[id].publish_create(want.sub)
 
@@ -1390,11 +1397,10 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         # Deep fetch: the id plus its ownership closure (see publish_closure —
         # the requested id may be an *owner*, a unit id with no container of its
         # own, and the walk recurses through owned members into their subtrees).
-        let found = self.publish_closure(s, msg.object_id, follow = msg.follow)
-        if msg.follow:
-          # Follow the root id itself even if nothing exists yet: a later
-          # CREATE under this id is then delivered without re-fetching.
-          s.interest.incl msg.object_id
+        let found = self.publish_closure(s, msg.object_id, follow = true)
+        # Follow the root id itself even if nothing exists yet: a later CREATE
+        # under this id is then delivered without re-fetching.
+        s.interest.incl msg.object_id
         if not found:
           if self.is_authority:
             self.send(
@@ -1407,16 +1413,13 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
             self.add_obj_want(s, msg)
       else:
         if msg.object_id in self and not self.objects[msg.object_id].placeholder:
-          if msg.follow:
-            s.interest.incl msg.object_id
+          s.interest.incl msg.object_id
           self.objects[msg.object_id].publish_create(s)
         else:
           # Missing — or held only as an unloaded placeholder, which would
-          # serve empty state; chain instead so the real data comes back.
-          if msg.follow:
-            # Keep the interest so a later CREATE under this id is delivered
-            # without re-fetching.
-            s.interest.incl msg.object_id
+          # serve empty state; chain instead so the real data comes back. Keep
+          # the interest so a later CREATE under this id is delivered.
+          s.interest.incl msg.object_id
           if self.is_authority:
             self.send(
               s,

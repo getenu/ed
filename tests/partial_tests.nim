@@ -149,7 +149,7 @@ proc run*() =
       client.subscribe(authority, partial = true, fetch = [])
       client.tick()
 
-      let handle = client.fetch("does_not_exist", follow = false)
+      let handle = client.fetch("does_not_exist")
       check handle.state == Pending
       authority.tick()
       client.tick()
@@ -173,33 +173,6 @@ proc run*() =
       check "late_obj" in client # ...but the kept interest delivered it
       check EdValue[int](client["late_obj"]).value == 9
 
-    test "follow = false: snapshot only — no future ops, no late delivery":
-      var authority = EdContext.init(id = "sn_auth", is_authority = true)
-      var client = EdContext.init(id = "sn_client")
-      var snap = EdValue[int].init(ctx = authority, id = "snap_x")
-      snap.value = 1
-      client.subscribe(authority, partial = true, fetch = [])
-      client.tick()
-
-      let handle = client.fetch("snap_x", follow = false)
-      authority.tick()
-      client.tick()
-      check handle.state == Found
-      check EdValue[int](client["snap_x"]).value == 1
-
-      snap.value = 2
-      client.tick()
-      check EdValue[int](client["snap_x"]).value == 1 # frozen: no interest
-
-      let missing = client.fetch("snap_later", follow = false)
-      authority.tick()
-      client.tick()
-      check missing.state == NotFound
-      var later = EdValue[int].init(ctx = authority, id = "snap_later")
-      later.value = 3
-      client.tick()
-      check "snap_later" notin client # never arrives without follow
-
     test "blocking ctx[] pulls an unknown id; a NACK fails fast":
       var authority = EdContext.init(id = "bk_auth", is_authority = true)
       var client = EdContext.init(id = "bk_client")
@@ -221,7 +194,7 @@ proc run*() =
 
       # Unknown id: the NACK resolves the blocking wait promptly (KeyError),
       # well inside the pump's safety deadline.
-      discard client.fetch("bk_missing", follow = false)
+      discard client.fetch("bk_missing")
       authority.tick()
       let started = get_mono_time()
       expect KeyError:
@@ -259,7 +232,7 @@ proc run*() =
       c.subscribe(b, partial = true, fetch = [])
       c.tick()
 
-      let handle = c.fetch("chn_missing", follow = false)
+      let handle = c.fetch("chn_missing")
       b.tick() # forward
       a.tick() # authority: real miss -> NOT_FOUND
       b.tick() # relay to the waiter
@@ -482,6 +455,30 @@ proc run*() =
       check client.used_bytes < loaded # ...and the memory actually dropped
       check client.used_bytes >= 200 # the still-loaded entry remains accounted
 
+    test "evictor: mem_limit 0 evicts everything the moment it isn't live":
+      # The no-cache mode for utility clients: a fetched object survives only
+      # while a reference holds it; drop the reference and it's gone next sweep,
+      # its interest retracted upstream.
+      var authority = EdContext.init(id = "nc_auth", is_authority = true)
+      var client = EdContext.init(id = "nc_client", mem_limit = 0)
+      Ed.thread_ctx = authority
+      discard EdValue[string].init(ctx = authority, id = "nc_x")
+      EdValue[string](authority["nc_x"]).value = "hi"
+
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      var f = client.fetch("nc_x")
+      authority.tick()
+      client.tick()
+      check "nc_x" in client # held by the live handle
+      check f.obj != nil
+
+      f.obj = nil
+      f = nil # drop the reference — nothing is live now
+      GC_full_collect()
+      client.tick() # no-cache sweep evicts it immediately
+      check "nc_x" notin client
+
     test "evictor: pressure sheds the least-recently-read body":
       # mem_limit turns on the partial-replica evictor. Snapshot three bodies
       # we don't keep open, go over budget, and watch the stalest shed first.
@@ -497,12 +494,13 @@ proc run*() =
 
       client.subscribe(authority, partial = true, fetch = [])
       client.tick()
-      # Snapshot all three (follow = false: residue — held by nobody, no
-      # lasting interest, pure eviction candidates). Hold the handles until
+      # Fetch all three. On a leaf (no downstream), an object with no live
+      # proxy is an eviction candidate regardless of our own upstream interest
+      # — so dropping the handles makes them evictable. Hold the handles until
       # we're set up, then drop them (the app is done with them).
-      var f1 = client.fetch("ev_1", follow = false)
-      var f2 = client.fetch("ev_2", follow = false)
-      var f3 = client.fetch("ev_3", follow = false)
+      var f1 = client.fetch("ev_1")
+      var f2 = client.fetch("ev_2")
+      var f3 = client.fetch("ev_3")
       authority.tick()
       client.tick()
       check "ev_1" in client and "ev_2" in client and "ev_3" in client
@@ -672,17 +670,23 @@ proc run*() =
     test "per-key replies carry nested containers (chunk-deep)":
       var authority = EdContext.init(id = "kd_auth", is_authority = true)
       var client = EdContext.init(id = "kd_client")
-      var tbl = EdTable[int, EdSeq[int]].init(ctx = authority, id = "kd_tbl")
+      Ed.thread_ctx = authority
+      var owner = DeepOwner(id: "kd_owner")
+      var tbl: EdTable[int, EdSeq[int]]
+      owner.own:
+        tbl = EdTable[int, EdSeq[int]].init(
+          ctx = authority, id = "kd_tbl", flags = DEFAULT_FLAGS + {LAZY}
+        )
       client.subscribe(authority, partial = true, fetch = [])
       client.tick()
-      discard client.fetch("kd_tbl", follow = false) # snapshot: empty, no interest
+      discard client.fetch("kd_owner", deep = true) # LAZY handle rides the closure
       authority.tick()
       client.tick()
       check "kd_tbl" in client
 
       var entry = EdSeq[int].init(ctx = authority, id = "kd_entry")
       entry.add 7
-      tbl[1] = entry # not streamed: the client holds no interest
+      tbl[1] = entry # LAZY + no per-key interest: not streamed
       client.tick()
       let ctbl = EdTable[int, EdSeq[int]](client["kd_tbl"])
       check not ctbl.loaded(1)

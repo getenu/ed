@@ -152,8 +152,6 @@ type
     delta*: bool    # true for collection (non-idempotent) ops, false for registers
     deep*: bool     # REQUEST only: also send the ownership closure (everything
                     # the requested id owns via owned_by, recursively)
-    follow*: bool   # REQUEST only: register interest so future ops follow — and,
-                    # for a missing id, so it's delivered when it's created later
     key_bin*: string # Table ops only: the serialized key, stamped by
                      # build_message so fanout can filter per-key (LAZY tables /
                      # key interest) without deserializing `obj`. Sender-side
@@ -290,9 +288,13 @@ type
     materialize*: proc(self: EdContext, id: string) {.gcsafe.}
     blocking*: bool
     # Partial-replica evictor (docs/proxy-body-design.md phase 4). `mem_limit`
-    # 0 = disabled (the authority and full clones never evict). `used_bytes` is
-    # the running sum of resident body bytes; `evict_cursor` walks the registry
-    # incrementally so a sweep is bounded per tick.
+    # is the cache budget for unclaimed bodies, in three modes:
+    #   < 0  never evict — unlimited cache (the authority, full clones; default).
+    #        Canonical data is never dropped.
+    #    0   evict everything the moment it isn't live — no cache (a utility
+    #        client that holds nothing it isn't actively using).
+    #   > 0  cache up to N bytes; over budget, shed least-recently-read (LRU).
+    # `used_bytes` is the running sum of resident body bytes (mode > 0 only).
     mem_limit*: int
     used_bytes*: int
     evict_cursor*: int
@@ -349,7 +351,7 @@ type
     # when the upstream answers NOT_FOUND. The authority never forwards — a
     # miss there is a real NOT_FOUND.
     pending_obj_wants*:
-      Table[string, seq[tuple[sub: Subscription, deep: bool, follow: bool]]]
+      Table[string, seq[tuple[sub: Subscription, deep: bool]]]
     # object_id -> key_bin -> waiting subscribers (per-key table requests).
     pending_key_wants*: Table[string, Table[string, seq[Subscription]]]
     ref_pool: Table[string, CountedRef]
@@ -717,15 +719,16 @@ proc set_body_bytes*(self: EdContext, body: ref EdBodyBase, n: int) =
   ## Record a body's resident wire-size and keep `used_bytes` in step. Called
   ## where we already have the serialized form (publish/fill); drift between
   ## those points is harmless — the total only gates *when* the limit trips,
-  ## and LRU ordering doesn't use bytes at all. No-op without a memory limit.
-  if self.mem_limit == 0:
+  ## and LRU ordering doesn't use bytes at all. Only the byte-budget mode
+  ## (mem_limit > 0) needs accounting; never-evict (<0) and evict-all (0) skip.
+  if self.mem_limit <= 0:
     return
   self.used_bytes += n - body.bytes
   body.bytes = n
 
 proc forget_body_bytes*(self: EdContext, body: ref EdBodyBase) =
   ## Remove a body's bytes from the running total (on unregister/evict).
-  if self.mem_limit == 0:
+  if self.mem_limit <= 0:
     return
   self.used_bytes -= body.bytes
   body.bytes = 0
@@ -735,7 +738,7 @@ proc set_key_bytes*(
 ) =
   ## Account a table entry's wire size, keyed so it can be subtracted exactly on
   ## per-key evict. An update replaces the previous figure (no double-count).
-  if self.mem_limit == 0 or key_bin.len == 0:
+  if self.mem_limit <= 0 or key_bin.len == 0:
     return
   let prev = body.key_bytes.getOrDefault(key_bin, 0)
   self.set_body_bytes(body, body.bytes + n - prev)
@@ -743,7 +746,7 @@ proc set_key_bytes*(
 
 proc forget_key_bytes*(self: EdContext, body: ref EdBodyBase, key_bin: string) =
   ## Subtract a per-key entry's accounted bytes on evict/release.
-  if self.mem_limit == 0 or key_bin notin body.key_bytes:
+  if self.mem_limit <= 0 or key_bin notin body.key_bytes:
     return
   self.set_body_bytes(body, max(0, body.bytes - body.key_bytes[key_bin]))
   body.key_bytes.del key_bin
@@ -890,7 +893,6 @@ proc to_flatty*(s: var string, msg: Message) =
   s.to_flatty msg.origin
   s.to_flatty msg.delta
   s.to_flatty msg.deep
-  s.to_flatty msg.follow
   s.to_flatty msg.key_bin
   when defined(ed_trace):
     s.to_flatty msg.trace
@@ -915,7 +917,6 @@ proc from_flatty*(s: string, i: var int, msg: var Message) =
   s.from_flatty(i, msg.origin)
   s.from_flatty(i, msg.delta)
   s.from_flatty(i, msg.deep)
-  s.from_flatty(i, msg.follow)
   s.from_flatty(i, msg.key_bin)
   when defined(ed_trace):
     s.from_flatty(i, msg.trace)
