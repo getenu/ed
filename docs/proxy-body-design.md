@@ -166,3 +166,34 @@ Settled with Scott:
 - Lifetime/untrack discipline remains the contract for side-effecting
   watchers; sentinel collection is the safety net and the scripting-consumer
   default, not a replacement.
+
+## Phase 4 as built — evictor (2026-06-07; ed b3f180f, enu 3558dcbb)
+
+Policy settled with Scott to the simplest defensible shape:
+- **CHURN_LIMIT (=8), always on**: a dormant body taking that many ops is pure
+  waste (refill is one fetch) — evict regardless of memory. Size-independent.
+- **Pure LRU to `mem_limit`**: over budget, shed oldest `last_read` first. Size
+  does *not* rank — that's the min-expected-refetch-optimal choice; the earlier
+  `× bytes` would have evicted big-recently-left voxels (the player case). Under
+  budget, keep everything (instant re-entry).
+- Accounting (cheap): `last_read` (read-touch), `bytes` (wire-maintained,
+  `used_bytes` running sum), `updates` (churn). `mem_limit` 0 = off (authority,
+  full clones). enu: client worker 16 MiB; "ed mem" on the stats screen.
+- `evict_candidate` gate: no live proxy, **no downstream interest** (the reverse
+  link to our own upstream does not count — the bug that first blocked it), not
+  a live-owned piece, has data. `evict_body` = local drop + whole-object RELEASE
+  upstream (empty key batch) to retract interest. A received whole-object RELEASE
+  is a subscriber's interest-retract, or from upstream an eviction notice that's
+  **ignored while we hold it live** (Scott's rule); no downstream relay (the gate
+  guarantees nobody below wants it).
+
+Caveats carried forward (validate as data warrants): per-key churn for LAZY
+tables not built (whole-body only; LAZY tables are excluded from candidates, so
+safe but coarse — a per-key signal is the refinement); `approx_bytes` is
+wire-weight, not the Godot mesh memory that actually dominates voxels (un-render
+frees that, not ed eviction — measure which pool is the real constraint);
+follow=false Fetch handles retain their proxy until ORC reclaims the handle, so
+residue evicts a tick or two after the handle drops; temporal LRU misses the
+spatial "walking back toward it" case (an enu view-distance hint is the future
+lever). The memory-target master dial (adaptive aggressiveness) is designed-for,
+not built.
