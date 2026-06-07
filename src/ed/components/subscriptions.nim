@@ -108,7 +108,7 @@ proc from_flatty*[T: ref RootObj](s: string, i: var int, value: var T) =
       s.from_flatty(i, info)
       # :(
       if info.object_id in flatty_ctx:
-        value = value.type()(flatty_ctx.objects[info.object_id])
+        value = value.type()(flatty_ctx.resolve_proxy(flatty_ctx.objects[info.object_id]))
       else:
         # A nested Ed reference we don't hold (a partial replica receiving a
         # pre-populated parent, or a parent that arrived before its child).
@@ -749,7 +749,11 @@ proc fetch*(
   ## its whole owned state in one request. The already-loaded short-circuit is
   ## skipped for deep fetches: holding the root says nothing about the closure.
   if not deep and object_id in self and not self.objects[object_id].placeholder:
-    return Fetch(id: object_id, state: Found, obj: self.objects[object_id])
+    return Fetch(
+      id: object_id,
+      state: Found,
+      obj: self.resolve_proxy(self.objects[object_id]),
+    )
   if object_id in self.fetches and self.fetches[object_id].state == Pending:
     return self.fetches[object_id]
   result = Fetch(id: object_id, state: Pending)
@@ -1039,7 +1043,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       let pending_fetch = self.fetches[msg.object_id]
       pending_fetch.state = Found
       if msg.object_id in self.objects and ?self.objects[msg.object_id]:
-        pending_fetch.obj = self.objects[msg.object_id]
+        pending_fetch.obj = self.resolve_proxy(self.objects[msg.object_id])
       self.fetches.del(msg.object_id)
     if msg.owner_id.len > 0 and msg.owner_id in self.fetches:
       self.fetches[msg.owner_id].state = Found
@@ -1160,7 +1164,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         if not still_wanted:
           if msg.object_id in self:
             let obj = self.objects[msg.object_id]
-            if obj.body.evict_key != nil:
+            if obj.evict_key != nil:
               discard obj.evict_key(obj, key_bin)
           self.pending_key_releases.mgetOrPut(msg.object_id, @[]).add key_bin
     if not retracted:
@@ -1172,7 +1176,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       if from_upstream:
         if msg.object_id in self:
           let obj = self.objects[msg.object_id]
-          if obj.body.evict_key != nil:
+          if obj.evict_key != nil:
             for key_bin in keys:
               discard obj.evict_key(obj, key_bin)
         if not self.is_authority:
@@ -1476,6 +1480,7 @@ proc tick*(
   self.unsubscribed = @[]
   var count = 0
   self.free_refs
+  self.prune_dead_proxies # clear backrefs of proxies ORC reclaimed
   let timeout =
     if not ?max_duration:
       MonoTime.high

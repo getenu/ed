@@ -385,7 +385,7 @@ proc destroy_owned*(ctx: EdContext, owner_id: string) =
     for id in owned:
       if id in ctx.objects and ?ctx.objects[id]:
         let obj = ctx.objects[id]
-        if not obj.body.change_receiver.is_nil:
+        if not obj.change_receiver.is_nil:
           obj.change_receiver(obj, Message(kind: DESTROY), OperationContext())
     ctx.owned_by.del(owner_id)
 

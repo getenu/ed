@@ -29,7 +29,7 @@ proc init_metrics*(_: type EdContext, labels: varargs[string]) =
 
 proc pack_objects*(self: EdContext) =
   if self.objects_need_packing:
-    var table: OrderedTable[string, ref EdBase]
+    var table: OrderedTable[string, ref EdBodyBase]
     for key, value in self.objects:
       if ?value:
         table[key] = value
@@ -146,7 +146,7 @@ proc stamp_lsn*(self: EdContext, msg: var Message) =
     msg.lsn = self.next_lsn
 
 proc `[]`*[T, O](self: EdContext, src: Ed[T, O]): Ed[T, O] =
-  result = Ed[T, O](self.objects[src.id])
+  result = Ed[T, O](self.resolve_proxy(self.objects[src.id]))
 
 proc `[]`*(self: EdContext, id: string): ref EdBase =
   ## Container lookup by id. Raises `KeyError` when absent — except inside a
@@ -156,7 +156,7 @@ proc `[]`*(self: EdContext, id: string): ref EdBase =
   ## its old behavior (returns nil) and doesn't trigger a fetch.
   if self.blocking and self.materialize != nil and id notin self.objects:
     self.materialize(self, id)
-  result = self.objects[id]
+  result = self.resolve_proxy(self.objects[id])
 
 proc len*(self: Chan): int =
   private_access Chan

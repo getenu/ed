@@ -110,7 +110,8 @@ proc defaults[T, O](
   # on the proxy forwards to it (types.nim templates). Minted here — before
   # anything reads a forwarded field — since object construction can no longer
   # set what are now body fields.
-  self.body = EdBody[T](flags: flags, placeholder: placeholder)
+  let body = EdBody[T](flags: flags, placeholder: placeholder)
+  self.body = body
 
   create_initializer(self)
 
@@ -131,7 +132,23 @@ proc defaults[T, O](
 
   if self.id in ctx.objects and not ?ctx.objects[self.id]:
     ctx.pack_objects
-  ctx.objects[self.id] = self
+  # The registry owns the body; the proxy is reachable through the backref +
+  # mint (resolve_proxy). `ctx_uid` by value so the handle's destructor never
+  # dereferences the context.
+  ctx.objects[self.id] = body
+  let ctx_uid = ctx.uid
+  body.mint = proc(): ref EdBase {.gcsafe.} =
+    let proxy = Ed[T, O](body: body)
+    inc body.proxy_gen
+    proxy.proxy_handle = ProxyHandle(
+      ctx_uid: ctx_uid, object_id: body.id, gen: body.proxy_gen
+    )
+    body.proxy = proxy
+    proxy
+  body.proxy_gen = 1
+  body.proxy = self
+  self.proxy_handle =
+    ProxyHandle(ctx_uid: ctx_uid, object_id: self.id, gen: 1)
 
   # If created inside an `own` scope, record the owner: bake its id into the
   # container and index it, so the owner's `destroy_owned` can tear this down in
@@ -155,13 +172,13 @@ proc defaults[T, O](
       # `contents = false` sends a handle: an empty-body CREATE (id + flags,
       # no data). Used to push LAZY containers to partial subscribers — the
       # receiver registers a placeholder and pulls entries per-key.
-      let bin = if contents: self.tracked.to_flatty else: ""
-    let id = self.id
-    let owner_id = self.owner_id
-    let flags = self.flags
+      let bin = if contents: body.tracked.to_flatty else: ""
+    let id = body.id
+    let owner_id = body.owner_id
+    let flags = body.flags
 
     template send_msg(src_ctx, sub) =
-      const ed_type_id = self.type.tid
+      const ed_type_id = Ed[T, O].tid
 
       # Capability filter: don't send an object to a peer that can't materialize
       # its type. Empty `capabilities` = unfiltered (same-build / no handshake).
@@ -180,7 +197,7 @@ proc defaults[T, O](
           msg.trace = get_stack_trace()
 
         src_ctx.send(
-          sub, msg, op_ctx, flags = self.flags & {SYNC_ALL_NO_OVERWRITE}
+          sub, msg, op_ctx, flags = body.flags & {SYNC_ALL_NO_OVERWRITE}
         )
 
     if sub.kind != BLANK:
@@ -193,7 +210,7 @@ proc defaults[T, O](
     ctx.tick_reactor
 
   self.body.build_message = proc(
-      self: ref EdBase, change: BaseChange, id, trace: string
+      body: ref EdBodyBase, change: BaseChange, id, trace: string
   ): Message =
     var msg = Message(object_id: id, type_id: Ed[T, O].tid)
     # Collections (change object O differs from tracked T) are delta /
@@ -246,10 +263,12 @@ proc defaults[T, O](
     result = msg
 
   self.body.change_receiver = proc(
-      self: ref EdBase, msg: Message, op_ctx: OperationContext
+      body: ref EdBodyBase, msg: Message, op_ctx: OperationContext
   ) =
-    assert self of Ed[T, O]
-    let self = Ed[T, O](self)
+    # Resolve (minting if none is live) the typed proxy: assign/unassign and
+    # callback triggering run through it. A fresh mint simply has no app
+    # callbacks to fire.
+    let self = Ed[T, O](body.ctx.resolve_proxy(body))
 
     if msg.kind == DESTROY:
       self.destroy
@@ -262,7 +281,7 @@ proc defaults[T, O](
         # placeholder so the container op applies and cardinality is correct.
         # Reading the placeholder later triggers a fetch (materialize-on-access).
         discard O.init_placeholder(self.ctx, object_id)
-      let item = O(self.ctx.objects[object_id])
+      let item = O(self.ctx.resolve_proxy(self.ctx.objects[object_id]))
     elif O is Pair[auto, Ed]:
       # Workaround for compile issue. This should be `O`, not `O.default.type`.
       type K = generic_params(O.default.type).get(0)
@@ -281,7 +300,7 @@ proc defaults[T, O](
           return
         # Value object not materialized yet — placeholder it (see above).
         discard V.init_placeholder(self.ctx, msg.change_object_id)
-      let value = V(self.ctx.objects[msg.change_object_id])
+      let value = V(self.ctx.resolve_proxy(self.ctx.objects[msg.change_object_id]))
       {.gcsafe.}:
         let item = O(key: msg.obj.from_flatty(K, self.ctx), value: value)
     else:
@@ -320,7 +339,7 @@ proc defaults[T, O](
       fail "Can't handle message " & $msg.kind
 
   self.body.publish_key = proc(
-      self: ref EdBase, key_bin: string
+      body: ref EdBodyBase, key_bin: string
   ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.} =
     # Per-key fetch: build the ADD op for one entry so a partial subscriber can
     # pull it without the whole table. `nested` carries the ids of Ed
@@ -328,7 +347,7 @@ proc defaults[T, O](
     # publish them ahead of the entry — per-key deep. Only meaningful for
     # table containers.
     when O is Pair:
-      let self = Ed[T, O](self)
+      let self = Ed[T, O](body.ctx.resolve_proxy(body))
       type K = generic_params(O.default.type).get(0)
       {.gcsafe.}:
         let key = key_bin.from_flatty(K, self.ctx)
@@ -354,14 +373,14 @@ proc defaults[T, O](
       discard
 
   self.body.evict_key = proc(
-      self: ref EdBase, key_bin: string
+      body: ref EdBodyBase, key_bin: string
   ): tuple[found: bool, nested: seq[string]] {.gcsafe.} =
     # Per-key eviction: drop the entry locally (REMOVED callbacks fire so
     # watchers un-render; nothing publishes — the authority keeps the data) and
     # report nested Ed containers so the caller can shed them. The local half
     # of `release` and the receiving half of an eviction notice.
     when O is Pair:
-      let self = Ed[T, O](self)
+      let self = Ed[T, O](body.ctx.resolve_proxy(body))
       type K = generic_params(O.default.type).get(0)
       {.gcsafe.}:
         let key = key_bin.from_flatty(K, self.ctx)

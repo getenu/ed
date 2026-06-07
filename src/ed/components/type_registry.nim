@@ -75,8 +75,10 @@ proc register_type(typ: type) =
           if ?field and field.id in ctx:
             # Direct registry read — `ctx[...]` would blocking-materialize in a
             # `blocking` scope, which deserialization must never do (and a func
-            # can't have side effects).
-            field = type(field)(ctx.objects[field.id])
+            # can't have side effects; resolve_proxy's registry upkeep is cast
+            # away as the one tolerated effect).
+            {.no_side_effect.}:
+              field = type(field)(ctx.resolve_proxy(ctx.objects[field.id]))
       result = self
 
   with_lock:
