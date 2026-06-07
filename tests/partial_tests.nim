@@ -442,6 +442,68 @@ proc run*() =
       check ptbl[1] == "one, unseen"
       check ntbl[1] == "one, unseen"
 
+    test "hub shedding: last retract releases the hub's copy upstream":
+      # The enu client topology: authority (server) <- partial hub (worker)
+      # <- full leaf (node ctx). The leaf drives paging; releases must shed
+      # the hub's copy and chain the retract up, or the hub re-accumulates
+      # a full replica and keeps paying for ops it no longer needs.
+      var authority = EdContext.init(id = "hs_auth", is_authority = true)
+      var hub = EdContext.init(id = "hs_hub")
+      var leaf = EdContext.init(id = "hs_leaf")
+      Ed.thread_ctx = authority
+      var owner = DeepOwner(id: "hs_owner")
+      var tbl: EdTable[int, string]
+      owner.own:
+        tbl = EdTable[int, string].init(
+          ctx = authority, id = "hs_tbl", flags = DEFAULT_FLAGS + {LAZY}
+        )
+      tbl[1] = "one"
+
+      hub.subscribe(authority, partial = true, fetch = [])
+      hub.tick()
+      leaf.subscribe(hub) # full clone of the partial hub
+      leaf.tick()
+      discard hub.fetch("hs_owner", deep = true)
+      authority.tick()
+      hub.tick()
+      leaf.tick()
+      let htbl = EdTable[int, string](hub["hs_tbl"])
+      let ltbl = EdTable[int, string](leaf["hs_tbl"])
+
+      ltbl.request(1) # leaf pages in: chains leaf -> hub -> authority
+      leaf.tick() # flush the key request
+      hub.tick() # miss: forward upstream
+      authority.tick() # serve
+      hub.tick() # apply + serve the waiting leaf
+      leaf.tick() # apply
+      check htbl.loaded(1) # the hub caches what it relayed
+      check ltbl[1] == "one"
+
+      ltbl.release(1) # leaf pages out
+      check not ltbl.loaded(1)
+      leaf.tick() # flush the RELEASE to the hub
+      hub.tick() # retract leaf + shed own copy + queue the chained release
+      hub.tick() # flush it upstream
+      authority.tick() # retract the hub's interest
+      leaf.tick()
+      check not htbl.loaded(1) # hub shed its copy
+
+      tbl[1] = "one, unseen" # nobody is interested: must not stream
+      authority.tick()
+      hub.tick()
+      leaf.tick()
+      check not htbl.loaded(1)
+      check not ltbl.loaded(1)
+
+      ltbl.request(1) # paging back in re-chains end to end
+      leaf.tick()
+      hub.tick()
+      authority.tick()
+      hub.tick()
+      leaf.tick()
+      check htbl[1] == "one, unseen"
+      check ltbl[1] == "one, unseen"
+
     test "per-key replies carry nested containers (chunk-deep)":
       var authority = EdContext.init(id = "kd_auth", is_authority = true)
       var client = EdContext.init(id = "kd_client")

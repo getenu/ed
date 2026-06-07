@@ -699,6 +699,8 @@ proc subscribe*(
   self.materialize = materialize_impl # enable materialize-on-access
   if upstream:
     self.upstream_ctx_ids.incl ctx.id
+  if partial:
+    self.partial_replica = true
   self.pack_objects
   var remote_objects: HashSet[string]
   for id in self.objects.keys:
@@ -801,6 +803,8 @@ proc subscribe*(
 
   debug "remote subscribe", address
   self.materialize = materialize_impl # enable materialize-on-access
+  if partial:
+    self.partial_replica = true
   if not ?self.reactor:
     self.reactor = new_reactor()
   self.subscribing = true
@@ -1126,6 +1130,35 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
               s.interest.excl nested_id
         if s.key_interest[msg.object_id].len == 0:
           s.key_interest.del msg.object_id
+        # A release can outrun an in-flight chained request: drop the
+        # subscriber from any pending wants so the late answer isn't served
+        # to someone who no longer wants it (re-materializing a paged-out key).
+        if msg.object_id in self.pending_key_wants:
+          for key_bin in keys:
+            if key_bin in self.pending_key_wants[msg.object_id]:
+              self.pending_key_wants[msg.object_id][key_bin] =
+                self.pending_key_wants[msg.object_id][key_bin].filter_it(
+                  it.ctx_id != s.ctx_id
+                )
+    if retracted and self.partial_replica and not self.is_authority:
+      # Hub shedding — the symmetric counterpart of request chaining. A
+      # partial hub holds paged keys only to serve its subscribers; when the
+      # last interest in a key retracts, drop our copy and chain the release
+      # upstream (the queued broadcast also notifies any remaining downstream
+      # clones, where eviction is an idempotent no-op).
+      for key_bin in keys:
+        var still_wanted = false
+        for s in self.subscribers:
+          if msg.object_id in s.key_interest and
+              key_bin in s.key_interest[msg.object_id]:
+            still_wanted = true
+            break
+        if not still_wanted:
+          if msg.object_id in self:
+            let obj = self.objects[msg.object_id]
+            if obj.evict_key != nil:
+              discard obj.evict_key(obj, key_bin)
+          self.pending_key_releases.mgetOrPut(msg.object_id, @[]).add key_bin
     if not retracted:
       var from_upstream = false
       for src in source:

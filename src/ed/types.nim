@@ -307,6 +307,11 @@ type
     # partiality inherits down a clone chain (a full clone of a full source
     # never receives one); the authority has no upstream and terminates.
     upstream_ctx_ids*: HashSet[string]
+    # This context subscribed partial somewhere: it holds data on demand, not
+    # by contract. Gates hub shedding — a partial hub that retracts the last
+    # downstream interest in a key drops its own copy and chains the release
+    # upstream; a *full* clone never sheds (it wants everything).
+    partial_replica*: bool
     changed_callback_eid: EID
     last_id: int
     close_procs: Table[EID, proc() {.gcsafe.}]
