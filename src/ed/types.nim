@@ -372,8 +372,14 @@ type
       dump_at*: MonoTime
       counts*: array[MessageKind, int]
 
-  EdBase* = object of RootObj
-    ## Base type for all `Ed` containers. Not used directly.
+  EdBodyBase* = object of RootObj
+    ## Registry-side state of a container — the *body* of the proxy/body split
+    ## (docs/proxy-body-design.md). Carries the data and everything the wire
+    ## needs; the app-facing proxy (`Ed`) forwards here via templates, so call
+    ## sites read unchanged. Phase 1 is purely structural: each proxy
+    ## strong-holds its body 1:1 and the registry still holds proxies — bodies
+    ## become registry-owned (and proxies weak-backref'd) with the identity
+    ## map in phase 2.
     id*: string
     # The EdRef (by id) that owns this container, or "" if unowned. Set when the
     # container is created inside an `own` scope, and on materialize from the
@@ -387,9 +393,6 @@ type
     # it triggers a fetch; when the real state arrives the bit clears and a Fill
     # change fires. Default false = a normal, fully-loaded object.
     placeholder*: bool
-    link_eid: EID
-    paused_eids: set[EID]
-    bound_eids: seq[EID]
     flags*: set[EdFlags]
     build_message: proc(
       self: ref EdBase, change: BaseChange, id: string, trace: string
@@ -437,11 +440,24 @@ type
     # dereferences `ctx`). Validated under AddressSanitizer (tests/asan.sh).
     ctx* {.cursor.}: EdContext
 
+  EdBody*[T] = ref object of EdBodyBase
+    ## Typed body: the canonical data lives here.
+    tracked: T
+
+  EdBase* = object of RootObj
+    ## Base type for all `Ed` containers — the *proxy* side of the split: what
+    ## the app holds and the registry currently keys. Local, handle-scoped
+    ## state only (change callbacks and their EID bookkeeping die with the
+    ## proxy); everything synced forwards to `body`.
+    body*: ref EdBodyBase
+    link_eid: EID
+    paused_eids: set[EID]
+    bound_eids: seq[EID]
+
   ChangeCallback[O] = proc(changes: seq[Change[O]]) {.gcsafe.}
 
   EdObject[T, O] = object of EdBase
     changed_callbacks: OrderedTable[EID, ChangeCallback[O]]
-    tracked: T
 
   Ed*[T, O] = ref object of EdObject[T, O]
     ## Generic reactive container. T is the contained type, O is the change object type.
@@ -460,6 +476,73 @@ type
 
 const DEFAULT_FLAGS* = {SYNC_LOCAL, SYNC_REMOTE}
   ## Default flags for `Ed` containers: sync both locally and remotely.
+
+# Proxy → body forwarding (proxy/body split, phase 1). Templates expand at the
+# call site, so existing field accesses — reads *and* writes — compile
+# unchanged; private body fields still require `privileged` there, preserving
+# today's visibility discipline. The typed `tracked` forward casts through
+# `EdBody[T]`; everything else lives on the untyped base.
+template tracked*[T, O](self: Ed[T, O]): untyped =
+  EdBody[T](self.body).tracked
+
+template id*(self: ref EdBase): untyped =
+  self.body.id
+
+template owner_id*(self: ref EdBase): untyped =
+  self.body.owner_id
+
+template destroyed*(self: ref EdBase): untyped =
+  self.body.destroyed
+
+template placeholder*(self: ref EdBase): untyped =
+  self.body.placeholder
+
+template flags*(self: ref EdBase): untyped =
+  self.body.flags
+
+template ctx*(self: ref EdBase): untyped =
+  self.body.ctx
+
+proc init_husk*[T, O](_: typedesc[Ed[T, O]], id: string): Ed[T, O] =
+  ## A bare serialization stand-in: proxy + body carrying only the id. Used by
+  ## registered-type `stringify`, which clones a ref and reduces its Ed fields
+  ## to their ids — the receiver re-links them from its own registry. Not
+  ## registered anywhere; never escapes serialization.
+  result = Ed[T, O]()
+  result.body = EdBody[T](id: id)
+
+# The sync closures: the call-arity procs forward invocations (a dotted call
+# through a proc field parses as a call of the *symbol*, so a field-resolving
+# template alone can't take the arguments). Assignment and nil checks go
+# through `self.body.X` directly under `privileged`.
+proc build_message*(
+    self: ref EdBase, slf: ref EdBase, change: BaseChange, id, trace: string
+): Message {.gcsafe.} =
+  self.body.build_message(slf, change, id, trace)
+
+proc publish_create*(
+    self: ref EdBase,
+    sub = Subscription(),
+    broadcast = false,
+    op_ctx = OperationContext(),
+    contents = true,
+) {.gcsafe.} =
+  self.body.publish_create(sub, broadcast, op_ctx, contents)
+
+proc change_receiver*(
+    self: ref EdBase, slf: ref EdBase, msg: Message, op_ctx: OperationContext
+) {.gcsafe.} =
+  self.body.change_receiver(slf, msg, op_ctx)
+
+proc publish_key*(
+    self: ref EdBase, slf: ref EdBase, key_bin: string
+): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.} =
+  self.body.publish_key(slf, key_bin)
+
+proc evict_key*(
+    self: ref EdBase, slf: ref EdBase, key_bin: string
+): tuple[found: bool, nested: seq[string]] {.gcsafe.} =
+  self.body.evict_key(slf, key_bin)
 
 var next_ctx_uid* {.threadvar.}: int
   ## Thread-local source of `EdContext.uid`. Per-thread is enough: a context is

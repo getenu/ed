@@ -51,9 +51,9 @@ proc register_type(typ: type) =
       for src, dest in fields(self[], clone[]):
         when src is Ed:
           if ?src:
-            var field = type(src)()
-            field.id = src.id
-            dest = field
+            # Proxy/body split: a bare `type(src)()` has no body, and `.id`
+            # forwards there — mint a husk that carries one.
+            dest = type(src).init_husk(src.id)
         elif src is ref:
           dest = nil
         elif src is ptr:

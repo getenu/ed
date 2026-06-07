@@ -1160,7 +1160,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         if not still_wanted:
           if msg.object_id in self:
             let obj = self.objects[msg.object_id]
-            if obj.evict_key != nil:
+            if obj.body.evict_key != nil:
               discard obj.evict_key(obj, key_bin)
           self.pending_key_releases.mgetOrPut(msg.object_id, @[]).add key_bin
     if not retracted:
@@ -1172,7 +1172,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       if from_upstream:
         if msg.object_id in self:
           let obj = self.objects[msg.object_id]
-          if obj.evict_key != nil:
+          if obj.body.evict_key != nil:
             for key_bin in keys:
               discard obj.evict_key(obj, key_bin)
         if not self.is_authority:

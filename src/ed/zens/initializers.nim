@@ -100,9 +100,17 @@ proc defaults[T, O](
     id: string,
     op_ctx: OperationContext,
     broadcast = true,
+    flags = DEFAULT_FLAGS,
+    placeholder = false,
 ): Ed[T, O] =
   privileged
   log_defaults
+
+  # The proxy/body split: the body carries the data + sync state; field access
+  # on the proxy forwards to it (types.nim templates). Minted here — before
+  # anything reads a forwarded field — since object construction can no longer
+  # set what are now body fields.
+  self.body = EdBody[T](flags: flags, placeholder: placeholder)
 
   create_initializer(self)
 
@@ -134,7 +142,7 @@ proc defaults[T, O](
       self.owner_id = current_owner_id
       ctx.owned_by.mgetOrPut(current_owner_id, initHashSet[string]()).incl(self.id)
 
-  self.publish_create = proc(
+  self.body.publish_create = proc(
       sub: Subscription,
       broadcast: bool,
       op_ctx = OperationContext(),
@@ -184,7 +192,7 @@ proc defaults[T, O](
           ctx.send_msg(sub)
     ctx.tick_reactor
 
-  self.build_message = proc(
+  self.body.build_message = proc(
       self: ref EdBase, change: BaseChange, id, trace: string
   ): Message =
     var msg = Message(object_id: id, type_id: Ed[T, O].tid)
@@ -237,7 +245,7 @@ proc defaults[T, O](
         fail "Can't build message for changes " & $change.changes
     result = msg
 
-  self.change_receiver = proc(
+  self.body.change_receiver = proc(
       self: ref EdBase, msg: Message, op_ctx: OperationContext
   ) =
     assert self of Ed[T, O]
@@ -311,7 +319,7 @@ proc defaults[T, O](
     else:
       fail "Can't handle message " & $msg.kind
 
-  self.publish_key = proc(
+  self.body.publish_key = proc(
       self: ref EdBase, key_bin: string
   ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.} =
     # Per-key fetch: build the ADD op for one entry so a partial subscriber can
@@ -345,7 +353,7 @@ proc defaults[T, O](
     else:
       discard
 
-  self.evict_key = proc(
+  self.body.evict_key = proc(
       self: ref EdBase, key_bin: string
   ): tuple[found: bool, nested: seq[string]] {.gcsafe.} =
     # Per-key eviction: drop the entry locally (REMOVED callbacks fire so
@@ -389,8 +397,8 @@ proc init_placeholder*[T, O](
   ## `ctx.objects` under `id` and marked `placeholder`; no CREATE goes out.
   ## Reading it triggers a fetch; the real state fills it in later.
   # `op_ctx` is only consulted by defaults' broadcast, which we skip.
-  result = Ed[T, O](flags: DEFAULT_FLAGS, placeholder: true).defaults(
-    ctx, id, OperationContext(), broadcast = false
+  result = Ed[T, O]().defaults(
+    ctx, id, OperationContext(), broadcast = false, placeholder = true
   )
 
 proc init*(
@@ -402,7 +410,7 @@ proc init*(
 ): T =
   ## Initialize an empty `Ed` container of the given type.
   ctx.setup_op_ctx
-  T(flags: flags).defaults(ctx, id, op_ctx)
+  T().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*(
     _: type,
@@ -413,7 +421,7 @@ proc init*(
     op_ctx = OperationContext(),
 ): Ed[string, string] =
   ctx.setup_op_ctx
-  result = Ed[string, string](flags: flags).defaults(ctx, id, op_ctx)
+  result = Ed[string, string]().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*(
     _: type Ed,
@@ -424,7 +432,7 @@ proc init*(
     op_ctx = OperationContext(),
 ): Ed[T, T] =
   ctx.setup_op_ctx
-  result = Ed[T, T](flags: flags).defaults(ctx, id, op_ctx)
+  result = Ed[T, T]().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*[T: ref | object | tuple | array | SomeOrdinal | SomeNumber | string | ptr](
     _: type Ed,
@@ -435,7 +443,7 @@ proc init*[T: ref | object | tuple | array | SomeOrdinal | SomeNumber | string |
     op_ctx = OperationContext(),
 ): Ed[T, T] =
   ctx.setup_op_ctx
-  var self = Ed[T, T](flags: flags).defaults(ctx, id, op_ctx)
+  var self = Ed[T, T]().defaults(ctx, id, op_ctx, flags = flags)
 
   mutate(op_ctx):
     self.tracked = tracked
@@ -450,7 +458,7 @@ proc init*[O](
     op_ctx = OperationContext(),
 ): Ed[set[O], O] =
   ctx.setup_op_ctx
-  var self = Ed[set[O], O](flags: flags).defaults(ctx, id, op_ctx)
+  var self = Ed[set[O], O]().defaults(ctx, id, op_ctx, flags = flags)
 
   mutate(op_ctx):
     self.tracked = tracked
@@ -465,7 +473,7 @@ proc init*[K, V](
     op_ctx = OperationContext(),
 ): EdTable[K, V] =
   ctx.setup_op_ctx
-  var self = EdTable[K, V](flags: flags).defaults(ctx, id, op_ctx)
+  var self = EdTable[K, V]().defaults(ctx, id, op_ctx, flags = flags)
 
   mutate(op_ctx):
     self.tracked = tracked
@@ -480,7 +488,7 @@ proc init*[O](
     op_ctx = OperationContext(),
 ): Ed[seq[O], O] =
   ctx.setup_op_ctx
-  var self = Ed[seq[O], O](flags: flags).defaults(ctx, id, op_ctx)
+  var self = Ed[seq[O], O]().defaults(ctx, id, op_ctx, flags = flags)
 
   mutate(op_ctx):
     self.tracked = tracked
@@ -495,7 +503,7 @@ proc init*[O](
     op_ctx = OperationContext(),
 ): Ed[seq[O], O] =
   ctx.setup_op_ctx
-  result = Ed[seq[O], O](flags: flags).defaults(ctx, id, op_ctx)
+  result = Ed[seq[O], O]().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*[O](
     _: type Ed,
@@ -506,7 +514,7 @@ proc init*[O](
     op_ctx = OperationContext(),
 ): Ed[set[O], O] =
   ctx.setup_op_ctx
-  result = Ed[set[O], O](flags: flags).defaults(ctx, id, op_ctx)
+  result = Ed[set[O], O]().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*[K, V](
     _: type Ed,
@@ -517,7 +525,7 @@ proc init*[K, V](
     op_ctx = OperationContext(),
 ): Ed[Table[K, V], Pair[K, V]] =
   ctx.setup_op_ctx
-  result = Ed[Table[K, V], Pair[K, V]](flags: flags).defaults(ctx, id, op_ctx)
+  result = Ed[Table[K, V], Pair[K, V]]().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*(
     _: type Ed,
@@ -528,7 +536,7 @@ proc init*(
     op_ctx = OperationContext(),
 ): EdTable[K, V] =
   ctx.setup_op_ctx
-  result = EdTable[K, V](flags: flags).defaults(ctx, id, op_ctx)
+  result = EdTable[K, V]().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*[T, O](
     self: var Ed[T, O],
