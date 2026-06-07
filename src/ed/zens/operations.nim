@@ -4,18 +4,18 @@ import ed/[core, components/private/tracking, types {.all.}]
 import ./[contexts, validations, private]
 
 proc untrack_all*[T, O](self: Ed[T, O]) =
-  private_access EdObject[T, O]
-  private_access EdBase
-  private_access EdContext
+  privileged
   assert self.valid
   self.trigger_callbacks(@[Change.init(O, {CLOSED})])
-  for zid, _ in self.changed_callbacks.pairs:
+  let body = self.typed_body
+  for zid, _ in body.changed_callbacks.pairs:
     self.ctx.close_index.del(zid)
 
   for zid in self.bound_eids:
     self.ctx.untrack(zid)
 
-  self.changed_callbacks.clear
+  body.changed_callbacks.clear
+  body.callback_gens.clear
 
 proc untrack*(ctx: EdContext, zid: EID) =
   private_access EdContext
@@ -317,18 +317,18 @@ proc resume_changes*(self: Ed, eids: varargs[EID]) =
     self.paused_eids = {}
   else:
     for eid in eids:
-      self.paused_eids.excl(eid)
+      self.typed_body.paused_eids.excl(eid)
 
 template pause_impl(self: Ed, eids: untyped, body: untyped) =
-  private_access EdBase
+  privileged
 
-  let previous = self.paused_eids
+  let previous = self.typed_body.paused_eids
   for eid in eids:
-    self.paused_eids.incl(eid)
+    self.typed_body.paused_eids.incl(eid)
   try:
     body
   finally:
-    self.paused_eids = previous
+    self.typed_body.paused_eids = previous
 
 template pause*(self: Ed, eids: varargs[EID], body: untyped) =
   mixin valid
@@ -336,10 +336,10 @@ template pause*(self: Ed, eids: varargs[EID], body: untyped) =
   pause_impl(self, eids, body)
 
 template pause*(self: Ed, body: untyped) =
-  private_access EdObject
+  privileged
   mixin valid
   assert self.valid
-  pause_impl(self, self.changed_callbacks.keys, body)
+  pause_impl(self, self.typed_body.changed_callbacks.keys, body)
 
 proc destroy*[T, O](self: Ed[T, O], publish = true) =
   ## Destroy the container and remove it from its context.
@@ -348,6 +348,7 @@ proc destroy*[T, O](self: Ed[T, O], publish = true) =
   assert self.valid
   self.untrack_all
   self.destroyed = true
+  self.body.release_closures # break body self-captures (no cycle GC)
   self.ctx.objects[self.id] = nil
   self.ctx.objects_need_packing = true
   self.ctx.latest_op_id.del(self.id)  # drop own-op reconciliation state

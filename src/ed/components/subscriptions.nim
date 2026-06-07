@@ -1349,13 +1349,14 @@ proc untrack*[T, O](self: Ed[T, O], zid: EID) =
   assert self.valid
 
   # :(
-  if zid in self.changed_callbacks:
-    let callback = self.changed_callbacks[zid]
-    if zid notin self.paused_eids:
-      callback(@[Change.init(O, {CLOSED})])
+  let body = self.typed_body
+  if zid in body.changed_callbacks:
+    let callback = body.changed_callbacks[zid]
+    if zid notin body.paused_eids:
+      callback(@[Change.init(O, {CLOSED})], self)
     self.ctx.close_index.del(zid)
-    debug "removing close proc", zid
-    self.changed_callbacks.del(zid)
+    body.changed_callbacks.del(zid)
+    body.callback_gens.del(zid)
   else:
     error "no change callback for zid", zid = zid
 
@@ -1367,7 +1368,7 @@ proc bind_lifetime*[T, O](self: Ed[T, O], lifetime: Lifetime, zid: EID) =
   ## owner dying first — is safe and idempotent.
   privileged
   lifetime.add proc() {.gcsafe.} =
-    if not self.destroyed and zid in self.changed_callbacks:
+    if not self.destroyed and zid in self.typed_body.changed_callbacks:
       self.untrack(zid)
 
 proc track*[T, O](
@@ -1381,7 +1382,14 @@ proc track*[T, O](
   assert self.valid
   inc self.ctx.changed_callback_eid
   let zid = self.ctx.changed_callback_eid
-  self.changed_callbacks[zid] = callback
+  let body = self.typed_body
+  # Wrap the 1-arg callback in the stored 2-arg shape; the wrapper captures
+  # only the user's closure (their captures are their pins).
+  body.changed_callbacks[zid] = proc(
+      changes: seq[Change[O]], it: ref EdBase
+  ) {.gcsafe.} =
+    callback(changes)
+  body.callback_gens[zid] = body.proxy_gen
   self.ctx.close_index[zid] = self.id
   result = zid
 

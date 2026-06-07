@@ -462,10 +462,32 @@ type
     # on the live proxy, or no-ops — a dead proxy already took its callbacks
     # with it. Captures only the body (the mint pattern).
     untrack_zid: proc(zid: EID) {.gcsafe.}
+    # Sweep callbacks registered through a now-dead proxy generation; returns
+    # the swept zids so the context can clear its close_index. Typed work
+    # behind an untyped hook (the publish_key pattern).
+    sweep_gen: proc(gen: int): seq[EID] {.gcsafe.}
 
-  EdBody*[T] = ref object of EdBodyBase
-    ## Typed body: the canonical data lives here.
+  ChangeCallback[O] = proc(
+    changes: seq[Change[O]], it: ref EdBase
+  ) {.gcsafe.}
+    ## Stored callback shape: the live proxy arrives as a *parameter* (`it`),
+    ## never a capture — parameters pin nothing, so a watcher written against
+    ## `it` lets its proxy die promptly at refcount zero. `it` is nil only for
+    ## CLOSED notifications fired after the proxy is already gone.
+
+  EdBody*[T, O] = ref object of EdBodyBase
+    ## Typed body: the canonical data AND the callbacks live here — registry-
+    ## owned, no reliance on cycle collection (which Nim's ORC empirically
+    ## does not perform for closure environments). A closure stored here must
+    ## capture nothing that reaches a body or a context, or it leaks for the
+    ## registry's lifetime; the `it` parameter exists so it never needs to.
     tracked: T
+    changed_callbacks: OrderedTable[EID, ChangeCallback[O]]
+    # zid -> proxy generation that registered it. When a dead proxy's gen is
+    # pruned, its callbacks sweep with it — deterministic next-tick cleanup.
+    callback_gens: Table[EID, int]
+    link_eid: EID
+    paused_eids: set[EID]
 
   ProxyHandle* = ref object
     ## Per-proxy registry-cleanup handle (the container twin of `RefHandle`).
@@ -487,14 +509,9 @@ type
     ## *the* live proxy (prune-before-read keeps it honest).
     body*: ref EdBodyBase
     proxy_handle: ProxyHandle
-    link_eid: EID
-    paused_eids: set[EID]
     bound_eids: seq[EID]
 
-  ChangeCallback[O] = proc(changes: seq[Change[O]]) {.gcsafe.}
-
   EdObject[T, O] = object of EdBase
-    changed_callbacks: OrderedTable[EID, ChangeCallback[O]]
 
   Ed*[T, O] = ref object of EdObject[T, O]
     ## Generic reactive container. T is the contained type, O is the change object type.
@@ -520,7 +537,10 @@ const DEFAULT_FLAGS* = {SYNC_LOCAL, SYNC_REMOTE}
 # today's visibility discipline. The typed `tracked` forward casts through
 # `EdBody[T]`; everything else lives on the untyped base.
 template tracked*[T, O](self: Ed[T, O]): untyped =
-  EdBody[T](self.body).tracked
+  EdBody[T, O](self.body).tracked
+
+template typed_body*[T, O](self: Ed[T, O]): EdBody[T, O] =
+  EdBody[T, O](self.body)
 
 template id*(self: ref EdBase): untyped =
   self.body.id
@@ -546,7 +566,7 @@ proc init_husk*[T, O](_: typedesc[Ed[T, O]], id: string): Ed[T, O] =
   ## to their ids — the receiver re-links them from its own registry. Not
   ## registered anywhere; never escapes serialization.
   result = Ed[T, O]()
-  result.body = EdBody[T](id: id)
+  result.body = EdBody[T, O](id: id)
 
 # The sync closures: the call-arity procs forward invocations (a dotted call
 # through a proc field parses as a call of the *symbol*, so a field-resolving
@@ -647,7 +667,14 @@ proc prune_dead_proxies*(self: EdContext) =
     for (object_id, gen) in dead:
       if object_id in self.objects and self.objects[object_id] != nil and
           self.objects[object_id].proxy_gen == gen:
-        self.objects[object_id].proxy = nil
+        let body = self.objects[object_id]
+        body.proxy = nil
+        # The dead proxy's callbacks die with it — registered through it,
+        # cleaned when it goes (the sentinel model). Deterministic: next
+        # prune, not cycle-collector cadence.
+        if body.sweep_gen != nil:
+          for zid in body.sweep_gen(gen):
+            self.close_index.del(zid)
 
 proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
   ## The identity map: the one live proxy for `body`, minting if none. Two
@@ -661,6 +688,14 @@ proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
   if body.mint != nil:
     return body.mint()
 
+proc release_closures*(body: ref EdBodyBase) =
+  ## Break the body's self-capturing closures (mint/untrack_zid/sweep_gen all
+  ## capture the body). Required at unregistration: ORC does not collect
+  ## closure cycles, so an unreleased body would leak with its environment.
+  body.mint = nil
+  body.untrack_zid = nil
+  body.sweep_gen = nil
+
 proc drop_nested_bodies*(self: EdContext, nested: seq[string]) =
   ## Unregister the nested container bodies an evicted entry carried (a paged-
   ## out chunk's delta seq): the registry releases its strong hold, so the
@@ -669,10 +704,12 @@ proc drop_nested_bodies*(self: EdContext, nested: seq[string]) =
   for id in nested:
     if id in self.objects:
       let body = self.objects[id]
-      if body != nil and body.owner_id.len > 0 and
-          body.owner_id in self.owned_by:
-        self.owned_by[body.owner_id].excl id
+      if body != nil:
+        if body.owner_id.len > 0 and body.owner_id in self.owned_by:
+          self.owned_by[body.owner_id].excl id
+        body.release_closures
       self.objects.del id
+
 
 proc prune_dead_refs*(self: EdContext) =
   ## Remove from `ref_pool` the entries whose instances ORC has reclaimed (see

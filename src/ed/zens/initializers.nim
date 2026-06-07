@@ -110,7 +110,7 @@ proc defaults[T, O](
   # on the proxy forwards to it (types.nim templates). Minted here — before
   # anything reads a forwarded field — since object construction can no longer
   # set what are now body fields.
-  let body = EdBody[T](flags: flags, placeholder: placeholder)
+  let body = EdBody[T, O](flags: flags, placeholder: placeholder)
   self.body = body
 
   create_initializer(self)
@@ -150,15 +150,22 @@ proc defaults[T, O](
     # proxy's callbacks died with it. Prune first so the backref read is safe.
     if body.ctx != nil:
       body.ctx.prune_dead_proxies
-    if body.proxy != nil:
+    if zid in body.changed_callbacks:
       # Mirrors proxy-level `untrack` (defined downstream in subscriptions —
       # not importable here): CLOSED notification, then drop the callback.
-      let p = Ed[T, O](body.proxy)
-      if zid in p.changed_callbacks:
-        let callback = p.changed_callbacks[zid]
-        if zid notin p.paused_eids:
-          callback(@[Change.init(O, {CLOSED})])
-        p.changed_callbacks.del(zid)
+      # `it` is the live proxy or nil — callbacks are body-side now.
+      let callback = body.changed_callbacks[zid]
+      if zid notin body.paused_eids:
+        callback(@[Change.init(O, {CLOSED})], body.proxy)
+      body.changed_callbacks.del(zid)
+      body.callback_gens.del(zid)
+  body.sweep_gen = proc(gen: int): seq[EID] {.gcsafe.} =
+    for zid, g in body.callback_gens:
+      if g == gen:
+        result.add zid
+    for zid in result:
+      body.changed_callbacks.del(zid)
+      body.callback_gens.del(zid)
   body.proxy_gen = 1
   body.proxy = self
   self.proxy_handle =
