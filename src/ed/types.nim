@@ -27,7 +27,7 @@ type
     ## `EdContext`, because at teardown the context can be reclaimed in the *same*
     ## ORC cycle-collection batch as the ref (a dangling-cursor UAF, caught by
     ## ASan). So instead of touching `ctx.ref_pool` directly it appends to a
-    ## thread-local pending list (`pending_dead_refs`); each context prunes its
+    ## lock-guarded pending list (`pending_dead_refs`); each context prunes its
     ## own dead ids before any identity read and on tick. A bare registered ref
     ## carries no such handle — and `Ed.thread_ctx` is wrong under multiple
     ## contexts per thread (load-bearing for sync identity: two contexts hold
@@ -572,11 +572,13 @@ proc evict_key*(
 ): tuple[found: bool, nested: seq[string]] {.gcsafe.} =
   self.body.evict_key(slf.body, key_bin)
 
-var next_ctx_uid* {.threadvar.}: int
-  ## Thread-local source of `EdContext.uid`. Per-thread is enough: a context is
-  ## created on, ticks on, and frees its refs on, one home thread, and
-  ## `pending_dead_refs` is thread-local too — so uids only ever collide across
-  ## threads, where the separate pending tables keep them apart.
+var next_ctx_uid*: Atomic[int]
+  ## Global source of `EdContext.uid`. Must be process-wide: the dead-handle
+  ## pending tables are global (a context can be created on one thread and
+  ## live on another), so colliding uids across threads would misattribute
+  ## deaths — a thread-local counter did exactly that (two threads' first
+  ## contexts both got uid 1, one drained the other's records, and the
+  ## undrained backref cursor dangled).
 
 var dead_handles_lock: Lock
 dead_handles_lock.init_lock

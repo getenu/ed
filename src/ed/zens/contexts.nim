@@ -79,10 +79,10 @@ proc init*(
 
   debug "EdContext initialized", id
 
-  inc next_ctx_uid
+  let uid = next_ctx_uid.fetch_add(1) + 1
   result = EdContext(
     id: id,
-    uid: next_ctx_uid,
+    uid: uid,
     blocking_recv: blocking_recv,
     max_recv_duration: max_recv_duration,
     min_recv_duration: min_recv_duration,
