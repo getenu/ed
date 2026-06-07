@@ -50,7 +50,8 @@ proc create_initializer[T, O](self: Ed[T, O]) =
           debug "creating received object", id
           if not ctx.subscribing and id notin ctx:
             var value = bin.from_flatty(T, ctx)
-            discard Ed.init(value, ctx = ctx, id = id, flags = flags, op_ctx)
+            let item = Ed.init(value, ctx = ctx, id = id, flags = flags, op_ctx)
+            ctx.set_body_bytes(item.body, bin.len) # evictor accounting
           elif not ctx.subscribing:
             debug "restoring received object", id
             var value = bin.from_flatty(T, ctx)
@@ -60,6 +61,7 @@ proc create_initializer[T, O](self: Ed[T, O]) =
             item.placeholder = false # fill: real state arrived
             `value=`(item, value, op_ctx = op_ctx)
             ctx.filling = false
+            ctx.set_body_bytes(item.body, bin.len) # evictor accounting
             if was_placeholder:
               relay_fill(item, op_ctx)
           else:
@@ -76,6 +78,7 @@ proc create_initializer[T, O](self: Ed[T, O]) =
               item.placeholder = false # fill: real state arrived
               `value=`(item, value, op_ctx = op_ctx)
               ctx.filling = false
+              ctx.set_body_bytes(item.body, bin.len) # evictor accounting
               if was_placeholder:
                 relay_fill(item, op_ctx)
             ctx.value_initializers.add(initializer)

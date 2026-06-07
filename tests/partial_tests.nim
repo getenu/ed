@@ -1,4 +1,4 @@
-import std/[unittest, sets, tables, times, monotimes]
+import std/[unittest, sets, tables, times, monotimes, strutils]
 import ed
 import ed/zens/contexts
 
@@ -441,6 +441,49 @@ proc run*() =
       clone.tick()
       check ptbl[1] == "one, unseen"
       check ntbl[1] == "one, unseen"
+
+    test "evictor: pressure sheds the least-recently-read body":
+      # mem_limit turns on the partial-replica evictor. Snapshot three bodies
+      # we don't keep open, go over budget, and watch the stalest shed first.
+      var authority = EdContext.init(id = "ev_auth", is_authority = true)
+      var client = EdContext.init(id = "ev_client", mem_limit = 250)
+      Ed.thread_ctx = authority
+      discard EdValue[string].init(ctx = authority, id = "ev_1")
+      discard EdValue[string].init(ctx = authority, id = "ev_2")
+      discard EdValue[string].init(ctx = authority, id = "ev_3")
+      EdValue[string](authority["ev_1"]).value = 'a'.repeat(100)
+      EdValue[string](authority["ev_2"]).value = 'b'.repeat(100)
+      EdValue[string](authority["ev_3"]).value = 'c'.repeat(100)
+
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      # Snapshot all three (follow = false: residue — held by nobody, no
+      # lasting interest, pure eviction candidates). Hold the handles until
+      # we're set up, then drop them (the app is done with them).
+      var f1 = client.fetch("ev_1", follow = false)
+      var f2 = client.fetch("ev_2", follow = false)
+      var f3 = client.fetch("ev_3", follow = false)
+      authority.tick()
+      client.tick()
+      check "ev_1" in client and "ev_2" in client and "ev_3" in client
+      check client.used_bytes >= 300
+
+      # Read ev_2 and ev_3 (recently used); ev_1 is never read, so it stays the
+      # stalest. Drop the handles and force ORC so the bodies read as unheld
+      # (production reaches this as allocation drives collection).
+      discard EdValue[string](client["ev_2"]).value
+      discard EdValue[string](client["ev_3"]).value
+      f1.obj = nil
+      f2.obj = nil
+      f3.obj = nil
+      f1 = nil
+      f2 = nil
+      f3 = nil
+      GC_full_collect()
+      client.tick() # evict_sweep: over 250, sheds the stalest (ev_1) and stops
+      check "ev_1" notin client # least-recently-read went
+      check "ev_2" in client and "ev_3" in client # newer survive under budget
+      check client.used_bytes <= 250
 
     test "hub shedding: last retract releases the hub's copy upstream":
       # The enu client topology: authority (server) <- partial hub (worker)

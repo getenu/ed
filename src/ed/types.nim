@@ -289,6 +289,13 @@ type
     # object fills; otherwise it kicks a fetch and returns the empty placeholder.
     materialize*: proc(self: EdContext, id: string) {.gcsafe.}
     blocking*: bool
+    # Partial-replica evictor (docs/proxy-body-design.md phase 4). `mem_limit`
+    # 0 = disabled (the authority and full clones never evict). `used_bytes` is
+    # the running sum of resident body bytes; `evict_cursor` walks the registry
+    # incrementally so a sweep is bounded per tick.
+    mem_limit*: int
+    used_bytes*: int
+    evict_cursor*: int
     filling*: bool        # set while a placeholder fill applies → tags Fill changes
     silent*: bool         # silent (blocking) materialize: defer callbacks to next tick
     pending_msgs*: seq[Message]            # received-but-deferred during a silent pump
@@ -403,6 +410,11 @@ type
     # change fires. Default false = a normal, fully-loaded object.
     placeholder*: bool
     flags*: set[EdFlags]
+    # Eviction accounting (partial-replica evictor, docs/proxy-body-design.md
+    # phase 4). All cheap to maintain; only the partial-replica sweep reads them.
+    last_read*: MonoTime  # stamped on a read-touch (value/[]/items/pairs)
+    bytes*: int           # wire-weight, stamped where we serialize (drift-ok)
+    updates*: int         # arriving ops since the last read — the churn signal
     build_message: proc(
       body: ref EdBodyBase, change: BaseChange, id: string, trace: string
     ): Message {.gcsafe.}
@@ -696,6 +708,23 @@ proc release_closures*(body: ref EdBodyBase) =
   body.untrack_zid = nil
   body.sweep_gen = nil
 
+proc set_body_bytes*(self: EdContext, body: ref EdBodyBase, n: int) =
+  ## Record a body's resident wire-size and keep `used_bytes` in step. Called
+  ## where we already have the serialized form (publish/fill); drift between
+  ## those points is harmless — the total only gates *when* the limit trips,
+  ## and LRU ordering doesn't use bytes at all. No-op without a memory limit.
+  if self.mem_limit == 0:
+    return
+  self.used_bytes += n - body.bytes
+  body.bytes = n
+
+proc forget_body_bytes*(self: EdContext, body: ref EdBodyBase) =
+  ## Remove a body's bytes from the running total (on unregister/evict).
+  if self.mem_limit == 0:
+    return
+  self.used_bytes -= body.bytes
+  body.bytes = 0
+
 proc drop_nested_bodies*(self: EdContext, nested: seq[string]) =
   ## Unregister the nested container bodies an evicted entry carried (a paged-
   ## out chunk's delta seq): the registry releases its strong hold, so the
@@ -707,6 +736,7 @@ proc drop_nested_bodies*(self: EdContext, nested: seq[string]) =
       if body != nil:
         if body.owner_id.len > 0 and body.owner_id in self.owned_by:
           self.owned_by[body.owner_id].excl id
+        self.forget_body_bytes(body)
         body.release_closures
       self.objects.del id
 

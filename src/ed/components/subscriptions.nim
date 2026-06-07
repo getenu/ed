@@ -731,6 +731,95 @@ proc subscribe*(
     # Reverse direction (us → authority) stays full: we push our own writes.
     ctx.subscribe(self, bidirectional = false, upstream = false)
 
+proc any_interest*(self: EdContext, object_id: string): bool =
+  ## Does any subscriber below us still want this object — directly (interest)
+  ## or via a key it holds? Interest auto-propagates downward, so "no interest"
+  ## means the whole subtree beneath us has let go.
+  for s in self.subscribers:
+    if s.ctx_id in self.upstream_ctx_ids:
+      continue # the reverse link to our upstream is not downstream interest
+    if object_id in s.interest or object_id in s.key_interest:
+      return true
+  result = false
+
+proc evict_body*(self: EdContext, object_id: string) =
+  ## Reclaim a dormant, unclaimed body: drop it locally and retract our
+  ## interest upstream so its ops stop flowing (otherwise the next op would
+  ## just re-materialize it). No downstream relay — by the candidate gate
+  ## nobody below us wants it. The data is safe on the authority; a later
+  ## access re-fetches. Partial replicas only.
+  if object_id notin self.objects or self.objects[object_id] == nil:
+    return
+  let body = self.objects[object_id]
+  # Retract upstream: a whole-object RELEASE (empty key batch) tells our
+  # source to stop following it for us.
+  let msg = Message(kind: RELEASE, object_id: object_id)
+  for sub in self.subscribers:
+    if sub.ctx_id in self.upstream_ctx_ids:
+      self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
+  # Stop following it ourselves, drop ownership-index + bytes, unregister.
+  if body.owner_id.len > 0 and body.owner_id in self.owned_by:
+    self.owned_by[body.owner_id].excl object_id
+  self.forget_body_bytes(body)
+  body.release_closures
+  self.objects.del object_id
+  self.objects_need_packing = true
+  self.tick_reactor
+
+proc evict_candidate(self: EdContext, body: ref EdBodyBase): bool =
+  ## Eligible for eviction: nothing local is using it (no live proxy), nobody
+  ## below us wants it, it isn't a live-owned piece of something else, and it
+  ## actually holds data worth reclaiming. Placeholders and LAZY handles are
+  ## never candidates (no resident data; LAZY is paged per-key).
+  if body == nil or body.placeholder or LAZY in body.flags:
+    return false
+  if body.proxy != nil:
+    return false
+  if self.any_interest(body.id):
+    return false
+  if body.owner_id.len > 0 and body.owner_id in self.objects and
+      self.objects[body.owner_id] != nil and
+      self.objects[body.owner_id].proxy != nil:
+    return false # a live owner keeps its pieces
+  result = true
+
+const churn_limit = 8
+  ## Arriving ops on a dormant body before we evict it: holding it costs that
+  ## much traffic, and refill is a single fetch. A see-it-work default.
+
+proc evict_sweep*(self: EdContext) =
+  ## Partial-replica eviction (docs/proxy-body-design.md phase 4). Two rules,
+  ## both gated on `evict_candidate`: churn (a dormant body taking ops is pure
+  ## waste — drop it regardless of memory) and pressure (over `mem_limit`, shed
+  ## least-recently-read first until back under). No limit → no-op; the
+  ## authority and full clones never set one.
+  if self.mem_limit == 0:
+    return
+  self.prune_dead_proxies
+  # Churn pass — always on. One linear scan; cheap (field reads).
+  var churned: seq[string]
+  for id, body in self.objects:
+    if body != nil and body.updates >= churn_limit and self.evict_candidate(body):
+      churned.add id
+  for id in churned:
+    debug "evicting (churn)", object_id = id, updates = self.objects[id].updates
+    self.evict_body(id)
+  # Pressure pass — only when over budget. LRU: oldest read goes first.
+  if self.used_bytes <= self.mem_limit:
+    return
+  var cands: seq[(MonoTime, string)]
+  for id, body in self.objects:
+    if self.evict_candidate(body):
+      cands.add (body.last_read, id)
+  cands.sort do(a, b: (MonoTime, string)) -> int:
+    cmp(a[0], b[0]) # ascending: least-recently-read first
+  for (_, id) in cands:
+    if self.used_bytes <= self.mem_limit:
+      break
+    debug "evicting (pressure)",
+      object_id = id, used = self.used_bytes, limit = self.mem_limit
+    self.evict_body(id)
+
 proc fetch*(
     self: EdContext, object_id: string, deep = false, follow = true
 ): Fetch {.discardable.} =
@@ -1110,6 +1199,27 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
             DEFAULT_FLAGS,
           )
         self.pending_obj_wants.del msg.object_id
+  elif msg.kind == RELEASE and msg.obj.len == 0:
+    # Whole-object release (evictor): a peer dropped object_id entirely.
+    #  - From a subscriber: an interest retract — stop streaming it to them.
+    #  - From upstream: an eviction notice — but a received drop is NEVER
+    #    authoritative over a live local hold (Scott's rule). Evict only if we
+    #    aren't using it ourselves and nobody below us wants it; otherwise keep
+    #    using it and let our own evictor reclaim it when it goes dormant.
+    for s in self.subscribers:
+      if s.ctx_id notin source:
+        continue
+      s.interest.excl msg.object_id
+      s.key_interest.del msg.object_id
+    var from_upstream = false
+    for src in source:
+      if src in self.upstream_ctx_ids:
+        from_upstream = true
+        break
+    if from_upstream and msg.object_id in self and
+        self.objects[msg.object_id].proxy == nil and
+        not self.any_interest(msg.object_id):
+      self.evict_body(msg.object_id)
   elif msg.kind == RELEASE:
     # Per-key paging notice (see `release`). Role decides the meaning:
     #  - From a subscriber that pages from us: an interest retract — stop
@@ -1329,6 +1439,16 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           object_id = msg.object_id, kind = msg.kind
       return
     let obj = self.objects[msg.object_id]
+    # Eviction accounting: an arriving op for a body we're not reading is churn
+    # (the signal that holding it costs traffic); collection deltas also move
+    # its resident size. Cheap, and only when a memory limit is set.
+    if self.mem_limit > 0:
+      inc obj.updates
+      if msg.delta:
+        if msg.kind in {ASSIGN, TOUCH}:
+          self.set_body_bytes(obj, obj.bytes + msg.obj.len)
+        elif msg.kind == UNASSIGN:
+          self.set_body_bytes(obj, max(0, obj.bytes - msg.obj.len))
     obj.change_receiver(
       obj,
       msg,
@@ -1528,6 +1648,7 @@ proc tick*(
   self.flush_buffers
   self.flush_key_requests # send this frame's batched per-key fetches
   self.flush_key_releases # ...and its batched per-key releases (paging out)
+  self.evict_sweep        # reclaim dormant/over-budget bodies (partial replicas)
 
   # Replay whatever a silent (blocking) materialize deferred — at this tick
   # boundary, before new traffic: first the messages it buffered (apply + fire
