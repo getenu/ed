@@ -101,3 +101,38 @@ decisions prove wrong in practice.
 - Eviction scope for registered refs (unit paging) — phase 4 follow-up.
 - Whether `flags`/`owner_id` reads need the body resident or get mirrored on the
   proxy (likely mirror: they're tiny and identity-stable).
+
+## As built — phases 1–3 (2026-06-07, overnight; ed d3b87a8/37950ec/8da225b/ee4be04)
+
+Gates at every step: suite green, ASan clean, enu builds **untouched** +
+world_tests; client_smoke 10/10 after the last fix. Decisions taken solo,
+flagged 🔶 for review:
+
+- 🔶 **EID bookkeeping (link_eid/paused_eids/bound_eids) stayed on the proxy.**
+  Links register in the *child's* callback table, and child proxies are
+  strong-held via the parent body's `tracked` — so links live exactly as long
+  as both ends are held. The planned body-level `sync_callbacks` home turned
+  out unnecessary: all callbacks are app-side; publish is separate.
+- 🔶 **change_receiver / per-key closures resolve (mint) the proxy at call
+  time.** Mint-on-receive churn for un-held objects is accepted for now; a
+  body-direct apply path (skip minting when no live proxy and no links) is the
+  obvious optimization if profiling complains.
+- 🔶 **Evicted-but-held nested bodies:** a holder keeps a frozen husk; re-page-
+  in resolves a *fresh* body+proxy. Identity is intentionally not preserved
+  across eviction ("drop to absent") — nothing in enu durably holds delta seqs
+  across page-out (watchers die with the proxy, which is the Lifetime story
+  working as designed).
+- **Two cross-thread bugs the pattern-copy hid** (both would have been silent
+  UAFs): the pending dead-handle tables must be **lock-guarded globals**, not
+  threadvars — a context can be created on one thread and live on another
+  (threading tests' worker handoff) — and once global, `EdContext.uid` must be
+  **process-global** (atomic counter): two threads' threadvar counters both
+  minted uid 1 and drained each other's deaths. The unit suite caught the
+  first; only client_smoke caught the second. `pending_dead_refs`/`RefHandle`
+  had both hazards latently and got the same fix.
+- The `tracked`/field forwarding templates + call-arity procs keep every call
+  site and the entire enu source compiling unchanged — the "big invasive
+  refactor" cost from the original doc largely didn't materialize.
+- **Phase 4 (touch/LRU evictor) deliberately not built overnight** — its
+  policy knobs (sweep cadence, coldness threshold, interest interaction, what
+  counts as a touch) are review-first material.
