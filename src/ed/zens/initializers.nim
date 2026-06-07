@@ -160,7 +160,7 @@ proc defaults[T, O](
       body.changed_callbacks.del(zid)
       body.callback_gens.del(zid)
   body.sweep_gen = proc(gen: int): seq[EID] {.gcsafe.} =
-    for zid, g in body.callback_gens:
+    for zid, g in tables.pairs(body.callback_gens):
       if g == gen:
         result.add zid
     for zid in result:

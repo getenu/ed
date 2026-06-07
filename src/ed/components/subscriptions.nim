@@ -1413,6 +1413,31 @@ proc track*[T, O](
 
 proc track*[T, O](
     self: Ed[T, O],
+    callback:
+      proc(changes: seq[Change[O]], zid: EID, it: Ed[T, O]) {.gcsafe.},
+): EID {.discardable.} =
+  ## The non-capturing form: the live proxy arrives as `it` each fire, so the
+  ## callback needs no reference to the watched object at all — a proxy
+  ## tracked this way still dies promptly when the app drops it. The sugar
+  ## (`changes`/`watch`) builds on this.
+  privileged
+  assert self.valid
+  inc self.ctx.changed_callback_eid
+  let zid = self.ctx.changed_callback_eid
+  let body = self.typed_body
+  body.changed_callbacks[zid] = proc(
+      changes: seq[Change[O]], it: ref EdBase
+  ) {.gcsafe.} =
+    callback(changes, zid, Ed[T, O](it))
+  body.callback_gens[zid] = body.proxy_gen
+  self.ctx.close_index[zid] = self.id
+  result = zid
+  {.gcsafe.}:
+    if not current_lifetime.is_nil:
+      self.bind_lifetime(current_lifetime, zid)
+
+proc track*[T, O](
+    self: Ed[T, O],
     lifetime: Lifetime,
     callback: proc(changes: seq[Change[O]]) {.gcsafe.},
 ): EID {.discardable.} =
@@ -1744,13 +1769,42 @@ macro check_no_return*(body: untyped): untyped =
     )
   result = body
 
+macro warn_self_capture(watched: untyped, body: untyped): untyped =
+  ## Bare-identifier self-capture detection for the `changes`/`watch` sugar:
+  ## a callback body that references the watched *variable* captures it,
+  ## pinning the object until untracked (closure cycles are not collected).
+  ## Deliberately narrow — only a bare identifier, only outside dot-RHS
+  ## positions — so it stays near-zero false positives (enu fires none).
+  result = new_empty_node()
+  if watched.kind in {nnk_ident, nnk_sym}:
+    let name = watched.str_val
+    proc references(n: NimNode): bool =
+      if n.kind in {nnk_ident, nnk_sym} and eq_ident(n, name):
+        return true
+      for i in 0 ..< n.len:
+        if n.kind == nnk_dot_expr and i == 1:
+          continue # `x.foo` — foo is a field, not a capture
+        if references(n[i]):
+          return true
+    if references(body):
+      warning(
+        "callback closes over '" & name &
+          "', pinning it until untracked — use `it` (the injected live " &
+          "proxy) or bind a Lifetime",
+        watched,
+      )
+
 template changes*[T, O](self: Ed[T, O], pause_me, body) =
-  let zen = self
+  warn_self_capture(self, body)
   make_discardable block:
     {.line.}:
-      zen.track proc(changes: seq[Change[O]], zid {.inject.}: EID) {.gcsafe.} =
+      track self, proc(
+          changes: seq[Change[O]], zid {.inject.}: EID, it {.inject.}: Ed[T, O]
+      ) {.gcsafe.} =
+        # `it` is the live proxy, delivered as a parameter — referencing it
+        # captures nothing, so sugar watchers never pin their object.
         let pause_zid = if pause_me: zid else: 0
-        zen.pause(pause_zid):
+        it.pause(pause_zid):
           for change {.inject.} in changes:
             template added(): bool =
               ADDED in change.changes

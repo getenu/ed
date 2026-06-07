@@ -16,13 +16,13 @@ proc start_worker(ctx: EdContext) {.thread.} =
   var working = true
   b.changes:
     if "scott".added:
-      b.value = "marie"
+      it.value = "marie"
     if "claire".added:
-      b.value = "cal"
+      it.value = "cal"
     if "vin".added:
-      b.value = "banana"
+      it.value = "banana"
     if "bacon".added:
-      b.value = "ghetti"
+      it.value = "ghetti"
     if "done".added:
       working = false
 
@@ -51,18 +51,18 @@ proc run*() =
     var working = true
     a.changes:
       if "marie".added:
-        a.value = "claire"
+        it.value = "claire"
       if "cal".added:
-        a.value = "vin"
+        it.value = "vin"
       if "banana".added:
-        a.value = "bacon"
+        it.value = "bacon"
       if "ghetti".added:
         remaining -= 1
         if remaining == 0:
-          a.value = "done"
+          it.value = "done"
           working = false
         else:
-          a.value = "scott"
+          it.value = "scott"
 
     while working:
       Ed.thread_ctx.tick

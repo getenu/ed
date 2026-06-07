@@ -136,3 +136,33 @@ flagged 🔶 for review:
 - **Phase 4 (touch/LRU evictor) deliberately not built overnight** — its
   policy knobs (sweep cadence, coldness threshold, interest interaction, what
   counts as a touch) are review-first material.
+
+## Sentinel rework — callbacks move to the body (2026-06-07 morning; ed 45f956e/dda7431+)
+
+Driven by an empirical finding: **Nim ORC does not collect closure-environment
+cycles** (three pure-Nim repros, no ed involved). Proxy-side callbacks could
+therefore never reclaim — a self-capturing watcher pinned its proxy forever.
+Settled with Scott:
+
+- **Body owns the callbacks** (`changed_callbacks`/`paused_eids`/`link_eid` on
+  `EdBody[T, O]`); the proxy is a *sentinel* — body ref + ProxyHandle, nothing
+  else — so it dies promptly at refcount zero, and the next prune sweeps the
+  callbacks registered through its generation (`callback_gens`/`sweep_gen`).
+  This is the mcp workflow: fetch → watch → drop → reclaimed, no GC heroics.
+- **The live proxy reaches callbacks as a parameter** (`it`), never a capture:
+  stored shape `proc(changes, it: ref EdBase)`; 1-arg `track` callbacks wrap.
+  The `changes`/`watch` sugar injects `it` and no longer captures the proxy
+  for pause bookkeeping.
+- **Capture rule**: a closure stored on a body must capture nothing that
+  reaches a body or context; body self-captures (mint/untrack_zid/sweep_gen)
+  are released explicitly at unregistration (`release_closures`).
+- **Static warning, narrowly scoped**: the sugar warns only when the watched
+  expression is a bare identifier the body references — the genuine
+  self-capture footgun. Survey: 0/91 enu watch sites fire (their `self`/
+  `state` captures are indirect, Lifetime-managed pins, deliberately out of
+  jurisdiction — a root-ident version would have fired on 67/91 = noise).
+  ed's own 3 test self-captures migrated to `it` (validating the injection);
+  enu builds warning-free.
+- Lifetime/untrack discipline remains the contract for side-effecting
+  watchers; sentinel collection is the safety net and the scripting-consumer
+  default, not a replacement.
