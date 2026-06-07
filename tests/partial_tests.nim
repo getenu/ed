@@ -455,6 +455,52 @@ proc run*() =
       check client.used_bytes < loaded # ...and the memory actually dropped
       check client.used_bytes >= 200 # the still-loaded entry remains accounted
 
+    test "interest tiers: a downstream cache doesn't pin its hub (Option 2)":
+      # A ← H ← L. L caches X with a big limit; that must NOT force H to hold X.
+      # When L demotes X (it goes non-live), H may reclaim X under its own
+      # pressure and invalidate L.
+      var authority = EdContext.init(id = "it_auth", is_authority = true)
+      var hub = EdContext.init(id = "it_hub", mem_limit = 200)
+      var leaf = EdContext.init(id = "it_leaf", mem_limit = 10_000_000)
+      Ed.thread_ctx = authority
+      discard EdValue[string].init(ctx = authority, id = "it_x")
+      EdValue[string](authority["it_x"]).value = 'z'.repeat(400)
+
+      hub.subscribe(authority, partial = true, fetch = [])
+      hub.tick()
+      leaf.subscribe(hub, partial = true, fetch = [])
+      leaf.tick()
+
+      # L fetches X live (chains L→H→A); H holds it because L is live on it.
+      var f = leaf.fetch("it_x")
+      leaf.tick()
+      hub.tick()
+      authority.tick()
+      hub.tick()
+      leaf.tick()
+      check "it_x" in leaf
+      check "it_x" in hub # H holds X for live L
+      # H must not evict X while L is live on it.
+      hub.tick()
+      check "it_x" in hub
+
+      # L drops its live reference but keeps caching (big limit). It demotes X.
+      f.obj = nil
+      f = nil
+      GC_full_collect()
+      leaf.tick() # reconcile: X non-live here → demote upstream
+      hub.tick() # H records X as cache-tier for L
+      check "it_x" in leaf # L still caches it
+      check "it_x" in hub
+
+      # H is over its own budget (X is 400+ bytes, limit 200) and X is now
+      # cache-tier (unprotected) — H sheds X and invalidates L.
+      for i in 1 .. 4:
+        hub.tick()
+        leaf.tick()
+      check "it_x" notin hub # H reclaimed it — not pinned by L's cache
+      check "it_x" notin leaf # ...and invalidated L's cache
+
     test "evictor: mem_limit 0 evicts everything the moment it isn't live":
       # The no-cache mode for utility clients: a fetched object survives only
       # while a reference holds it; drop the reference and it's gone next sweep,

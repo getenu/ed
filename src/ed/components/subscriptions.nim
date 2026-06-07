@@ -731,15 +731,28 @@ proc subscribe*(
     ctx.subscribe(self, bidirectional = false, upstream = false)
 
 proc any_interest*(self: EdContext, object_id: string): bool =
-  ## Does any subscriber below us still want this object — directly (interest)
-  ## or via a key it holds? Interest auto-propagates downward, so "no interest"
-  ## means the whole subtree beneath us has let go.
+  ## Does any subscriber below us still hold *live* interest in this object —
+  ## directly or via a key? Cache-tier interest (`interest_cache`) does NOT
+  ## count: the subscriber only has it cached, so we may evict it and
+  ## invalidate them (Option 2). Interest auto-propagates downward, so "no live
+  ## interest" means nothing live in the whole subtree beneath us.
   for s in self.subscribers:
     if s.ctx_id in self.upstream_ctx_ids:
       continue # the reverse link to our upstream is not downstream interest
-    if object_id in s.interest or object_id in s.key_interest:
+    if object_id in s.interest and object_id notin s.interest_cache:
+      return true
+    if object_id in s.key_interest:
       return true
   result = false
+
+proc cache_holders(self: EdContext, object_id: string): seq[Subscription] =
+  ## Subscribers holding `object_id` at cache tier — they need an invalidation
+  ## when we evict it, so they drop their now-orphaned cache.
+  for s in self.subscribers:
+    if s.ctx_id in self.upstream_ctx_ids:
+      continue
+    if object_id in s.interest_cache:
+      result.add s
 
 proc evict_body*(self: EdContext, object_id: string) =
   ## Reclaim a dormant, unclaimed body: drop it locally and retract our
@@ -756,6 +769,12 @@ proc evict_body*(self: EdContext, object_id: string) =
   for sub in self.subscribers:
     if sub.ctx_id in self.upstream_ctx_ids:
       self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
+  # Invalidate any downstream cache holders: the body's gone, so the cache they
+  # hold of it is orphaned (a whole-object RELEASE from us = eviction notice).
+  for holder in self.cache_holders(object_id):
+    holder.interest.excl object_id
+    holder.interest_cache.excl object_id
+    self.send(holder, msg, OperationContext(), DEFAULT_FLAGS)
   # Stop following it ourselves, drop ownership-index + bytes, unregister.
   if body.owner_id.len > 0 and body.owner_id in self.owned_by:
     self.owned_by[body.owner_id].excl object_id
@@ -765,22 +784,53 @@ proc evict_body*(self: EdContext, object_id: string) =
   self.objects_need_packing = true
   self.tick_reactor
 
-proc evict_candidate(self: EdContext, body: ref EdBodyBase): bool =
-  ## Eligible for eviction: nothing local is using it (no live proxy), nobody
-  ## below us wants it, it isn't a live-owned piece of something else, and it
-  ## actually holds data worth reclaiming. Placeholders and LAZY handles are
-  ## never candidates (no resident data; LAZY is paged per-key).
-  if body == nil or body.placeholder or LAZY in body.flags:
+proc is_live_here(self: EdContext, body: ref EdBodyBase): bool =
+  ## Is this object live at our node — actively used, not merely cached?
+  ## True when we hold a live proxy, it's a piece of a live owner, or some
+  ## downstream holds *live* interest. Drives the interest tier we report
+  ## upstream (live vs cache) and the eviction gate.
+  if body == nil:
     return false
   if body.proxy != nil:
-    return false
-  if self.any_interest(body.id):
-    return false
+    return true
   if body.owner_id.len > 0 and body.owner_id in self.objects and
-      self.objects[body.owner_id] != nil and
-      self.objects[body.owner_id].proxy != nil:
-    return false # a live owner keeps its pieces
-  result = true
+      self.objects[body.owner_id] != nil and self.objects[body.owner_id].proxy != nil:
+    return true
+  if self.any_interest(body.id): # any_interest is live-only (Option 2)
+    return true
+  result = false
+
+proc evict_candidate(self: EdContext, body: ref EdBodyBase): bool =
+  ## Eligible for eviction: not live here (no live use, nobody below wants it
+  ## live), and it actually holds data worth reclaiming. Placeholders and LAZY
+  ## handles are never candidates (no resident data; LAZY is paged per-key).
+  if body == nil or body.placeholder or LAZY in body.flags:
+    return false
+  result = not self.is_live_here(body)
+
+const up_live = 1
+const up_cache = 2
+
+proc reconcile_tier(self: EdContext, body: ref EdBodyBase) =
+  ## Tell our upstream whether we hold this object live or merely cached, when
+  ## that flips (Option 2). Only for objects we follow from upstream (up_tier
+  ## set on materialize); our own creations are left alone. A demote lets the
+  ## upstream reclaim it under *its* pressure; a promote re-protects it.
+  if body == nil or body.up_tier == 0:
+    return
+  let live = self.is_live_here(body)
+  if not live and body.up_tier != up_cache:
+    body.up_tier = up_cache
+    let msg = Message(kind: INTEREST, object_id: body.id, demote: true)
+    for sub in self.subscribers:
+      if sub.ctx_id in self.upstream_ctx_ids:
+        self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
+  elif live and body.up_tier == up_cache:
+    body.up_tier = up_live
+    let msg = Message(kind: INTEREST, object_id: body.id, demote: false)
+    for sub in self.subscribers:
+      if sub.ctx_id in self.upstream_ctx_ids:
+        self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
 
 const churn_limit = 8
   ## Arriving ops on a dormant body before we evict it: holding it costs that
@@ -803,6 +853,12 @@ proc evict_sweep*(self: EdContext) =
       debug "evicting (no-cache)", object_id = id
       self.evict_body(id)
     return
+  # Cache mode (mem_limit > 0). Reconcile interest tiers first: an object that
+  # went non-live here demotes upstream (the upstream may then reclaim it under
+  # its own pressure), one that came back live re-promotes. Then evict our own
+  # cache (churn + LRU) — what we shed here is, by definition, cache tier.
+  for id, body in self.objects:
+    self.reconcile_tier(body)
   # Churn pass — always on. One linear scan; cheap (field reads).
   var churned: seq[string]
   for id, body in self.objects:
@@ -1132,6 +1188,13 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       self.owned_by.mgetOrPut(msg.owner_id, initHashSet[string]()).incl(
         msg.object_id
       )
+    # Interest tiering (Option 2): a body materialized from an upstream CREATE
+    # is one we follow — mark it live-up so the sweep reconciles its tier as it
+    # goes live/cache here. Only on an evicting partial replica with an upstream.
+    if self.mem_limit >= 0 and self.upstream_ctx_ids.len > 0 and
+        msg.object_id in self.objects and self.objects[msg.object_id] != nil:
+      if self.objects[msg.object_id].up_tier == 0:
+        self.objects[msg.object_id].up_tier = up_live
     # Resolve fetch handles: the object itself and — for a deep fetch of an
     # *owner* id — the owner its containers point back to (the owner has no
     # container of its own, so its handle resolves via the arriving closure).
@@ -1216,6 +1279,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       if s.ctx_id notin source:
         continue
       s.interest.excl msg.object_id
+      s.interest_cache.excl msg.object_id
       s.key_interest.del msg.object_id
     var from_upstream = false
     for src in source:
@@ -1226,6 +1290,21 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         self.objects[msg.object_id].proxy == nil and
         not self.any_interest(msg.object_id):
       self.evict_body(msg.object_id)
+  elif msg.kind == INTEREST:
+    # Live/cache tier change from a downstream subscriber (Option 2). Demote
+    # moves the object to that subscriber's cache tier — it still streams, but
+    # no longer protects the object from our eviction; promote moves it back.
+    # Our own up-tier to the authority then reconciles on the next sweep (our
+    # aggregate downstream liveness changed).
+    for s in self.subscribers:
+      if s.ctx_id notin source:
+        continue
+      if msg.object_id notin s.interest:
+        continue
+      if msg.demote:
+        s.interest_cache.incl msg.object_id
+      else:
+        s.interest_cache.excl msg.object_id
   elif msg.kind == RELEASE:
     # Per-key paging notice (see `release`). Role decides the meaning:
     #  - From a subscriber that pages from us: an interest retract — stop

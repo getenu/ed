@@ -110,6 +110,10 @@ type
                # is an eviction notice — drop the keys locally and relay
                # downstream. Full clones forward without evicting; the
                # authority terminates it.
+    INTEREST   # live/cache tier change (Option 2). Subscriber → upstream:
+               # `demote` (true) downgrades object_id to cache tier (still
+               # streamed, but no longer protects it from eviction); `demote`
+               # false promotes it back to live. Lightweight — no data.
 
   BaseChange* = ref object of RootObj
     changes*: set[ChangeKind]
@@ -156,6 +160,7 @@ type
                      # build_message so fanout can filter per-key (LAZY tables /
                      # key interest) without deserializing `obj`. Sender-side
                      # only — blanked from the remote body.
+    demote*: bool    # INTEREST only: true = demote (live→cache), false = promote.
     when defined(ed_trace):
       trace*: string
       id*: int
@@ -217,6 +222,14 @@ type
     # making it tri-state.
     deep*: bool
     interest*: HashSet[string]
+    # Live/cache interest tiers (Option 2; docs/interest-tiers-design.md).
+    # `interest_cache` is a subset of `interest`: those objects still stream
+    # (the subscriber's cache stays current), but they're *cache tier* — this
+    # subscriber holds them cached, not live, so they DON'T protect against
+    # eviction. We may evict a cache-tier object under our own memory pressure
+    # and invalidate the subscriber. Live interest = `interest - interest_cache`
+    # is mandatory: an upstream must hold what's live on a downstream.
+    interest_cache*: HashSet[string]
     # Per-key interest (LAZY tables): object_id -> serialized keys this
     # subscriber has requested. A requested key streams its future ops — even
     # one that was missing at request time (an empty-space voxel chunk someone
@@ -417,6 +430,11 @@ type
     last_read*: MonoTime  # stamped on a read-touch (value/[]/items/pairs)
     bytes*: int           # wire-weight, stamped where we serialize (drift-ok)
     updates*: int         # arriving ops since the last read — the churn signal
+    # Interest tier we last reported to our upstream for this object (Option 2).
+    # Reconciled each sweep against `is_live_here`: when liveness flips we send
+    # a demote (live→cache) or promote (cache→live) so the upstream isn't
+    # obligated to hold what we only have cached. 0 = none, 1 = live, 2 = cache.
+    up_tier*: int
     # Per-key wire bytes for a table (key_bin -> last ASSIGN obj.len). Lets a
     # per-key evict/release subtract exactly what the entry added to `bytes`,
     # so paging out actually shrinks `used_bytes` (whole-body fill leaves this
@@ -894,6 +912,7 @@ proc to_flatty*(s: var string, msg: Message) =
   s.to_flatty msg.delta
   s.to_flatty msg.deep
   s.to_flatty msg.key_bin
+  s.to_flatty msg.demote
   when defined(ed_trace):
     s.to_flatty msg.trace
     s.to_flatty msg.id
@@ -918,6 +937,7 @@ proc from_flatty*(s: string, i: var int, msg: var Message) =
   s.from_flatty(i, msg.delta)
   s.from_flatty(i, msg.deep)
   s.from_flatty(i, msg.key_bin)
+  s.from_flatty(i, msg.demote)
   when defined(ed_trace):
     s.from_flatty(i, msg.trace)
     s.from_flatty(i, msg.id)
