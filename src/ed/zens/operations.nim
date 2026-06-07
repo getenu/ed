@@ -120,7 +120,10 @@ proc release*[K, V](self: EdTable[K, V], key: K) =
   assert self.valid
   let key_bin = key.to_flatty
   if key in self.tracked:
-    discard self.evict_key(self, key_bin)
+    let evicted = self.evict_key(self, key_bin)
+    # The entry's nested containers (a chunk's delta seq) leave the registry
+    # too — paging out actually frees their memory (proxy/body phase 3).
+    self.ctx.drop_nested_bodies(evicted.nested)
   self.ctx.pending_key_releases.mgetOrPut(self.id, @[]).add key_bin
 
 proc release*[K, V](self: EdTable[K, V], keys: openArray[K]) =

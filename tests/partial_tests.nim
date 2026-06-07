@@ -504,6 +504,54 @@ proc run*() =
       check htbl[1] == "one, unseen"
       check ltbl[1] == "one, unseen"
 
+    test "paging out drops an entry's nested container bodies":
+      # The chunk_deltas case: each entry's value is its own container. Before
+      # phase 3 the seq stayed pinned in ctx.objects after eviction; now the
+      # registry releases it (the stats screen's object count follows paging),
+      # and re-paging-in resolves a fresh body.
+      var authority = EdContext.init(id = "nb_auth", is_authority = true)
+      var client = EdContext.init(id = "nb_client")
+      Ed.thread_ctx = authority
+      var owner = DeepOwner(id: "nb_owner")
+      var tbl: EdTable[int, EdSeq[int]]
+      owner.own:
+        tbl = EdTable[int, EdSeq[int]].init(
+          ctx = authority, id = "nb_tbl", flags = DEFAULT_FLAGS + {LAZY}
+        )
+      var entry = EdSeq[int].init(ctx = authority, id = "nb_entry")
+      entry.add 7
+      tbl[1] = entry
+
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      discard client.fetch("nb_owner", deep = true)
+      authority.tick()
+      client.tick()
+      let ctbl = EdTable[int, EdSeq[int]](client["nb_tbl"])
+
+      ctbl.request(1)
+      client.tick()
+      authority.tick()
+      client.tick()
+      check ctbl.loaded(1)
+      check "nb_entry" in client # the nested seq came with the entry
+
+      ctbl.release(1)
+      check not ctbl.loaded(1)
+      check "nb_entry" notin client # ...and leaves the registry with it
+
+      client.tick() # flush the release upstream
+      authority.tick()
+      check "nb_entry" in authority # eviction is local; the authority keeps it
+
+      ctbl.request(1) # paging back in restores entry + nested seq
+      client.tick()
+      authority.tick()
+      client.tick()
+      check ctbl.loaded(1)
+      check "nb_entry" in client
+      check ctbl[1][0] == 7
+
     test "per-key chain outruns the closure push (handle-first replies)":
       # A leaf can request keys before the hub holds the table (the closure
       # push carrying the LAZY handle hasn't landed). Without handle-first

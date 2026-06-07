@@ -1165,7 +1165,8 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           if msg.object_id in self:
             let obj = self.objects[msg.object_id]
             if obj.evict_key != nil:
-              discard obj.evict_key(obj, key_bin)
+              let evicted = obj.evict_key(obj, key_bin)
+              self.drop_nested_bodies(evicted.nested)
           self.pending_key_releases.mgetOrPut(msg.object_id, @[]).add key_bin
     if not retracted:
       var from_upstream = false
@@ -1178,7 +1179,8 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           let obj = self.objects[msg.object_id]
           if obj.evict_key != nil:
             for key_bin in keys:
-              discard obj.evict_key(obj, key_bin)
+              let evicted = obj.evict_key(obj, key_bin)
+              self.drop_nested_bodies(evicted.nested)
         if not self.is_authority:
           # Relay to our own subscribers (downstream clones); the accumulated
           # source stops it echoing back the way it came.

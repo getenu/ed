@@ -650,6 +650,19 @@ proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
   if body.mint != nil:
     return body.mint()
 
+proc drop_nested_bodies*(self: EdContext, nested: seq[string]) =
+  ## Unregister the nested container bodies an evicted entry carried (a paged-
+  ## out chunk's delta seq): the registry releases its strong hold, so the
+  ## memory frees once any remaining holder drops, and the id resolves fresh
+  ## on re-page-in. Local only — eviction never destroys upstream data.
+  for id in nested:
+    if id in self.objects:
+      let body = self.objects[id]
+      if body != nil and body.owner_id.len > 0 and
+          body.owner_id in self.owned_by:
+        self.owned_by[body.owner_id].excl id
+      self.objects.del id
+
 proc prune_dead_refs*(self: EdContext) =
   ## Remove from `ref_pool` the entries whose instances ORC has reclaimed (see
   ## `pending_dead_refs`). Must run before any `ref_pool` identity lookup so a
