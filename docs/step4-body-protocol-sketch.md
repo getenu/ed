@@ -237,8 +237,17 @@ The proxy + `live_handle` observability, touch/LRU policy, interest-set integrat
 and per-key (voxel) eviction. 4a lays the body protocol + move-identity substrate
 they'll build on.
 
+> **PICKED UP (2026-06-07): see `proxy-body-design.md`.** Per-key voxel eviction
+> shipped first without proxies (LAZY tables + request/release + hub shedding —
+> values clear in place); the container proxy/body split is the plan of record
+> for the rest.
+
 ## Open question for next
 
 Eviction granularity: whole-registered-ref vs per-key-within-a-container (voxels).
 Decides whether *containers* ever get their own eviction handle, or only registered
 refs do. Doesn't block 4a.
+
+> **ANSWERED empirically (2026-06-07):** both. Per-key eviction is real and shipped
+> (paging); container-level eviction is `proxy-body-design.md` phases 3-4; unit-level
+> (registered refs) rides the same sweep later.

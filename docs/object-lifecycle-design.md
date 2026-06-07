@@ -116,6 +116,13 @@ relying on automatic freeing.
 
 # Step two — the proxy/body split (v2 object model)
 
+> **SUPERSEDED (2026-06-07) by `proxy-body-design.md`** — the settled plan of
+> record. Decisions: true ref proxy (no value proxy, no tombstone), registry-
+> owned bodies, identity map via the deferred-prune pattern RefHandle proved
+> (no GC_ref dance), eviction = touch/LRU + interest gated on no-live-proxy,
+> authority never evicts pre-durable-log. The section below is kept for the
+> original reasoning.
+
 Split each `EdObject` into:
 
 - **Body (data)** — id-keyed canonical state (`tracked`, sync-relevant callbacks).
