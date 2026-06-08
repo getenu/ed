@@ -237,3 +237,38 @@ proc close*(self: EdContext) =
     private_access Reactor
     self.reactor.socket.close()
   self.reactor = nil
+
+proc destroy*(self: EdContext) =
+  ## Tear the context down and release everything it owns.
+  ##
+  ## Bodies linger in the registry by design — they outlive their proxies (the
+  ## registry is a cache with its own eviction). So a dropped context can't
+  ## reclaim them on its own: every body holds self-/context-capturing closures
+  ## (`publish_create` et al.), and ORC doesn't collect closure cycles, so the
+  ## context stays pinned through its own registry. This is the explicit
+  ## teardown that breaks those cycles — `release_closures` on each body — and
+  ## drops the registry plus the per-context buffers. Afterwards the context
+  ## holds nothing, so it (and its channel/reactor) is reclaimed when the last
+  ## reference drops. Idempotent.
+  privileged
+  debug "destroying EdContext", id = self.id
+  for id, body in self.objects:
+    if ?body:
+      body.release_closures
+  self.objects.clear
+  self.owned_by.clear
+  self.latest_op_id.clear
+  self.ref_pool.clear
+  self.close_index.clear
+  self.subscribers.set_len(0)
+  self.value_initializers.set_len(0)
+  self.fetches.clear
+  self.pending_obj_wants.clear
+  self.pending_key_wants.clear
+  self.pending_key_requests.clear
+  self.pending_key_releases.clear
+  self.pending_fills.set_len(0)
+  self.pending_msgs.set_len(0)
+  self.materialize = nil
+  self.objects_need_packing = false
+  self.close()
