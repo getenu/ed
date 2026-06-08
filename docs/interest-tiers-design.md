@@ -60,11 +60,26 @@ it always holds everything live, the prior behavior.
 4. L re-renders X → promote (instant if H still had it) or refetch (if H
    invalidated).
 
-## Stage 2 (next)
+## Stage 2 — per-key caching hub (built, ed)
 
-- **Per-key tiers** for LAZY tables (`key_interest_cache`): a voxel chunk demotes
-  when it leaves view but stays cached + current; the leaf's LRU does the full
-  release.
-- **enu wiring**: `on_block_unloaded` demotes the chunk key (keep data) instead
-  of releasing; give the node ctx a `mem_limit` so it demotes out-of-view chunks
-  (currently never-evict → would pin the worker).
+The voxel bulk is per-key entries in LAZY tables, which the whole-object passes
+skip. With the node ctx in no-cache mode (mem_limit 0) the leaf *releases*
+out-of-view keys (it never caches them, so never demotes per-key). So the hub
+just needs to **cache on retract instead of shedding**:
+
+- A caching hub (mem_limit > 0) receiving a per-key RELEASE does NOT shed —
+  the key becomes cache-tier (no live downstream wants it), stays current via
+  the stream, and a **per-key LRU** (least-recently-served first) sheds it only
+  under the hub's own budget, retracting upstream as it goes. A no-cache hub
+  (mem_limit 0) sheds immediately, as before.
+- `key_last_read` (per-key recency) is stamped on serve (last in-view) and on
+  update. The per-key pass runs after the whole-object passes in `evict_sweep`.
+
+So a client worker (mem_limit 16 MB) keeps recently-viewed chunks cached: a
+player stepping back into an area is served from the worker, no refetch to the
+server, until the worker's own budget forces the stalest out.
+
+### enu wiring (next)
+
+Node ctx → mem_limit 0 (holds only what it renders; frees the worker of
+whole-object residue). The worker already caches voxel keys via the above.

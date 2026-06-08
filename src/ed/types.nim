@@ -440,6 +440,11 @@ type
     # so paging out actually shrinks `used_bytes` (whole-body fill leaves this
     # empty — only delta-grown tables populate it).
     key_bytes*: Table[string, int]
+    # Per-key recency (key_bin -> last activity), for the per-key cache LRU on
+    # LAZY tables: stamped when a key is served to a downstream (last in-view)
+    # or updated. A hub caches released keys instead of shedding them and sheds
+    # the least-recently-served under memory pressure (interest-tiers stage 2).
+    key_last_read*: Table[string, MonoTime]
     build_message: proc(
       body: ref EdBodyBase, change: BaseChange, id: string, trace: string
     ): Message {.gcsafe.}

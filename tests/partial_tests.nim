@@ -569,13 +569,75 @@ proc run*() =
       check "ev_2" in client and "ev_3" in client # newer survive under budget
       check client.used_bytes <= 250
 
+    test "caching hub keeps released keys; per-key LRU sheds under pressure":
+      # A ← H(cache) ← L. L pages a chunk in then out; a caching hub keeps it
+      # (so L's return is served from H, no refetch to A) until H's own budget
+      # forces it out, least-recently-served first.
+      var authority = EdContext.init(id = "ck_auth", is_authority = true)
+      var hub = EdContext.init(id = "ck_hub", mem_limit = 600)
+      var leaf = EdContext.init(id = "ck_leaf", mem_limit = 0)
+      Ed.thread_ctx = authority
+      var owner = DeepOwner(id: "ck_owner")
+      var tbl: EdTable[int, string]
+      owner.own:
+        tbl = EdTable[int, string].init(
+          ctx = authority, id = "ck_tbl", flags = DEFAULT_FLAGS + {LAZY}
+        )
+      tbl[1] = 'a'.repeat(200)
+      tbl[2] = 'b'.repeat(200)
+      tbl[3] = 'c'.repeat(200)
+
+      hub.subscribe(authority, partial = true, fetch = [])
+      hub.tick()
+      leaf.subscribe(hub, partial = true, fetch = [])
+      leaf.tick()
+      # Both pull the owner's closure (the LAZY table arrives as a handle).
+      discard hub.fetch("ck_owner", deep = true)
+      authority.tick()
+      hub.tick()
+      discard leaf.fetch("ck_owner", deep = true) # chains to the hub
+      leaf.tick()
+      hub.tick()
+      leaf.tick()
+      let htbl = EdTable[int, string](hub["ck_tbl"])
+      let ltbl = EdTable[int, string](leaf["ck_tbl"])
+
+      # L pages key 1 in, then releases it (out of view).
+      ltbl.request(1)
+      leaf.tick()
+      hub.tick()
+      authority.tick()
+      hub.tick()
+      leaf.tick()
+      check ltbl.loaded(1)
+      check htbl.loaded(1)
+      ltbl.release(1)
+      leaf.tick()
+      hub.tick()
+      check not ltbl.loaded(1) # L (no-cache) dropped it
+      check htbl.loaded(1) # ...but the caching hub KEPT it (no refetch on return)
+
+      # Now drive H over its 600 budget: page in 2 and 3 too (still under after
+      # 1+2+3 ≈ 600+? push past it). Least-recently-served (key 1) sheds first.
+      ltbl.request(2)
+      ltbl.request(3)
+      leaf.tick()
+      hub.tick()
+      authority.tick()
+      hub.tick()
+      leaf.tick()
+      for i in 1 .. 3:
+        hub.tick()
+      check htbl.loaded(2) and htbl.loaded(3) # live (L wants them) — protected
+      check not htbl.loaded(1) # cache-tier + stalest → shed under pressure
+
     test "hub shedding: last retract releases the hub's copy upstream":
       # The enu client topology: authority (server) <- partial hub (worker)
       # <- full leaf (node ctx). The leaf drives paging; releases must shed
       # the hub's copy and chain the retract up, or the hub re-accumulates
       # a full replica and keeps paying for ops it no longer needs.
       var authority = EdContext.init(id = "hs_auth", is_authority = true)
-      var hub = EdContext.init(id = "hs_hub")
+      var hub = EdContext.init(id = "hs_hub", mem_limit = 0) # no-cache: shed now
       var leaf = EdContext.init(id = "hs_leaf")
       Ed.thread_ctx = authority
       var owner = DeepOwner(id: "hs_owner")

@@ -882,6 +882,38 @@ proc evict_sweep*(self: EdContext) =
     debug "evicting (pressure)",
       object_id = id, used = self.used_bytes, limit = self.mem_limit
     self.evict_body(id)
+  # Per-key cache pass — the bulk of a paging client's memory is in LAZY tables
+  # (voxel chunks), which the whole-object passes skip. If still over budget,
+  # shed cache-tier keys (no live downstream interest) least-recently-served
+  # first, retracting each upstream so its stream stops too.
+  if self.used_bytes <= self.mem_limit:
+    return
+  var keyed: seq[(MonoTime, string, string)] # (recency, object_id, key_bin)
+  for id, body in self.objects:
+    if body == nil or LAZY notin body.flags:
+      continue
+    for key_bin in body.key_bytes.keys:
+      var live = false
+      for s in self.subscribers:
+        if s.ctx_id in self.upstream_ctx_ids:
+          continue
+        if id in s.key_interest and key_bin in s.key_interest[id]:
+          live = true
+          break
+      if not live:
+        keyed.add (body.key_last_read.getOrDefault(key_bin), id, key_bin)
+  keyed.sort do(a, b: (MonoTime, string, string)) -> int:
+    cmp(a[0], b[0]) # ascending: least-recently-served first
+  for (_, id, key_bin) in keyed:
+    if self.used_bytes <= self.mem_limit:
+      break
+    debug "evicting key (pressure)", object_id = id
+    let obj = self.objects[id]
+    if obj != nil and obj.evict_key != nil:
+      let evicted = obj.evict_key(obj, key_bin)
+      self.drop_nested_bodies(evicted.nested)
+      obj.key_last_read.del key_bin
+    self.pending_key_releases.mgetOrPut(id, @[]).add key_bin # retract upstream
 
 proc fetch*(
     self: EdContext, object_id: string, deep = false
@@ -1343,12 +1375,15 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
                 self.pending_key_wants[msg.object_id][key_bin].filter_it(
                   it.ctx_id != s.ctx_id
                 )
-    if retracted and self.partial_replica and not self.is_authority:
-      # Hub shedding — the symmetric counterpart of request chaining. A
-      # partial hub holds paged keys only to serve its subscribers; when the
-      # last interest in a key retracts, drop our copy and chain the release
-      # upstream (the queued broadcast also notifies any remaining downstream
-      # clones, where eviction is an idempotent no-op).
+    if retracted and self.partial_replica and not self.is_authority and
+        self.mem_limit == 0:
+      # No-cache hub: shed immediately (the symmetric counterpart of request
+      # chaining). When the last interest in a key retracts, drop our copy and
+      # chain the release upstream. A caching hub (mem_limit > 0) instead KEEPS
+      # the key — it becomes cache-tier (no live downstream wants it), stays
+      # current via the stream, and the per-key cache LRU sheds it under our
+      # own pressure (so a downstream's release doesn't force us to refetch on
+      # its return).
       for key_bin in keys:
         var still_wanted = false
         for s in self.subscribers:
@@ -1433,6 +1468,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           for key_bin in msg.obj.from_flatty(seq[string]):
             let reply = obj.publish_key(obj, key_bin)
             if reply.found:
+              obj.key_last_read[key_bin] = get_mono_time() # served → in-view now
               # Per-key deep: nested containers (a chunk's delta seq) go
               # first so the receiver's parse links them — and they're
               # followed, so their future ops (delta appends) stream.
@@ -1529,6 +1565,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         # Table entry: account per-key so per-key evict can subtract exactly.
         if msg.kind == ASSIGN:
           self.set_key_bytes(obj, msg.key_bin, msg.obj.len)
+          obj.key_last_read[msg.key_bin] = get_mono_time() # updated → recent
         elif msg.kind == UNASSIGN:
           self.forget_key_bytes(obj, msg.key_bin)
       elif msg.delta and msg.kind == ASSIGN:
