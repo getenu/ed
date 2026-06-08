@@ -59,6 +59,18 @@ type
       ## `own` scope) its owned containers. `destroy` runs `lifetime.finish`. Local
       ## state: it's a ref, so stringify nils it, and the `Lifetime` flatty skip
       ## covers the rest — never synced.
+    ctx* {.cursor.}: EdContext
+      ## The context this instance lives in, stamped on first `ref_pool` add
+      ## (`ref_count`). A registered ref's instance belongs to exactly one
+      ## context — sync mints a separate instance per context (`from_flatty`
+      ## dedups within `flatty_ctx`), never sharing one across contexts — so this
+      ## is unambiguous. `destroy` uses it (not `Ed.thread_ctx`, which is wrong
+      ## under multiple contexts per thread) to find the right `owned_by`/
+      ## `ref_pool` for the cascade. Non-owning (cursor): the context strictly
+      ## outlives its refs (it holds `ref_pool`), and `destroy` is explicit
+      ## teardown on the home thread, so the read never dangles — same contract
+      ## as `EdBody.ctx`. A ref serializes via stringify, which nils refs, so
+      ## this is never synced.
 
   EdFlags* = enum
     ## Flags controlling `Ed` container behavior.
@@ -130,8 +142,14 @@ type
     when defined(ed_trace):
       trace*: string
 
-  PackedMessageOperation* =
-    tuple[kind: MessageKind, ref_id: int, change_object_id: string, obj: string]
+  PackedMessageOperation* = tuple[
+    kind: MessageKind, ref_id: int, change_object_id: string, obj: string,
+    # Carried so a packed table op unpacks to the same Message a standalone one
+    # would: a receiver's per-key byte accounting / fanout filtering keys off
+    # delta + key_bin, and would silently skip packed-delivered table entries
+    # without them (the per-key cache then can't account or evict those keys).
+    delta: bool, key_bin: string,
+  ]
 
   IdMapping* = tuple[short_id: uint8, full_id: string]
 
@@ -815,6 +833,17 @@ proc to_flatty*(s: var string, x: RefHandle) =
   discard
 
 proc from_flatty*(s: string, i: var int, x: var RefHandle) =
+  discard
+
+proc to_flatty*(s: var string, x: EdContext) =
+  ## A context is local runtime state and must never be serialized. The cursor
+  ## backref `EdRef.ctx` would otherwise drag the whole context (and its
+  ## closures) into a ref's wire form when a collection of refs is `to_flatty`d.
+  ## Re-stamped by `ref_count` on the receiver. Mirrors the RefHandle/Lifetime
+  ## skips.
+  discard
+
+proc from_flatty*(s: string, i: var int, x: var EdContext) =
   discard
 
 proc new_lifetime*(): Lifetime =

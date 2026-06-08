@@ -483,7 +483,10 @@ proc pack_messages(msgs: seq[Message]): seq[Message] =
         assert packed_msg.type_id == 0 or packed_msg.type_id == msg.type_id
 
         packed_msg.type_id = msg.type_id
-      ops.add (msg.kind, msg.ref_id, msg.change_object_id, msg.obj)
+      ops.add (
+        msg.kind, msg.ref_id, msg.change_object_id, msg.obj, msg.delta,
+        msg.key_bin,
+      )
 
     packed_msg.obj = ops.to_flatty
     result = @[packed_msg]
@@ -1174,6 +1177,8 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         ref_id: op.ref_id,
         change_object_id: op.change_object_id,
         obj: op.obj,
+        delta: op.delta,
+        key_bin: op.key_bin,
         flags: msg.flags,
         source: msg.source,
         source_set: msg.source_set,

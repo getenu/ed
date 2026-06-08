@@ -235,6 +235,9 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
       let handle_owner = EdRef(item)
       if handle_owner.ref_handle.is_nil:
         handle_owner.ref_handle = RefHandle(ctx_uid: self.uid, ref_id: id)
+      # The instance's own context, for destroy's owner cascade — the one
+      # context it lives in (see EdRef.ctx). Cursor, so no cycle.
+      handle_owner.ctx = self
     if REMOVED in change.changes:
       # REMOVE only unlinks — it never frees. A body is freed by ORC when its
       # last real reference drops (RefHandle then cleans `ref_pool`), or later by

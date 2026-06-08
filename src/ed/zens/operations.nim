@@ -313,19 +313,21 @@ proc `==`*(a, b: Ed): bool =
 
 proc pause_changes*(self: Ed, eids: varargs[EID]) =
   ## Pause change callbacks. Pass specific EIDs or none to pause all.
+  privileged
   assert self.valid
   if eids.len == 0:
-    for eid in self.changed_callbacks.keys:
-      self.paused_eids.incl(eid)
+    for eid in self.typed_body.changed_callbacks.keys:
+      self.typed_body.paused_eids.incl(eid)
   else:
     for eid in eids:
-      self.paused_eids.incl(eid)
+      self.typed_body.paused_eids.incl(eid)
 
 proc resume_changes*(self: Ed, eids: varargs[EID]) =
   ## Resume change callbacks. Pass specific EIDs or none to resume all.
+  privileged
   assert self.valid
   if eids.len == 0:
-    self.paused_eids = {}
+    self.typed_body.paused_eids = {}
   else:
     for eid in eids:
       self.typed_body.paused_eids.excl(eid)
@@ -418,7 +420,12 @@ method destroy*(self: EdRef) {.base, gcsafe.} =
   ## to run afterwards.
   if not self.lifetime.is_nil:
     self.lifetime.finish()
-  Ed.thread_ctx.destroy_owned(self.id)
+  # The context this ref lives in (stamped on ref_pool add). Fall back to
+  # thread_ctx only for a ref that never entered a ref_pool — i.e. created and
+  # destroyed without ever being added to a collection, where it was minted on
+  # the current thread anyway.
+  let ctx = if self.ctx != nil: self.ctx else: Ed.thread_ctx
+  ctx.destroy_owned(self.id)
   self.destroyed = true
 
 iterator items*[T](self: EdSet[T] | EdSeq[T]): T =

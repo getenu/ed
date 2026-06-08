@@ -57,10 +57,11 @@ proc create_initializer[T, O](self: Ed[T, O]) =
             var value = bin.from_flatty(T, ctx)
             let item = Ed[T, O](ctx[id])
             let was_placeholder = item.placeholder
+            let prev_filling = ctx.filling # save: `value=` may nest a fill
             ctx.filling = was_placeholder # fill of a placeholder → tag Fill
             item.placeholder = false # fill: real state arrived
             `value=`(item, value, op_ctx = op_ctx)
-            ctx.filling = false
+            ctx.filling = prev_filling # restore (not unconditionally false)
             ctx.set_body_bytes(item.body, bin.len) # evictor accounting
             if was_placeholder:
               relay_fill(item, op_ctx)
@@ -74,10 +75,11 @@ proc create_initializer[T, O](self: Ed[T, O]) =
                 let value = bin.from_flatty(T, ctx)
               let item = Ed[T, O](ctx[id])
               let was_placeholder = item.placeholder
+              let prev_filling = ctx.filling # save: `value=` may nest a fill
               ctx.filling = was_placeholder # fill of a placeholder → tag Fill
               item.placeholder = false # fill: real state arrived
               `value=`(item, value, op_ctx = op_ctx)
-              ctx.filling = false
+              ctx.filling = prev_filling # restore (not unconditionally false)
               ctx.set_body_bytes(item.body, bin.len) # evictor accounting
               if was_placeholder:
                 relay_fill(item, op_ctx)
