@@ -347,7 +347,7 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
   self.ctx.tick_reactor
 
 proc publish_closure(
-    self: EdContext, s: Subscription, root_id: string, follow = true
+    self: EdContext, s: Subscription, root_id: string
 ): bool {.discardable.} =
   ## Serve an ownership closure to `s`: BFS from `root_id` over `owned_by`,
   ## publishing every container and following member keys (tid:id) into the
@@ -355,7 +355,8 @@ proc publish_closure(
   ## OWNS_MEMBERS collection's member closures *before* the collection itself —
   ## so a partial subscriber's parse links member fields to real containers
   ## instead of minting unregistered husks. Returns whether anything was found.
-  ## With `follow`, everything published joins `s.interest` so future ops flow.
+  ## Everything published (except LAZY handles) joins `s.interest` so future ops
+  ## flow.
   privileged
   var ids = @[root_id]
   var to_publish: seq[string]
@@ -391,8 +392,7 @@ proc publish_closure(
       # entries with request/release; a whole-table push would defeat LAZY.
       zen.publish_create(s, contents = false)
     else:
-      if follow:
-        s.interest.incl id
+      s.interest.incl id
       zen.publish_create(s)
 
 proc serve_key_wants(self: EdContext, object_id: string) =
@@ -926,9 +926,8 @@ proc evict_sweep*(self: EdContext) =
     debug "evicting key (pressure)", object_id = id
     let obj = self.objects[id]
     if obj != nil and obj.evict_key != nil:
-      let evicted = obj.evict_key(obj, key_bin)
-      self.drop_nested_bodies(evicted.nested)
-      obj.key_last_read.del key_bin
+      let evicted = obj.evict_key(obj, key_bin) # evict_key → forget_key_bytes
+      self.drop_nested_bodies(evicted.nested)    # ...clears key_last_read too
     self.pending_key_releases.mgetOrPut(id, @[]).add key_bin # retract upstream
 
 proc fetch*(
@@ -1272,7 +1271,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         for want in wants:
           want.sub.interest.incl id
           if want.deep:
-            discard self.publish_closure(want.sub, id, follow = true)
+            discard self.publish_closure(want.sub, id)
           elif id in self.objects and ?self.objects[id]:
             self.objects[id].publish_create(want.sub)
 
@@ -1491,7 +1490,8 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           for key_bin in msg.obj.from_flatty(seq[string]):
             let reply = obj.publish_key(obj, key_bin)
             if reply.found:
-              obj.key_last_read[key_bin] = get_mono_time() # served → in-view now
+              if self.mem_limit > 0: # recency only feeds the cache LRU
+                obj.key_last_read[key_bin] = get_mono_time() # served → in-view
               # Per-key deep: nested containers (a chunk's delta seq) go
               # first so the receiver's parse links them — and they're
               # followed, so their future ops (delta appends) stream.
@@ -1535,7 +1535,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         # Deep fetch: the id plus its ownership closure (see publish_closure —
         # the requested id may be an *owner*, a unit id with no container of its
         # own, and the walk recurses through owned members into their subtrees).
-        let found = self.publish_closure(s, msg.object_id, follow = true)
+        let found = self.publish_closure(s, msg.object_id)
         # Follow the root id itself even if nothing exists yet: a later CREATE
         # under this id is then delivered without re-fetching.
         s.interest.incl msg.object_id

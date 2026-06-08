@@ -102,7 +102,6 @@ type
     ## Why a change fired, orthogonal to `ChangeKind`. (Unrelated to
     ## `Change.triggered_by`, which is the upstream changes that caused this one.)
     Update    ## An ordinary live change — a mutation or touch
-    Initial   ## Replay of existing contents at `track` time (reserved)
     Fill      ## A placeholder materialized (partial-replica fetch landed)
 
   MessageKind* = enum
@@ -328,7 +327,6 @@ type
     # `used_bytes` is the running sum of resident body bytes (mode > 0 only).
     mem_limit*: int
     used_bytes*: int
-    evict_cursor*: int
     sweep_dirty*: bool
       ## Set whenever something an eviction sweep would act on changed since the
       ## last sweep: a message was processed, or a dead proxy/ref was pruned. The
@@ -816,8 +814,14 @@ proc set_key_bytes*(
   body.key_bytes[key_bin] = n
 
 proc forget_key_bytes*(self: EdContext, body: ref EdBodyBase, key_bin: string) =
-  ## Subtract a per-key entry's accounted bytes on evict/release.
-  if self.mem_limit <= 0 or key_bin notin body.key_bytes:
+  ## Drop a per-key entry's accounting on evict/release: its recency and its
+  ## bytes. Called from `evict_key` (so every eviction site cleans both parallel
+  ## tables — they can't drift) and on UNASSIGN. `del` of a missing key is a
+  ## no-op, so recency is cleared even if bytes were never accounted.
+  if self.mem_limit <= 0:
+    return
+  body.key_last_read.del key_bin
+  if key_bin notin body.key_bytes:
     return
   self.set_body_bytes(body, max(0, body.bytes - body.key_bytes[key_bin]))
   body.key_bytes.del key_bin
