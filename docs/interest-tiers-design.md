@@ -79,10 +79,12 @@ So a client worker (mem_limit 16 MB) keeps recently-viewed chunks cached: a
 player stepping back into an area is served from the worker, no refetch to the
 server, until the worker's own budget forces the stalest out.
 
-### enu wiring (next)
+### enu wiring
 
-Node ctx → mem_limit 0 (holds only what it renders; frees the worker of
-whole-object residue). The worker already caches voxel keys via the above.
+The worker ctx (the partial replica) does all client-side memory management:
+whole-object eviction + the per-key voxel cache, `mem_limit = 16 MB`. The **node
+ctx never evicts** — it's a full clone (see the guard below); `mem_limit = 0`
+there was tried and broke live sync round-trips.
 
 ## Only partial replicas evict (safety guard)
 
