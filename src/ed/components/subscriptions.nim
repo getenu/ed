@@ -840,7 +840,14 @@ proc evict_sweep*(self: EdContext) =
   ## Partial-replica eviction (docs/proxy-body-design.md phase 4), by mode (see
   ## EdContext.mem_limit): < 0 never evict; 0 evict every unclaimed body now;
   ## > 0 churn + LRU-to-budget. All eviction is gated on `evict_candidate`.
-  if self.mem_limit < 0:
+  ##
+  ## ONLY partial replicas evict. A full clone (partial_replica = false) mirrors
+  ## everything its upstream has — there's no safe "residue" to drop, because
+  ## anything it holds is synced state something may read back. Evicting on a
+  ## full clone breaks live round-trips (observed: an enu node ctx with
+  ## mem_limit = 0 intermittently hung the bot test mid-sync, and hung godot's
+  ## shutdown). So `mem_limit` is ignored on a full clone.
+  if self.mem_limit < 0 or not self.partial_replica:
     return
   self.prune_dead_proxies
   if self.mem_limit == 0:

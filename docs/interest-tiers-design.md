@@ -83,3 +83,15 @@ server, until the worker's own budget forces the stalest out.
 
 Node ctx → mem_limit 0 (holds only what it renders; frees the worker of
 whole-object residue). The worker already caches voxel keys via the above.
+
+## Only partial replicas evict (safety guard)
+
+`evict_sweep` returns early unless the context is a **partial replica**
+(`partial_replica`, set on a `partial = true` subscribe). A full clone mirrors
+everything its upstream has, so there is no safe residue to drop — anything it
+holds is synced state something may read back. Evicting on a full clone breaks
+live round-trips: an enu **node ctx** (the render/main thread, a full clone)
+given `mem_limit = 0` intermittently hung the bot test mid-sync and hung godot
+on shutdown. So a full clone **ignores mem_limit** entirely. Memory on a client
+is managed at the **worker** (the partial replica): full whole-object eviction +
+per-key voxel cache, on its own thread with orderly teardown.
