@@ -1,7 +1,7 @@
 import
   std/[
     importutils, isolation, tables, sets, sequtils, algorithm, intsets, locks,
-    math, times, strutils, macros, os,
+    math, times, strutils, macros, os, heapqueue,
   ]
 
 import pkg/threading/channels {.all.}
@@ -853,6 +853,13 @@ proc evict_sweep*(self: EdContext) =
   if self.mem_limit < 0 or not self.partial_replica:
     return
   self.prune_dead_proxies
+  # Idle fast path: nothing an eviction would act on has changed since the last
+  # sweep, and we're within budget — so there's nothing to reconcile, churn, or
+  # shed. Skip the O(objects) scans entirely (a calm context pays ~nothing per
+  # tick). prune_dead_proxies above may have set sweep_dirty (a liveness flip).
+  if not self.sweep_dirty and self.used_bytes <= self.mem_limit:
+    return
+  self.sweep_dirty = false # we're doing the work now
   if self.mem_limit == 0:
     # No cache: shed everything that isn't live, this tick. No byte accounting.
     var gone: seq[string]
@@ -863,32 +870,33 @@ proc evict_sweep*(self: EdContext) =
       debug "evicting (no-cache)", object_id = id
       self.evict_body(id)
     return
-  # Cache mode (mem_limit > 0). Reconcile interest tiers first: an object that
-  # went non-live here demotes upstream (the upstream may then reclaim it under
-  # its own pressure), one that came back live re-promotes. Then evict our own
-  # cache (churn + LRU) — what we shed here is, by definition, cache tier.
-  for id, body in self.objects:
-    self.reconcile_tier(body)
-  # Churn pass — always on. One linear scan; cheap (field reads).
+  # Cache mode (mem_limit > 0). One scan does both: reconcile interest tiers (an
+  # object gone non-live here demotes upstream so it can reclaim it under its own
+  # pressure; one back live re-promotes) and collect churn candidates (a dormant
+  # body that keeps taking ops costs more than a refetch). What we shed is, by
+  # definition, cache tier.
   var churned: seq[string]
   for id, body in self.objects:
-    if body != nil and body.updates >= churn_limit and self.evict_candidate(body):
+    if body == nil:
+      continue
+    self.reconcile_tier(body)
+    if body.updates >= churn_limit and self.evict_candidate(body):
       churned.add id
   for id in churned:
     debug "evicting (churn)", object_id = id, updates = self.objects[id].updates
     self.evict_body(id)
-  # Pressure pass — only when over budget. LRU: oldest read goes first.
+  # Pressure pass — only when over budget. LRU: oldest read goes first. A heap
+  # (O(n) build, O(k log n) to pop the k we actually evict) avoids sorting the
+  # whole candidate set just to drop a few off the cold end.
   if self.used_bytes <= self.mem_limit:
     return
   var cands: seq[(MonoTime, string)]
   for id, body in self.objects:
     if self.evict_candidate(body):
       cands.add (body.last_read, id)
-  cands.sort do(a, b: (MonoTime, string)) -> int:
-    cmp(a[0], b[0]) # ascending: least-recently-read first
-  for (_, id) in cands:
-    if self.used_bytes <= self.mem_limit:
-      break
+  var cand_heap = cands.to_heap_queue # min by last_read: least-recently-read first
+  while self.used_bytes > self.mem_limit and cand_heap.len > 0:
+    let (_, id) = cand_heap.pop
     debug "evicting (pressure)",
       object_id = id, used = self.used_bytes, limit = self.mem_limit
     self.evict_body(id)
@@ -912,11 +920,9 @@ proc evict_sweep*(self: EdContext) =
           break
       if not live:
         keyed.add (body.key_last_read.getOrDefault(key_bin), id, key_bin)
-  keyed.sort do(a, b: (MonoTime, string, string)) -> int:
-    cmp(a[0], b[0]) # ascending: least-recently-served first
-  for (_, id, key_bin) in keyed:
-    if self.used_bytes <= self.mem_limit:
-      break
+  var key_heap = keyed.to_heap_queue # min by recency: least-recently-served first
+  while self.used_bytes > self.mem_limit and key_heap.len > 0:
+    let (_, id, key_bin) = key_heap.pop
     debug "evicting key (pressure)", object_id = id
     let obj = self.objects[id]
     if obj != nil and obj.evict_key != nil:
@@ -1100,6 +1106,11 @@ proc subscribe*(
 proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
   privileged
   log_defaults("ed publishing")
+
+  # Any inbound message can change what an eviction sweep would act on (resident
+  # bytes, interest, liveness), so mark the sweep dirty. Coarse but cheap; the
+  # sweep does its O(objects) work only when this (or a pruned death) is set.
+  self.sweep_dirty = true
 
   # Get source: either from source_set (Local) or decode from source (Remote)
   let source =

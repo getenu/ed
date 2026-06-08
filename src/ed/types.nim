@@ -329,6 +329,15 @@ type
     mem_limit*: int
     used_bytes*: int
     evict_cursor*: int
+    sweep_dirty*: bool
+      ## Set whenever something an eviction sweep would act on changed since the
+      ## last sweep: a message was processed, or a dead proxy/ref was pruned. The
+      ## sweep skips its (O(objects)) reconcile/churn/pressure work when this is
+      ## false and we're under budget — so a calm context pays ~nothing per tick.
+      ## (A pure read that mints a proxy without any message can delay a promote
+      ## by a tick; harmless and self-correcting.)
+    last_proxy_prune_epoch*: int # last dead_proxy_epoch this ctx pruned at
+    last_ref_prune_epoch*: int   # last dead_ref_epoch this ctx pruned at
     filling*: bool        # set while a placeholder fill applies → tags Fill changes
     silent*: bool         # silent (blocking) materialize: defer callbacks to next tick
     pending_msgs*: seq[Message]            # received-but-deferred during a silent pump
@@ -672,6 +681,15 @@ var next_ctx_uid*: Atomic[int]
 var dead_handles_lock: Lock
 dead_handles_lock.init_lock
 
+var dead_proxy_epoch*: Atomic[int]
+var dead_ref_epoch*: Atomic[int]
+  ## Bumped (under the lock) whenever a proxy/ref death is recorded. A context
+  ## remembers the epoch at its last prune (`last_*_prune_epoch`) and skips the
+  ## lock entirely when the epoch hasn't moved — so a tick with no deaths does no
+  ## locking, even though `prune_dead_*` is called from several hot paths
+  ## (tick, resolve_proxy, from_flatty). Process-global, matching the pending
+  ## tables (a context can be created on one thread and pruned on another).
+
 var pending_dead_refs*: Table[int, seq[string]]
   ## ctx uid -> ref_ids whose registered instance ORC has reclaimed. Populated by
   ## `RefHandle.=destroy`, which must NOT touch its `EdContext` (it may already be
@@ -691,6 +709,7 @@ proc `=destroy`(h: var typeof(RefHandle()[])) =
     {.cast(gcsafe).}:
       dead_handles_lock.acquire()
       pending_dead_refs.mget_or_put(h.ctx_uid, @[]).add(h.ref_id)
+      discard dead_ref_epoch.fetch_add(1) # wake the lock-free prune skip
       dead_handles_lock.release()
   `=destroy`(h.ref_id)
 
@@ -710,6 +729,7 @@ proc `=destroy`(h: var typeof(ProxyHandle()[])) =
     {.cast(gcsafe).}:
       dead_handles_lock.acquire()
       pending_dead_proxies.mget_or_put(h.ctx_uid, @[]).add((h.object_id, h.gen))
+      discard dead_proxy_epoch.fetch_add(1) # wake the lock-free prune skip
       dead_handles_lock.release()
   `=destroy`(h.object_id)
 
@@ -718,12 +738,22 @@ proc prune_dead_proxies*(self: EdContext) =
   ## any backref read so a dangling cursor is never returned; `gen` ensures a
   ## late prune can't clear a *newer* proxy minted after the death was recorded.
   {.cast(gcsafe).}:
+    # Lock-free fast path: if no proxy has died anywhere since our last prune,
+    # there's nothing for us to drain — skip the global lock entirely. (A death
+    # in another context can cost us one redundant lock; a tick with no deaths
+    # costs none.)
+    let epoch = dead_proxy_epoch.load
+    if epoch == self.last_proxy_prune_epoch:
+      return
     var dead: seq[(string, int)]
     dead_handles_lock.acquire()
     if self.uid in pending_dead_proxies:
       dead = pending_dead_proxies[self.uid]
       pending_dead_proxies.del(self.uid)
     dead_handles_lock.release()
+    self.last_proxy_prune_epoch = epoch
+    if dead.len > 0:
+      self.sweep_dirty = true # a liveness flip → the next sweep must reconcile
     for (object_id, gen) in dead:
       if object_id in self.objects and self.objects[object_id] != nil and
           self.objects[object_id].proxy_gen == gen:
@@ -814,12 +844,18 @@ proc prune_dead_refs*(self: EdContext) =
   ## dangling cursor is never read, and on tick to keep the pool tidy. Idempotent;
   ## cheap when nothing is pending.
   {.cast(gcsafe).}:
+    let epoch = dead_ref_epoch.load # lock-free skip when nothing died (see proxies)
+    if epoch == self.last_ref_prune_epoch:
+      return
     var dead: seq[string]
     dead_handles_lock.acquire()
     if self.uid in pending_dead_refs:
       dead = pending_dead_refs[self.uid]
       pending_dead_refs.del(self.uid)
     dead_handles_lock.release()
+    self.last_ref_prune_epoch = epoch
+    if dead.len > 0:
+      self.sweep_dirty = true
     for ref_id in dead:
       self.ref_pool.del(ref_id)
 
