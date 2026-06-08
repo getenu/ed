@@ -277,8 +277,17 @@ proc find_ref*[T](self: EdContext, value: var T): bool =
   if ?value:
     let id = value.ref_id
     if id in self.ref_pool:
-      value = T(self.ref_pool[id].obj)
-      result = true
+      let existing = self.ref_pool[id].obj
+      # Don't resurrect a *destroyed* instance: a reload reuses an id for a NEW
+      # incarnation, so the old (destroyed) one must not be deduped onto — that
+      # hands a dead object to the caller. Treat it as absent; the caller builds
+      # a fresh instance, which re-registers and replaces this stale entry. (A
+      # merely *removed* ref — moved between collections — isn't destroyed, so
+      # move-identity still works.)
+      if existing.is_nil or not (existing of EdRef) or
+          not EdRef(existing).destroyed:
+        value = T(existing)
+        result = true
 
 when defined(dump_ed_objects):
   import std/[os, algorithm]
