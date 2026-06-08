@@ -376,9 +376,25 @@ proc destroy*[T, O](self: Ed[T, O], publish = true) =
 
   if publish:
     self.publish_destroy OperationContext(source: [self.ctx.id].toHashSet)
+    # Record synced (broadcast) destroys so recreating the same id is caught at
+    # the recreate site (see EdContext.recently_destroyed). Only when it could
+    # actually race — i.e. the DESTROY went to a subscriber. A purely local
+    # destroy (no subscribers) can't be raced, so it's never flagged.
+    if self.ctx.subscribers.len > 0:
+      self.ctx.recently_destroyed[self.id] = get_mono_time()
 
 method destroy*(self: EdRef) {.base, gcsafe.}
   # Forward declaration: destroy_owned cascades into owned members through it.
+
+proc set_owner*(ctx: EdContext, obj: EdRef, owner_id: string) =
+  ## Attribute a standalone EdRef to `owner_id`, so `destroy_owned(owner_id)`
+  ## tears it down (cascading through its own `destroy`). Unlike a container's
+  ## baked-in, synced `owner_id`, this ownership isn't sent as data — it's
+  ## re-derived locally on each context, exactly like OWNS_MEMBERS membership
+  ## (`type_registry`): call it wherever the ref is created/adopted, on every
+  ## context, and the index lands the same everywhere with no extra sync.
+  privileged
+  ctx.owned_by.mgetOrPut(owner_id, initHashSet[string]()).incl(obj.id)
 
 proc destroy_owned*(ctx: EdContext, owner_id: string) =
   ## Destroy everything owned by `owner_id` (per the `owned_by` index). Two

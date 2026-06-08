@@ -6,10 +6,100 @@ type DeepOwner = ref object of EdRef
   items: EdSeq[int]
   val: EdValue[int]
 
+type LazyOwner = ref object of EdRef
+  # Mirrors enu's Build: a LAZY EdTable field next to a normal EdSeq field, both
+  # owned. The LAZY table is first so that, if its serialization misaligns, the
+  # EdSeq after it is the field that gets corrupted (which is what we saw: enu's
+  # `units` collection went invalid after adding LAZY voxel-table fields).
+  chunks: EdTable[int, string]
+  items: EdSeq[int]
+
 proc run*() =
   Ed.register(DeepOwner, false)
+  Ed.register(LazyOwner, false)
 
   suite "partial replicas":
+    test "a LAZY EdTable field on a registered ref doesn't corrupt its siblings":
+      var authority = EdContext.init(id = "lzf_auth", is_authority = true)
+      var client = EdContext.init(id = "lzf_client")
+      Ed.thread_ctx = authority
+
+      var u = LazyOwner(id: "lzf_u")
+      u.own:
+        u.chunks = EdTable[int, string].init(
+          ctx = authority, id = "lzf_chunks", flags = DEFAULT_FLAGS + {LAZY}
+        )
+        u.items = EdSeq[int].init(ctx = authority, id = "lzf_items")
+      u.chunks[1] = "x" # LAZY table has contents (paged per-key)
+      u.items.add 5     # the canary sibling
+
+      var units = EdSeq[LazyOwner].init(
+        ctx = authority, id = "lzf_units", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
+      )
+      units.add u
+
+      client.subscribe(
+        authority, partial = true, fetch = ["lzf_units"], deep = true
+      )
+      client.tick()
+
+      let m = EdSeq[LazyOwner](client["lzf_units"])[0]
+      # The EdSeq sibling must survive the LAZY field intact (not destroyed /
+      # misaligned by it).
+      check m.items.valid
+      check m.items.len == 1
+      check m.items[0] == 5
+
+    test "reload of a LAZY-field OWNS_MEMBERS member (full clone) keeps siblings valid":
+      # The enu reload: a full-clone replica, an OWNS_MEMBERS member reused by id
+      # while its owned tables get fresh ids — destroy the old incarnation, add a
+      # new one. This is the path where the hoist corrupted the member's `units`
+      # sibling, so reproduce it minimally.
+      var authority = EdContext.init(id = "lzr_auth", is_authority = true)
+      var client = EdContext.init(id = "lzr_client") # full clone
+      Ed.thread_ctx = authority
+
+      var units = EdSeq[LazyOwner].init(
+        ctx = authority, id = "lzr_units", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
+      )
+      var u1 = LazyOwner(id: "lzr_m") # the reused EdRef id
+      u1.own:
+        u1.chunks = EdTable[int, string].init(
+          ctx = authority, flags = DEFAULT_FLAGS + {LAZY} # generated id
+        )
+        u1.items = EdSeq[int].init(ctx = authority) # generated id
+      u1.items.add 1
+      units.add u1
+
+      client.subscribe(authority)
+      client.tick()
+      authority.tick()
+      client.tick()
+      check EdSeq[LazyOwner](client["lzr_units"])[0].items[0] == 1
+
+      # Reload: remove + destroy the old incarnation, add a fresh one (same EdRef
+      # id, fresh table/seq ids — no container id reuse).
+      units -= u1
+      u1.destroy()
+      var u2 = LazyOwner(id: "lzr_m")
+      u2.own:
+        u2.chunks = EdTable[int, string].init(
+          ctx = authority, flags = DEFAULT_FLAGS + {LAZY}
+        )
+        u2.items = EdSeq[int].init(ctx = authority)
+      u2.items.add 2
+      units.add u2
+
+      authority.tick()
+      client.tick()
+      authority.tick()
+      client.tick()
+
+      let m = EdSeq[LazyOwner](client["lzr_units"])[0]
+      check m.items.valid # ← the corruption point in enu
+      check m.items.len == 1
+      check m.items[0] == 2
+
     test "OWNS_MEMBERS member closures push to partial subscribers, in order":
       var authority = EdContext.init(id = "omp_auth", is_authority = true)
       var client = EdContext.init(id = "omp_client")

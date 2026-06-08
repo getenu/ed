@@ -1,7 +1,8 @@
-import std/[typetraits, macros, macrocache]
+import std/[typetraits, macros, macrocache, monotimes, times]
 import ed/[core, components/private/tracking]
 import ed/components/private/global_state
 import ed/types {.all.}, ed/zens/[validations, operations, contexts, private]
+import ed/utils/misc # ZenError
 
 export new_ident_node
 
@@ -134,6 +135,26 @@ proc defaults[T, O](
       id
 
   debug "creating zen object", id = self.id
+
+  # Guard: recreating a synced id that was just destroyed is the destroy+recreate
+  # -same-id hazard — ed has no generation on the id, so the in-flight DESTROY for
+  # the old incarnation can land on this new one (a stale-DESTROY UAF that
+  # surfaces ~100ms later, on another thread). Unsupported by design; caught here
+  # at the recreate site. Use a fresh id, or update the object in place.
+  if self.id in ctx.recently_destroyed:
+    let since = get_mono_time() - ctx.recently_destroyed[self.id]
+    if since < recreate_race_window:
+      let msg =
+        \"recreating destroyed id '{self.id}' {since} after a synced destroy — " &
+        "destroy+recreate of the same id races under sync (the stale DESTROY can " &
+        "kill the new incarnation; ed has no generation to disambiguate). Use a " &
+        "fresh id or update in place."
+      when defined(release):
+        error "ed recreate-after-destroy (sync hazard)", id = self.id, since
+      else:
+        raise newException(ZenError, msg)
+    else:
+      ctx.recently_destroyed.del self.id # safely separated; not a hazard
 
   if self.id in ctx.objects and not ?ctx.objects[self.id]:
     ctx.pack_objects
