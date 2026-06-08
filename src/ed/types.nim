@@ -780,12 +780,20 @@ proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
     return body.mint()
 
 proc release_closures*(body: ref EdBodyBase) =
-  ## Break the body's self-capturing closures (mint/untrack_zid/sweep_gen all
-  ## capture the body). Required at unregistration: ORC does not collect
-  ## closure cycles, so an unreleased body would leak with its environment.
+  ## Break the body's self-capturing closures. mint/untrack_zid/sweep_gen capture
+  ## the body; `publish_create` captures both the body *and* its context (it
+  ## reads `ctx.subscribers` / `ctx.send` / `ctx.tick_reactor`), so leaving it set
+  ## pins the whole context — the object<->context cycle the cursor backref was
+  ## meant to break, reintroduced through the closure environment. ORC does not
+  ## collect closure cycles, so an unreleased body leaks itself and its context.
+  ## (build_message/change_receiver/publish_key/evict_key take `body` as a
+  ## parameter and reach ctx via `body.ctx` — they capture nothing, so they need
+  ## no release.) Every caller removes the body from `objects` right after, so the
+  ## body is leaving the registry and these will not be invoked again.
   body.mint = nil
   body.untrack_zid = nil
   body.sweep_gen = nil
+  body.publish_create = nil
 
 const Unbounded* = high(int)
   ## `mem_limit = Unbounded` means never evict — an unlimited cache. The top of
