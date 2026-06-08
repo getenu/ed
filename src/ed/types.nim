@@ -318,13 +318,16 @@ type
     materialize*: proc(self: EdContext, id: string) {.gcsafe.}
     blocking*: bool
     # Partial-replica evictor (docs/proxy-body-design.md phase 4). `mem_limit`
-    # is the cache budget for unclaimed bodies, in three modes:
-    #   < 0  never evict — unlimited cache (the authority, full clones; default).
-    #        Canonical data is never dropped.
-    #    0   evict everything the moment it isn't live — no cache (a utility
-    #        client that holds nothing it isn't actively using).
-    #   > 0  cache up to N bytes; over budget, shed least-recently-read (LRU).
-    # `used_bytes` is the running sum of resident body bytes (mode > 0 only).
+    # is a cache budget for unclaimed bodies, in bytes — an honest, monotonic
+    # value from "no cache" up to "unlimited":
+    #     0  no cache — evict everything the moment it isn't live (a utility
+    #        client that holds nothing it isn't actively using). Negatives are
+    #        clamped to this at init.
+    #   0<n  cache up to n bytes; over budget, shed least-recently-read (LRU).
+    #   Unbounded (= int.high)  never evict — unlimited cache.
+    # Only a partial replica evicts (a full clone / authority never does, so the
+    # value is moot there). `used_bytes` is the running sum of resident body
+    # bytes (finite-budget mode only). See `evicts` / `has_budget`.
     mem_limit*: int
     used_bytes*: int
     sweep_dirty*: bool
@@ -784,20 +787,38 @@ proc release_closures*(body: ref EdBodyBase) =
   body.untrack_zid = nil
   body.sweep_gen = nil
 
+const Unbounded* = high(int)
+  ## `mem_limit = Unbounded` means never evict — an unlimited cache. The top of
+  ## the byte-budget range, so the value stays an honest, monotonic size.
+
+const DEFAULT_MEM_LIMIT* = 16 * 1024 * 1024
+  ## A context's default cache budget (16 MB). Moot on a full clone/authority
+  ## (they never evict); a small default cache for partial replicas.
+
+proc evicts*(self: EdContext): bool {.inline.} =
+  ## Reclaims memory under pressure: a partial replica with a finite limit. A
+  ## full clone / authority, and an `Unbounded` limit, never evict.
+  self.partial_replica and self.mem_limit < Unbounded
+
+proc has_budget*(self: EdContext): bool {.inline.} =
+  ## Tracks per-body bytes against a finite cap. No-cache (0) and `Unbounded`
+  ## skip the accounting — there's nothing to compare a running total against.
+  self.evicts and self.mem_limit > 0
+
 proc set_body_bytes*(self: EdContext, body: ref EdBodyBase, n: int) =
   ## Record a body's resident wire-size and keep `used_bytes` in step. Called
   ## where we already have the serialized form (publish/fill); drift between
   ## those points is harmless — the total only gates *when* the limit trips,
-  ## and LRU ordering doesn't use bytes at all. Only the byte-budget mode
-  ## (mem_limit > 0) needs accounting; never-evict (<0) and evict-all (0) skip.
-  if self.mem_limit <= 0:
+  ## and LRU ordering doesn't use bytes at all. Only the finite-budget mode
+  ## needs accounting; no-cache and Unbounded skip it.
+  if not self.has_budget:
     return
   self.used_bytes += n - body.bytes
   body.bytes = n
 
 proc forget_body_bytes*(self: EdContext, body: ref EdBodyBase) =
   ## Remove a body's bytes from the running total (on unregister/evict).
-  if self.mem_limit <= 0:
+  if not self.has_budget:
     return
   self.used_bytes -= body.bytes
   body.bytes = 0
@@ -807,7 +828,7 @@ proc set_key_bytes*(
 ) =
   ## Account a table entry's wire size, keyed so it can be subtracted exactly on
   ## per-key evict. An update replaces the previous figure (no double-count).
-  if self.mem_limit <= 0 or key_bin.len == 0:
+  if not self.has_budget or key_bin.len == 0:
     return
   let prev = body.key_bytes.getOrDefault(key_bin, 0)
   self.set_body_bytes(body, body.bytes + n - prev)
@@ -818,7 +839,7 @@ proc forget_key_bytes*(self: EdContext, body: ref EdBodyBase, key_bin: string) =
   ## bytes. Called from `evict_key` (so every eviction site cleans both parallel
   ## tables — they can't drift) and on UNASSIGN. `del` of a missing key is a
   ## no-op, so recency is cleared even if bytes were never accounted.
-  if self.mem_limit <= 0:
+  if not self.has_budget:
     return
   body.key_last_read.del key_bin
   if key_bin notin body.key_bytes:

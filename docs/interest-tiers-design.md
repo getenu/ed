@@ -47,7 +47,7 @@ Propagation is recursive: when a hub's downstreams all demote X, the hub's
 sweep. No special hub logic — the per-node reconcile cascades.
 
 `INTEREST` is a new lightweight `MessageKind` (object_id + `demote: bool`, no
-data). `mem_limit < 0` (never-evict: authority, full clones) never reconciles —
+data). `mem_limit == Unbounded` (never-evict: authority, full clones) never reconciles —
 it always holds everything live, the prior behavior.
 
 ## 3-host trace (A ← H ← L)
@@ -97,3 +97,18 @@ given `mem_limit = 0` intermittently hung the bot test mid-sync and hung godot
 on shutdown. So a full clone **ignores mem_limit** entirely. Memory on a client
 is managed at the **worker** (the partial replica): full whole-object eviction +
 per-key voxel cache, on its own thread with orderly teardown.
+
+## `mem_limit` encoding
+
+`mem_limit` is an honest, monotonic byte budget — no negative-is-magic:
+
+- `0` — no cache; evict everything the moment it isn't live (negatives clamp here).
+- `0 < n < Unbounded` — cache up to `n` bytes; over budget, shed LRU.
+- `Unbounded` (= `int.high`) — never evict.
+- default — `DEFAULT_MEM_LIMIT` (16 MB): a small cache, so a partial clone left
+  unconfigured doesn't accumulate without bound. Moot on a full clone/authority
+  (the `partial_replica` guard means they never evict regardless of the value).
+
+Two predicates centralize the decode instead of re-checking the value at each
+site: `evicts` (partial replica with a finite limit) and `has_budget` (`evicts`
+with a positive limit → tracks per-body bytes).

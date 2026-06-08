@@ -501,6 +501,32 @@ proc run*() =
       check "it_x" notin hub # H reclaimed it — not pinned by L's cache
       check "it_x" notin leaf # ...and invalidated L's cache
 
+    test "mem_limit encoding: default budget, negative clamps, Unbounded holds":
+      # Honest byte budget: a small default cache, negatives clamp to no-cache,
+      # and Unbounded means never evict — the mirror image of the mem_limit 0
+      # case below (there the dropped object is shed; here it's kept).
+      check EdContext.init(id = "ml_def").mem_limit == DEFAULT_MEM_LIMIT
+      check EdContext.init(id = "ml_neg", mem_limit = -5).mem_limit == 0
+
+      var authority = EdContext.init(id = "ub_auth", is_authority = true)
+      var client = EdContext.init(id = "ub_client", mem_limit = Unbounded)
+      Ed.thread_ctx = authority
+      discard EdValue[string].init(ctx = authority, id = "ub_x")
+      EdValue[string](authority["ub_x"]).value = "hi"
+
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      var f = client.fetch("ub_x")
+      authority.tick()
+      client.tick()
+      check "ub_x" in client and f.obj != nil
+
+      f.obj = nil
+      f = nil # drop the reference — nothing is live now
+      GC_full_collect()
+      client.tick() # Unbounded: the sweep is a no-op, the cache holds it
+      check "ub_x" in client # a finite limit / no-cache would have shed it
+
     test "evictor: mem_limit 0 evicts everything the moment it isn't live":
       # The no-cache mode for utility clients: a fetched object survives only
       # while a reference holds it; drop the reference and it's gone next sweep,

@@ -69,7 +69,7 @@ proc init*(
     min_recv_duration = Duration.default,
     label = "default",
     is_authority = false,
-    mem_limit = -1, # < 0 = never evict (default); 0 = no cache; > 0 = LRU budget
+    mem_limit = DEFAULT_MEM_LIMIT, # 0 = no cache; n = LRU budget; Unbounded = never
 ): EdContext =
   ## Create a new `EdContext`. Set `listen_address` to enable network sync.
   ## Set `is_authority` to make this context the sequencer (leader) that assigns
@@ -91,7 +91,7 @@ proc init*(
     metrics_label: label,
     last_keepalive_tick: epoch_time(),
     is_authority: is_authority,
-    mem_limit: mem_limit,
+    mem_limit: max(0, mem_limit), # clamp: a negative limit means no cache
   )
   if is_authority:
     result.leader_id = id

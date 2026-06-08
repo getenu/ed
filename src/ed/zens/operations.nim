@@ -74,7 +74,7 @@ template touch_read(self: untyped) =
   ## so the evictor's LRU clock and "updates since read" both advance on real
   ## use — and never on the hot voxel render path, which doesn't read through
   ## these accessors. Only meaningful on a context with a memory limit.
-  if self.ctx != nil and self.ctx.mem_limit > 0:
+  if self.ctx != nil and self.ctx.has_budget:
     self.body.last_read = get_mono_time()
     self.body.updates = 0
 
