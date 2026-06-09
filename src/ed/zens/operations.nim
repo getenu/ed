@@ -354,8 +354,12 @@ template pause*(self: Ed, body: untyped) =
   assert self.valid
   pause_impl(self, self.typed_body.changed_callbacks.keys, body)
 
-proc destroy*[T, O](self: Ed[T, O], publish = true) =
-  ## Destroy the container and remove it from its context.
+proc destroy*[T, O](self: Ed[T, O], publish = true, op_ctx = OperationContext()) =
+  ## Destroy the container and remove it from its context. `op_ctx` carries the
+  ## source of the op that triggered this — for a *received* DESTROY (re-broadcast
+  ## by `change_receiver` so it relays past this hop) it's the upstream source, so
+  ## the re-broadcast filters the contexts the op already visited and never echoes
+  ## back to its origin. Empty (a local destroy) ⇒ just this context's id.
   log_defaults
   debug "destroying", unit = self.id, stack = get_stack_trace()
   assert self.valid
@@ -375,13 +379,7 @@ proc destroy*[T, O](self: Ed[T, O], publish = true) =
     self.ctx.owned_by.del(self.id)
 
   if publish:
-    self.publish_destroy OperationContext(source: [self.ctx.id].toHashSet)
-    # Record synced (broadcast) destroys so recreating the same id is caught at
-    # the recreate site (see EdContext.recently_destroyed). Only when it could
-    # actually race — i.e. the DESTROY went to a subscriber. A purely local
-    # destroy (no subscribers) can't be raced, so it's never flagged.
-    if self.ctx.subscribers.len > 0:
-      self.ctx.recently_destroyed[self.id] = get_mono_time()
+    self.publish_destroy OperationContext(source: op_ctx.source + [self.ctx.id].toHashSet)
 
 method destroy*(self: EdRef) {.base, gcsafe.}
   # Forward declaration: destroy_owned cascades into owned members through it.

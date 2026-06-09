@@ -136,26 +136,6 @@ proc defaults[T, O](
 
   debug "creating zen object", id = self.id
 
-  # Guard: recreating a synced id that was just destroyed is the destroy+recreate
-  # -same-id hazard — ed has no generation on the id, so the in-flight DESTROY for
-  # the old incarnation can land on this new one (a stale-DESTROY UAF that
-  # surfaces ~100ms later, on another thread). Unsupported by design; caught here
-  # at the recreate site. Use a fresh id, or update the object in place.
-  if self.id in ctx.recently_destroyed:
-    let since = get_mono_time() - ctx.recently_destroyed[self.id]
-    if since < recreate_race_window:
-      let msg =
-        \"recreating destroyed id '{self.id}' {since} after a synced destroy — " &
-        "destroy+recreate of the same id races under sync (the stale DESTROY can " &
-        "kill the new incarnation; ed has no generation to disambiguate). Use a " &
-        "fresh id or update in place."
-      when defined(release):
-        error "ed recreate-after-destroy (sync hazard)", id = self.id, since
-      else:
-        raise newException(ZenError, msg)
-    else:
-      ctx.recently_destroyed.del self.id # safely separated; not a hazard
-
   if self.id in ctx.objects and not ?ctx.objects[self.id]:
     ctx.pack_objects
   # The registry owns the body; the proxy is reachable through the backref +
@@ -318,7 +298,11 @@ proc defaults[T, O](
     let self = Ed[T, O](body.ctx.resolve_proxy(body))
 
     if msg.kind == DESTROY:
-      self.destroy
+      # Forward the upstream op-source so the re-broadcast (relay) filters the
+      # contexts this DESTROY already visited — otherwise it echoes back to its
+      # origin and, out of order with the reload stream, can kill a same-id
+      # recreate.
+      self.destroy(op_ctx = op_ctx)
       return
 
     when O is Ed:

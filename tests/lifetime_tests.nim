@@ -185,6 +185,88 @@ proc run*() =
       ctx3.destroy_owned("relay_bot")
       check "relay_items" notin ctx3
 
+    test "destroy cascade carries op-source: a same-id recreate survives the echo":
+      # The enu worker<->main topology: one ordered authority, a *bidirectional*
+      # replica, zero contention. Destroying an owner cascades a DESTROY to its
+      # owned container; if that cascade DESTROY goes out with an empty
+      # OperationContext (no source), the replica re-publishes it back to the
+      # authority — where it lands AFTER the authority has recreated the same id,
+      # killing the live recreate. A single ordered producer over FIFO can only
+      # misorder if an op echoes, and the cascade is the lone sourceless op.
+      var auth = EdContext.init(id = "casc_auth", is_authority = true)
+      var rep = EdContext.init(id = "casc_rep")
+      rep.subscribe(auth) # bidirectional (default)
+      Ed.thread_ctx = auth
+
+      proc make_owner(): OwnerTest =
+        result = OwnerTest(id: "casc_owner")
+        result.own:
+          result.items = EdSeq[int].init(ctx = auth, id = "casc_items")
+
+      var o1 = make_owner()
+      o1.items.add 1
+      rep.tick
+      check "casc_items" in rep
+
+      # Reload: destroy gen 1 (cascade DESTROY casc_items), recreate the same ids.
+      o1.destroy()
+      var o2 = make_owner()
+      o2.items.add 2
+
+      # Drain all cross-context traffic, including any echo back to the authority.
+      for _ in 0 ..< 6:
+        rep.tick(blocking = false)
+        auth.tick(blocking = false)
+
+      # The live recreate must still be valid on the authority — the stale
+      # DESTROY for the old incarnation must not have echoed back onto it.
+      check "casc_items" in auth
+      check o2.items.valid
+      check o2.items.len == 1
+      check o2.items[0] == 2
+
+    test "OWNS_MEMBERS member reload: same-id member survives the cross-context echo":
+      # Closer to enu: the reloaded unit is a *member* of an OWNS_MEMBERS
+      # collection (state.units), reused by id. Remove+destroy it, recreate the
+      # same id, re-add. Any op in this dance that re-broadcasts without
+      # accumulating its source echoes back and can corrupt the live recreate
+      # (its owned container, or its ref-pool refcount).
+      var auth = EdContext.init(id = "mem_auth", is_authority = true)
+      var rep = EdContext.init(id = "mem_rep")
+      rep.subscribe(auth) # bidirectional
+      Ed.thread_ctx = auth
+
+      var units = EdSeq[OwnerTest].init(
+        ctx = auth, id = "mem_units", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
+      )
+
+      proc make_member(): OwnerTest =
+        result = OwnerTest(id: "mem_build")
+        result.own:
+          result.items = EdSeq[int].init(ctx = auth, id = "mem_items")
+
+      var m1 = make_member()
+      m1.items.add 1
+      units.add m1
+      rep.tick
+      check "mem_items" in rep
+
+      # Reload: remove + destroy gen 1, recreate the same ids, re-add.
+      units -= m1
+      m1.destroy()
+      var m2 = make_member()
+      m2.items.add 2
+      units.add m2
+
+      for _ in 0 ..< 6:
+        rep.tick(blocking = false)
+        auth.tick(blocking = false)
+
+      check "mem_items" in auth
+      check m2.items.valid
+      check m2.items.len == 1
+      check m2.items[0] == 2
+
     test "EdRef destroy: lifetime, owned containers, destroyed latch":
       var ctx = EdContext.init(id = "rd_ctx")
       Ed.thread_ctx = ctx

@@ -340,14 +340,6 @@ type
     last_proxy_prune_epoch*: int # last dead_proxy_epoch this ctx pruned at
     last_ref_prune_epoch*: int   # last dead_ref_epoch this ctx pruned at
     filling*: bool        # set while a placeholder fill applies → tags Fill changes
-    recently_destroyed*: Table[string, MonoTime]
-      ## id -> when a *synced* (broadcast) destroy of it happened. Recreating one
-      ## of these ids within the race window means a destroy+recreate of the same
-      ## id: the in-flight DESTROY for the old incarnation can land on the new one
-      ## (a stale-DESTROY UAF that ed cannot disambiguate — there's no generation
-      ## on the id). Unsupported by design; the guard raises in dev / logs ERROR
-      ## in release so it's caught at the recreate site, not 100ms later on
-      ## another thread. Pruned on tick past the window.
     silent*: bool         # silent (blocking) materialize: defer callbacks to next tick
     pending_msgs*: seq[Message]            # received-but-deferred during a silent pump
     pending_fills*: seq[proc() {.gcsafe.}] # Fill callbacks deferred to the next tick
@@ -810,12 +802,6 @@ const Unbounded* = high(int)
 const DEFAULT_MEM_LIMIT* = 16 * 1024 * 1024
   ## A context's default cache budget (16 MB). Moot on a full clone/authority
   ## (they never evict); a small default cache for partial replicas.
-
-const recreate_race_window* = initDuration(seconds = 2)
-  ## How long after a *synced* destroy recreating the same id counts as the
-  ## (unsupported) destroy+recreate-same-id hazard — roughly the time an in-flight
-  ## DESTROY can still be undrained. Reuse separated by more than this is safe.
-  ## See `EdContext.recently_destroyed`.
 
 proc evicts*(self: EdContext): bool {.inline.} =
   ## Reclaims memory under pressure: a partial replica with a finite limit. A

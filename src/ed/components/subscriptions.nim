@@ -1779,14 +1779,6 @@ proc tick*(
   var count = 0
   self.free_refs
   self.prune_dead_proxies # clear backrefs of proxies ORC reclaimed
-  if self.recently_destroyed.len > 0: # prune past the recreate-race window
-    let cutoff = get_mono_time() - recreate_race_window
-    var expired: seq[string]
-    for id, at in self.recently_destroyed:
-      if at < cutoff:
-        expired.add id
-    for id in expired:
-      self.recently_destroyed.del id
   let timeout =
     if not ?max_duration:
       MonoTime.high
