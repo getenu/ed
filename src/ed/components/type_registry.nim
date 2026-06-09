@@ -81,9 +81,37 @@ proc register_type(typ: type) =
               field = type(field)(ctx.resolve_proxy(ctx.objects[field.id]))
       result = self
 
+  let revive =
+    func (existing: ref RootObj, incoming: ref RootObj) =
+      # Converge a held instance to a freshly-parsed reincarnation without
+      # replacing it. `incoming`'s Ed fields are already resolved/relinked by
+      # `parse`; copy them and the synced scalars onto `existing`, but LEAVE
+      # main-side refs / `ed_ignore` state untouched (the consumer depends on
+      # them — e.g. a godot `node`). Mirrors `stringify`'s field handling.
+      let src = typ(incoming)
+      let dest = typ(existing)
+      for s, d in fields(src[], dest[]):
+        when s is Ed:
+          # Re-link only fields that actually changed identity (a reload gives an
+          # owned container a fresh id) or whose current target is stale. Leaving
+          # an unchanged, still-valid field alone avoids downgrading it to an
+          # incoming placeholder that hasn't materialized here yet.
+          if ?s and (not ?d or d.id != s.id):
+            d = s
+        elif s is ref:
+          discard # preserve the existing main-side reference (e.g. a node)
+        elif s is ptr:
+          discard
+        elif (s is proc):
+          discard
+        elif s.has_custom_pragma(ed_ignore):
+          discard # preserve existing local/never-synced state
+        else:
+          d = s # converge a synced scalar to the new incarnation's value
+
   with_lock:
     global_type_registry[][key] =
-      RegisteredType(stringify: stringify, parse: parse, tid: key)
+      RegisteredType(stringify: stringify, parse: parse, revive: revive, tid: key)
 
 proc is_zen(node: NimNode): bool =
   if node.kind == nnk_sym and node.str_val == "EdBase":
@@ -278,14 +306,25 @@ proc find_ref*[T](self: EdContext, value: var T): bool =
     let id = value.ref_id
     if id in self.ref_pool:
       let existing = self.ref_pool[id].obj
-      # Don't resurrect a *destroyed* instance: a reload reuses an id for a NEW
-      # incarnation, so the old (destroyed) one must not be deduped onto — that
-      # hands a dead object to the caller. Treat it as absent; the caller builds
-      # a fresh instance, which re-registers and replaces this stale entry. (A
-      # merely *removed* ref — moved between collections — isn't destroyed, so
-      # move-identity still works.)
-      if existing.is_nil or not (existing of EdRef) or
-          not EdRef(existing).destroyed:
+      if existing.is_nil:
+        discard
+      elif not (existing of EdRef):
+        value = T(existing)
+        result = true
+      else:
+        # Dedup to the pooled instance, but REVIVE it: converge the freshly-parsed
+        # incarnation (`value`) onto it — re-linking owned fields a reload gave
+        # fresh ids — and clear any destroyed latch. This merges a same-id
+        # destroy+recreate into an in-place update: identity is preserved, so a
+        # consumer still holding the instance converges to the new state instead
+        # of being left on dead fields. (Replaces the old "refuse a destroyed
+        # instance and mint fresh", which dangled held references.)
+        var registered_type: RegisteredType
+        if lookup_type(existing, registered_type) and
+            registered_type.revive != nil:
+          registered_type.revive(existing, value)
+        if EdRef(existing).destroyed:
+          EdRef(existing).destroyed = false
         value = T(existing)
         result = true
 

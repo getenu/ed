@@ -219,6 +219,13 @@ type
     stringify*: proc(self: ref RootObj): string {.no_side_effect.}
     parse*:
       proc(ctx: EdContext, clone_from: string): ref RootObj {.no_side_effect.}
+    # Revive: converge a freshly-parsed `incoming` incarnation onto an EXISTING
+    # instance (a reincarnated id whose object a consumer still holds) — copy its
+    # synced scalars and (already-relinked) Ed fields, leaving main-side refs
+    # (e.g. a godot node) intact. Identity preserved → held references stay valid
+    # across destroy+recreate (eventual convergence).
+    revive*:
+      proc(existing: ref RootObj, incoming: ref RootObj) {.no_side_effect.}
 
   SubscriptionKind* = enum
     BLANK
