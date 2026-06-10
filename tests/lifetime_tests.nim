@@ -469,6 +469,64 @@ proc run*() =
       if held_usable:
         check held.items.value == @[20]
 
+    test "REINC revive resets a finished lifetime so new watchers bind":
+      # The disappearing-voxels bug: a consumer finishes the unit's lifetime on
+      # removal (remove_from_scene), the same instance revives on the re-add, and
+      # the consumer re-establishes its watches bound to the unit's lifetime
+      # (require_lifetime returns the EXISTING one). Binding to a finished
+      # lifetime untracks immediately — every re-established watch silently dies,
+      # so synced data arrives and nothing renders. Revive must hand back a
+      # usable (unfinished) lifetime.
+      var auth = EdContext.init(id = "ri6_auth", is_authority = true)
+      var rep = EdContext.init(id = "ri6_rep")
+      rep.subscribe(auth)
+      Ed.thread_ctx = auth
+
+      var units = EdSeq[ReincUnit].init(ctx = auth, id = "ri6_units")
+      proc make(v: int): ReincUnit =
+        result = ReincUnit(id: "ri6_x")
+        result.own:
+          result.items = EdSeq[int].init(ctx = auth, id = "ri6_x_items_" & $v)
+        result.items.add v
+
+      var x1 = make(1)
+      units.add x1
+      for _ in 0 ..< 4:
+        auth.tick(blocking = false)
+        rep.tick(blocking = false)
+
+      # The consumer holds the replica's instance and finishes its lifetime on
+      # removal (the remove_from_scene pattern).
+      var held = EdSeq[ReincUnit](rep["ri6_units"]).value[0]
+      held.lifetime = new_lifetime()
+      held.lifetime.finish()
+
+      # Reload: same-id reincarnation; the replica revives `held` in place.
+      units -= x1
+      x1.destroy()
+      var x2 = make(2)
+      x2.items.add 3
+      units.add x2
+      for _ in 0 ..< 4:
+        auth.tick(blocking = false)
+        rep.tick(blocking = false)
+
+      # The revived instance must be watchable again: its lifetime is not the
+      # finished one (else this track is untracked immediately and never fires).
+      check held.lifetime == nil or not held.lifetime.finished
+      var fired = 0
+      let life = if held.lifetime == nil: new_lifetime() else: held.lifetime
+      held.items.track(
+        life,
+        proc(changes: seq[Change[int]]) {.gcsafe.} =
+          fired.inc,
+      )
+      x2.items.add 4
+      for _ in 0 ..< 4:
+        auth.tick(blocking = false)
+        rep.tick(blocking = false)
+      check fired > 0
+
     test "REINC fix-1: release-on-removal keeps the held ref valid":
       # Fix (1): the consumer (BuildNode) RELEASES its reference when the unit is
       # removed and re-acquires on add — modelled as a seq watcher that clears

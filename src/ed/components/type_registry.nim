@@ -325,6 +325,12 @@ proc find_ref*[T](self: EdContext, value: var T): bool =
           registered_type.revive(existing, value)
         if EdRef(existing).destroyed:
           EdRef(existing).destroyed = false
+        # A revived ref must come back fully alive: its lifetime was finished by
+        # the destroy, and binding a new watcher to a finished lifetime untracks
+        # it immediately — every watch a consumer re-establishes on the revived
+        # object would silently die. Fresh lifetime = watchable again.
+        if EdRef(existing).lifetime != nil and EdRef(existing).lifetime.finished:
+          EdRef(existing).lifetime = new_lifetime()
         value = T(existing)
         result = true
 
