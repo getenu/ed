@@ -48,8 +48,28 @@ proc contains*[T, O](self: Ed[T, O], children: set[O] | seq[O]): bool =
     if child notin self:
       return false
 
+template materialize_for_write(self: untyped) =
+  ## A local mutation of an unmaterialized placeholder materializes it first
+  ## (under `ctx.blocking`: pumps I/O until filled) so the in-flight fill
+  ## can't clobber the write — a placeholder's tracked state is about to be
+  ## replaced wholesale by its CREATE. Unlike `touch_placeholder` this skips
+  ## `touch_read`: a write must not reset the evictor's updates-since-read
+  ## churn counter.
+  privileged
+  if self.placeholder and LAZY notin self.flags and self.ctx.materialize != nil:
+    self.ctx.materialize(self.ctx, self.id)
+
+template materialize_for_write(self: untyped, op_ctx: untyped) =
+  ## Gated variant for accessors the receive path also calls (via
+  ## change_receiver): a received op carries a non-empty source and is
+  ## replicated state, not local intent — and materializing inside message
+  ## processing would re-enter the pump.
+  if op_ctx.source.len == 0:
+    self.materialize_for_write
+
 proc clear*[T, O](self: Ed[T, O]) =
   assert self.valid
+  self.materialize_for_write
   mutate(OperationContext(source: [self.ctx.id].toHashSet)):
     self.tracked = T.default
 
@@ -57,6 +77,7 @@ proc `value=`*[T, O](self: Ed[T, O], value: T, op_ctx = OperationContext()) =
   ## Set the container's value. Triggers change callbacks and sync.
   privileged
   assert self.valid
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   if self.tracked != value:
     mutate(op_ctx):
@@ -153,12 +174,14 @@ proc `[]`*[T](self: EdSeq[T], index: SomeOrdinal | BackwardsIndex): T =
 proc `[]=`*[K, V](
     self: EdTable[K, V], key: K, value: V, op_ctx = OperationContext()
 ) =
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   self.put(key, value, touch = false, op_ctx)
 
 proc `[]=`*[T](
     self: EdSeq[T], index: SomeOrdinal, value: T, op_ctx = OperationContext()
 ) =
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   assert self.valid
   mutate(op_ctx):
@@ -167,6 +190,7 @@ proc `[]=`*[T](
 proc add*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
   ## Add an item to a sequence container.
   privileged
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   when O is Ed:
     assert self.valid(value)
@@ -183,6 +207,7 @@ proc add*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
 
 proc del*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
   privileged
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   assert self.valid
   if value in self.tracked:
@@ -190,6 +215,7 @@ proc del*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
 
 proc del*[K, V](self: EdTable[K, V], key: K, op_ctx = OperationContext()) =
   privileged
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   assert self.valid
   if key in self.tracked:
@@ -201,7 +227,7 @@ proc del*[T: seq, O](
     self: Ed[T, O], index: SomeOrdinal, op_ctx = OperationContext()
 ) =
   privileged
-
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   assert self.valid
   if index < self.tracked.len:
@@ -209,6 +235,7 @@ proc del*[T: seq, O](
 
 proc delete*[T, O](self: Ed[T, O], value: O) =
   assert self.valid
+  self.materialize_for_write
   if value in self.tracked:
     remove(
       self,
@@ -220,6 +247,7 @@ proc delete*[T, O](self: Ed[T, O], value: O) =
 
 proc delete*[K, V](self: EdTable[K, V], key: K) =
   assert self.valid
+  self.materialize_for_write
   if key in self.tracked:
     remove(
       self,
@@ -231,6 +259,7 @@ proc delete*[K, V](self: EdTable[K, V], key: K) =
 
 proc delete*[T: seq, O](self: Ed[T, O], index: SomeOrdinal) =
   assert self.valid
+  self.materialize_for_write
   if index < self.tracked.len:
     remove(
       self, index, self.tracked[index], delete, op_ctx = OperationContext()
@@ -240,28 +269,34 @@ proc touch*[K, V](
     self: EdTable[K, V], pair: Pair[K, V], op_ctx: OperationContext
 ) =
   assert self.valid
+  self.materialize_for_write(op_ctx)
   self.put(pair.key, pair.value, touch = true, op_ctx = op_ctx)
 
 proc touch*[T, O](
     self: EdTable[T, O], key: T, value: O, op_ctx = OperationContext()
 ) =
   assert self.valid
+  self.materialize_for_write(op_ctx)
   self.put(key, value, touch = true, op_ctx = op_ctx)
 
 proc touch*[T: set, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
   assert self.valid
+  self.materialize_for_write(op_ctx)
   self.change_and_touch({value}, true, op_ctx = op_ctx)
 
 proc touch*[T: seq, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
   assert self.valid
+  self.materialize_for_write(op_ctx)
   self.change_and_touch(@[value], true, op_ctx = op_ctx)
 
 proc touch*[T, O](self: Ed[T, O], value: T, op_ctx = OperationContext()) =
   assert self.valid
+  self.materialize_for_write(op_ctx)
   self.change_and_touch(value, true, op_ctx = op_ctx)
 
 proc touch*[T](self: EdValue[T], value: T, op_ctx = OperationContext()) =
   assert self.valid
+  self.materialize_for_write(op_ctx)
   mutate_and_touch(touch = true, op_ctx):
     self.tracked = value
 
@@ -276,10 +311,12 @@ proc `+`*[O](self, other: EdSet[O]): set[O] =
 
 proc `+=`*[T, O](self: Ed[T, O], value: T) =
   assert self.valid
+  self.materialize_for_write
   self.change(value, true, op_ctx = OperationContext())
 
 proc `+=`*[O](self: EdSet[O], value: O) =
   assert self.valid
+  self.materialize_for_write
   self.change({value}, true, op_ctx = OperationContext())
 
 proc `+=`*[T: seq, O](self: Ed[T, O], value: O) =
@@ -288,18 +325,22 @@ proc `+=`*[T: seq, O](self: Ed[T, O], value: O) =
 
 proc `+=`*[T, O](self: EdTable[T, O], other: Table[T, O]) =
   assert self.valid
+  self.materialize_for_write
   self.put_all(other, touch = false, op_ctx = OperationContext())
 
 proc `-=`*[T, O](self: Ed[T, O], value: T) =
   assert self.valid
+  self.materialize_for_write
   self.change(value, false, op_ctx = OperationContext())
 
 proc `-=`*[T: set, O](self: Ed[T, O], value: O) =
   assert self.valid
+  self.materialize_for_write
   self.change({value}, false, op_ctx = OperationContext())
 
 proc `-=`*[T: seq, O](self: Ed[T, O], value: O) =
   assert self.valid
+  self.materialize_for_write
   self.change(@[value], false, op_ctx = OperationContext())
 
 proc `&=`*[T, O](self: Ed[T, O], value: O) =

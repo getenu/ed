@@ -251,3 +251,59 @@ proc run*() =
       ctx.blocking:
         check ctx.blocking
       check ctx.blocking # restored to the manual value, not forced off
+
+    test "blocking write materializes first: the fill can't clobber the write":
+      var authority = EdContext.init(id = "bw_auth", is_authority = true)
+      var client = EdContext.init(id = "bw_client")
+      var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
+      var child = EdValue[string].init(ctx = authority, id = "child")
+      child.value = "old"
+      parent += child
+      client.subscribe(authority, partial = true, fetch = ["parent"])
+      client.tick()
+      check not client["child"].loaded
+
+      # Queue the fill onto the client's chan WITHOUT processing it: the
+      # hazard is a write that lands while the fill is in flight.
+      client.fetch("child")
+      authority.tick()
+
+      # Write with no prior read. The placeholder must materialize (applying
+      # the queued fill) before the write, or the fill would clobber it.
+      client.blocking:
+        EdValue[string](client["child"]).value = "new"
+
+      check client["child"].loaded
+      check EdValue[string](client["child"]).value == "new"
+      client.tick()
+      authority.tick()
+      check child.value == "new" # ...and the write flowed up
+
+    test "blocking += on a placeholder set materializes, then applies":
+      var authority = EdContext.init(id = "bs_auth", is_authority = true)
+      var client = EdContext.init(id = "bs_client")
+      var parent = EdSeq[EdSet[char]].init(ctx = authority, id = "parent")
+      var child = EdSet[char].init(ctx = authority, id = "child")
+      child += 'a'
+      parent += child
+      client.subscribe(authority, partial = true, fetch = ["parent"])
+      client.tick()
+      check not client["child"].loaded
+
+      client.fetch("child")
+      authority.tick() # fill queued, unprocessed
+
+      client.blocking:
+        EdSet[char](client["child"]) += 'b'
+
+      check client["child"].loaded
+      let filled = EdSet[char](client["child"])
+      check 'a' in filled # the authority's contents survived
+      check 'b' in filled # ...and the local add applied on top
+      client.tick()
+      authority.tick()
+      check 'b' in child # ...and flowed up
+
+when is_main_module:
+  Ed.bootstrap
+  run()

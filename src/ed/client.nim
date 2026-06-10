@@ -48,6 +48,11 @@ type EdClient* = ref object
     ## (Re)create this client's objects after each (re)connect. Runs with
     ## `Ed.thread_ctx` set to the fresh context. Single-threaded — runs on
     ## the caller's thread, so it may touch the caller's globals.
+  blocking*: bool
+    ## Applied to each (re)created context: touching an unmaterialized
+    ## placeholder — by read or local write — pumps I/O until it fills.
+    ## Synchronous semantics for CLIs and narrow agents; leave off for
+    ## anything frame-paced.
   ctx*: EdContext
   reconnect_interval*: Duration
     ## Minimum gap between re-subscribe attempts while down (default 1 s).
@@ -64,6 +69,7 @@ proc connect*(self: EdClient) =
     self.ctx.close
   let chan_size = if self.chan_size > 0: self.chan_size else: 100
   self.ctx = EdContext.init(chan_size = chan_size, buffer = false, id = self.id)
+  self.ctx.blocking = self.blocking
   Ed.thread_ctx = self.ctx
   try:
     self.ctx.subscribe(
@@ -105,3 +111,53 @@ proc tick*(self: EdClient) =
     else: DEFAULT_RECONNECT_INTERVAL
   if get_mono_time() - self.last_attempt >= interval:
     self.connect
+
+template every*(self: EdClient, interval: Duration, body: untyped) =
+  ## Reconnect-aware `every`: ticks the client (re-subscribing if the link
+  ## drops) instead of the bare context, every `interval`, until `break`.
+  block:
+    let interval_ms = max(0, interval.in_milliseconds.int)
+    while true:
+      self.tick
+      body
+      sleep interval_ms
+
+const FRAME = init_duration(milliseconds = 33)
+
+template animate*(self: EdClient, seconds: float, body: untyped) =
+  ## Run `body` once per ~33ms frame for `seconds`, ticking each frame so
+  ## changes sync. Injects `t` in 0..1 (1.0 on the final frame); a final
+  ## tick flushes the last frame.
+  block:
+    let
+      frame_sec = FRAME.in_milliseconds.float / 1000.0
+      total = max(seconds, frame_sec)
+    var elapsed = 0.0
+    self.every(FRAME):
+      elapsed += frame_sec
+      let t {.inject.} = min(elapsed / total, 1.0)
+      body
+      if t >= 1.0:
+        self.tick
+        break
+
+template tick_until*(self: EdClient, timeout: Duration, cond: untyped): bool =
+  ## Tick (reconnect-aware) every ~10ms until `cond` holds or `timeout`
+  ## elapses; returns whether it held.
+  block:
+    let deadline = get_mono_time() + timeout
+    var met = false
+    self.every(init_duration(milliseconds = 10)):
+      if cond:
+        met = true
+        break
+      if get_mono_time() > deadline:
+        break
+    met
+
+proc flush*(self: EdClient, ticks = 3) =
+  ## Tick a few times with short gaps so just-written ops drain to the peer
+  ## before the caller stops ticking (UDP batches per tick).
+  for _ in 1 .. ticks:
+    self.tick
+    sleep 20
