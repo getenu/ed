@@ -392,7 +392,13 @@ proc set_owner*(ctx: EdContext, obj: EdRef, owner_id: string) =
   ## (`type_registry`): call it wherever the ref is created/adopted, on every
   ## context, and the index lands the same everywhere with no extra sync.
   privileged
-  ctx.owned_by.mgetOrPut(owner_id, initHashSet[string]()).incl(obj.id)
+  # Index by the ref_pool key ("tid:id" — `ref_id` in type_registry), matching
+  # the OWNS_MEMBERS member index: destroy_owned's member pass resolves owned
+  # ids through ctx.ref_pool, and a bare id never matches a pool key — the ref
+  # would silently escape the cascade (and leak everything *it* owns).
+  ctx.owned_by.mgetOrPut(owner_id, initHashSet[string]()).incl(
+    $obj.type_id & ":" & obj.id
+  )
 
 proc destroy_owned*(ctx: EdContext, owner_id: string) =
   ## Destroy everything owned by `owner_id` (per the `owned_by` index). Two

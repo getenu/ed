@@ -397,7 +397,11 @@ proc free_refs*(self: EdContext) =
     let now = get_mono_time()
     if now > self.dump_at:
       self.pack_objects
-      write_file(self.id, self.objects.keys.to_seq.reversed.join("\n"))
+      var dump_lines: seq[string]
+      for oid, body in self.objects:
+        dump_lines.add oid & " owner=" & body.owner_id & " placeholder=" &
+          $body.placeholder & " bytes=" & $body.bytes
+      write_file(self.id, dump_lines.join("\n"))
       var counts = ""
       for kind in MessageKind:
         counts &= $kind & ": " & $self.counts[kind] & "\n"

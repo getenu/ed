@@ -166,6 +166,36 @@ proc run*() =
       ctx2.destroy_owned("mcp_bot") # ctx2 never built it, but owns the teardown
       check "bot_items" notin ctx2
 
+    test "set_owner: a standalone EdRef cascades through destroy_owned":
+      # The enu Shared pattern: a root unit mints a standalone EdRef (not a
+      # member of any OWNS_MEMBERS collection) owning containers, publishes it
+      # through a synced field, and attributes it to itself via set_owner.
+      # Destroying the unit must cascade: unit -> (set_owner) Shared ->
+      # (own scope) its containers. Regression: set_owner indexed the BARE id
+      # while destroy_owned resolves ref_pool keys (tid:id) — the ref silently
+      # escaped the cascade and its containers leaked on every reload.
+      var ctx = EdContext.init(id = "so_ctx")
+      Ed.thread_ctx = ctx
+
+      var owner = OwnerTest(id: "so_unit")
+      owner.own:
+        owner.items = EdSeq[int].init(ctx = ctx, id = "so_unit_items")
+
+      var shared = OwnerTest(id: "so_shared")
+      shared.id.own:
+        shared.items = EdSeq[int].init(ctx = ctx, id = "so_shared_items")
+      # Publish through a synced field so the ref enters ref_pool (the enu
+      # shared_value pattern), then attribute it to the unit.
+      var shared_value = EdValue[OwnerTest].init(ctx = ctx, id = "so_shared_val")
+      shared_value.value = shared
+      ctx.set_owner(shared, "so_unit")
+
+      owner.destroy()
+      check owner.destroyed
+      check "so_unit_items" notin ctx # the unit's own containers died
+      check shared.destroyed # the set_owner'd ref cascaded
+      check "so_shared_items" notin ctx # ...and everything IT owned died too
+
     test "ownership survives a relay (creator -> hub -> second hop)":
       # The enu topology: an MCP client builds a bot, the worker (hub) relays it
       # to the node ctx. The hub's initializer re-broadcasts the CREATE *while*
