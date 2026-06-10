@@ -302,8 +302,14 @@ proc fanout(
     source.incl self.id
   var body, body_no_overwrite: string
   for sub in targets:
-    if sub.partial and msg.object_id notin sub.interest:
-      continue  # partial subscriber: only ops for objects it's interested in
+    if sub.partial and msg.kind != DESTROY and msg.object_id notin sub.interest:
+      # Partial subscriber: only ops for objects it's interested in. DESTROY is
+      # exempt, mirroring the capability gate below: a partial replica can hold
+      # ids the authority never learned about (placeholders minted from inline
+      # refs during parse), and filtering their DESTROYs strands those bodies
+      # forever (the reload leak). A destroy for an id a peer doesn't hold is a
+      # cheap no-op.
+      continue
     if sub.capabilities.len > 0 and msg.type_id != 0 and
         msg.type_id notin sub.capabilities:
       # Peer can't materialize this type — never send its ops. type_id == 0
@@ -1573,8 +1579,10 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       # An op for an object we don't hold is dropped. Usually benign
       # (partial replica, version skew), but a drop on a paging path means a
       # requested entry silently never loads — surface the first one per
-      # object so a stalled chain is visible in the logs.
-      if msg.object_id notin self.warned_missing:
+      # object so a stalled chain is visible in the logs. DESTROY misses are
+      # fully expected (destroys broadcast past the interest filter so peers
+      # holding self-minted placeholders converge) — drop them silently.
+      if msg.kind != DESTROY and msg.object_id notin self.warned_missing:
         self.warned_missing.incl msg.object_id
         notice "dropping op for missing object",
           object_id = msg.object_id, kind = msg.kind

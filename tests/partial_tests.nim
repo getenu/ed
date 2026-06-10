@@ -50,6 +50,40 @@ proc run*() =
       check m.items.len == 1
       check m.items[0] == 5
 
+    test "DESTROY reaches a partial subscriber past the interest filter":
+      # The client-reload leak: a partial replica mints placeholder bodies for
+      # ids it discovers via inline refs (a parsed unit's field husks) — ids the
+      # authority never learned it holds, so they're in no interest set. If the
+      # interest filter drops their DESTROYs, those bodies strand forever and
+      # every server reload leaks a generation of husks (~600/reload in enu).
+      # DESTROY must bypass the interest filter; it's a no-op for peers without
+      # the id.
+      var authority = EdContext.init(id = "pd_auth", is_authority = true)
+      var client = EdContext.init(id = "pd_client")
+      Ed.thread_ctx = authority
+
+      var x = EdSeq[int].init(ctx = authority, id = "pd_x") # the fetched object
+      var y = EdSeq[int].init(ctx = authority, id = "pd_y") # never fetched
+      y.add 1
+
+      client.subscribe(authority, partial = true, fetch = ["pd_x"])
+      client.tick()
+      check "pd_x" in client
+
+      # The client materializes pd_y on its own (an inline-ref placeholder mint
+      # during parse — the authority doesn't know, no interest registered).
+      discard EdSeq[int].init_placeholder(client, "pd_y")
+      check "pd_y" in client
+
+      # Authority destroys it. The DESTROY must arrive despite zero interest.
+      y.destroy()
+      for _ in 0 ..< 4:
+        authority.tick(blocking = false)
+        client.tick(blocking = false)
+
+      check "pd_y" notin client # the placeholder converged instead of stranding
+      check "pd_x" in client # unrelated interest untouched
+
     test "reload of a LAZY-field OWNS_MEMBERS member (full clone) keeps siblings valid":
       # The enu reload: a full-clone replica, an OWNS_MEMBERS member reused by id
       # while its owned tables get fresh ids — destroy the old incarnation, add a
