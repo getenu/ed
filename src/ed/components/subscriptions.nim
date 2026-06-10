@@ -216,13 +216,21 @@ proc remote_body(msg: Message, no_overwrite: bool): string =
     body_msg.obj = ""
   result = body_msg.to_flatty.ed_compress
 
+const wire_header = "ED\x01"
+  ## Magic + wire-format version, prefixed to every remote packet. flatty is
+  ## positional: bytes from an older wire format can decode *cleanly* into
+  ## wrong-typed fields and blow up (or corrupt state) deep in processing — a
+  ## version-skewed peer once killed a server silently this way. The prefix
+  ## rejects foreign packets at the front door instead. Bump the version byte
+  ## whenever the wire format changes.
+
 proc send_remote(
     self: EdContext, sub: Subscription, source: HashSet[string], body: string
 ) =
-  ## One remote packet: a small per-subscriber header (source short-ids + any
-  ## new mappings) followed by the shared compressed body.
+  ## One remote packet: the wire header, then a small per-subscriber header
+  ## (source short-ids + any new mappings), then the shared compressed body.
   let (encoded_source, new_mappings) = sub.encode_source(source)
-  let packet = (encoded_source, new_mappings, body).to_flatty
+  let packet = wire_header & (encoded_source, new_mappings, body).to_flatty
   self.bytes_sent += packet.len
   self.reactor.send(sub.connection, packet)
   sub.last_sent_time = epoch_time()
@@ -1734,11 +1742,22 @@ proc parse_remote(
   ## decode lives in exactly one place.
   if raw_msg.data == "PING":
     return (false, Message())
+  if not raw_msg.data.starts_with(wire_header):
+    # A peer speaking a different wire version (or a stray packet). Reject it
+    # here: flatty is positional, so foreign bytes can decode cleanly into
+    # wrong-typed fields and corrupt or crash processing. Warn once per peer —
+    # an old client reconnect-looping would otherwise flood the log.
+    let peer = $raw_msg.conn.address
+    if peer notin self.warned_missing:
+      self.warned_missing.incl peer
+      warn "dropping message from incompatible peer (wire version mismatch)",
+        peer, bytes = raw_msg.data.len
+    return (false, Message())
   try:
     # Wire format: a small per-subscriber header (source short-ids + new
     # mappings) followed by the shared, compressed body (see send_remote).
-    let (enc_source, mappings, body) =
-      raw_msg.data.from_flatty((seq[uint8], seq[IdMapping], string))
+    let (enc_source, mappings, body) = raw_msg.data[wire_header.len ..^ 1]
+      .from_flatty((seq[uint8], seq[IdMapping], string))
     var msg = body.ed_uncompress.from_flatty(Message, self)
     msg.source = enc_source
     msg.id_mappings = mappings
