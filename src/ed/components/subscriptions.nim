@@ -658,6 +658,13 @@ proc add_subscriber*(
       debug "not sending object because remote ctx already has it",
         from_ctx = self.id, to_ctx = sub.ctx_id, ed_id = id
 
+proc drain_unsubscribed*(self: EdContext): seq[string] =
+  ## The ctx ids of peers that unsubscribed (or died) since the last drain.
+  ## Accumulates until drained — consume with this, not by reading the field,
+  ## so no event is lost to tick timing.
+  result = self.unsubscribed
+  self.unsubscribed = @[]
+
 proc unsubscribe*(self: EdContext, sub: Subscription) =
   if sub.kind == REMOTE:
     self.reactor.disconnect(sub.connection)
@@ -1802,7 +1809,11 @@ proc tick*(
   self.tick_keepalives()
 
   var msg: Message
-  self.unsubscribed = @[]
+  # `unsubscribed` is NOT cleared here: it accumulates until the consumer
+  # drains it (see drain_unsubscribed). Clearing it per-tick made the events
+  # tick-scoped transients — a consumer that polls between ticks loses any
+  # event when an extra tick sneaks in between produce and consume (the enu
+  # agent-bot reap missed disconnects that landed during a reload this way).
   var count = 0
   self.free_refs
   self.prune_dead_proxies # clear backrefs of proxies ORC reclaimed
