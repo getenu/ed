@@ -84,7 +84,7 @@ proc connect*(self: EdClient) =
 proc connected*(self: EdClient): bool =
   not self.ctx.is_nil and self.ctx.connected
 
-proc ensure_connected*(self: EdClient) =
+proc online*(self: EdClient) =
   ## Reconnect if the link is down. Cheap when already connected.
   if not self.connected:
     self.connect
@@ -112,13 +112,41 @@ proc tick*(self: EdClient) =
   if get_mono_time() - self.last_attempt >= interval:
     self.connect
 
+template online*(self: EdClient, body: untyped): untyped =
+  ## Ensure the link is up, run `body`, then tick so its writes drain to
+  ## the peer. Evaluates to `body`'s value.
+  self.online
+  when typeof(block: body) is void:
+    body
+    self.tick
+  else:
+    let online_result = block: body
+    self.tick
+    online_result
+
+type SessionLost* = object of CatchableError
+  ## Raised by EdClient's waiting helpers (`every` / `animate` /
+  ## `tick_until`) when the live session they started with goes away
+  ## mid-wait: the link dropped, or a reconnect replaced the context —
+  ## stranding any handles the caller's loop body captured (each reconnect
+  ## mints a fresh context). A loop that starts *without* a live session
+  ## (waiting for the first connect) never raises.
+
 template every*(self: EdClient, interval: Duration, body: untyped) =
   ## Reconnect-aware `every`: ticks the client (re-subscribing if the link
   ## drops) instead of the bare context, every `interval`, until `break`.
+  ## Raises `SessionLost` if the session it started with goes away.
   block:
-    let interval_ms = max(0, interval.in_milliseconds.int)
+    let
+      interval_ms = max(0, interval.in_milliseconds.int)
+      session = self.ctx
+      had_session = self.connected
     while true:
       self.tick
+      if had_session and (self.ctx != session or not self.connected):
+        raise newException(
+          SessionLost, "the session this wait started with is gone"
+        )
       body
       sleep interval_ms
 
@@ -143,7 +171,8 @@ template animate*(self: EdClient, seconds: float, body: untyped) =
 
 template tick_until*(self: EdClient, timeout: Duration, cond: untyped): bool =
   ## Tick (reconnect-aware) every ~10ms until `cond` holds or `timeout`
-  ## elapses; returns whether it held.
+  ## elapses; returns whether it held. Raises `SessionLost` (via `every`)
+  ## if the session it started with goes away mid-wait.
   block:
     let deadline = get_mono_time() + timeout
     var met = false
