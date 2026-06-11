@@ -53,7 +53,6 @@ proc run*() =
     let client = EdClient(
       id: "test-agent",
       address: test_address,
-      chan_size: 100,
       on_connect: on_connect,
     )
 
@@ -100,7 +99,6 @@ proc run*() =
     let client = EdClient(
       id: "test-agent-restart",
       address: test_address,
-      chan_size: 100,
       on_connect: on_connect,
     )
     client.connect

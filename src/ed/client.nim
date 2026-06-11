@@ -34,7 +34,6 @@ type EdClient* = ref object
   ## reconnects so the peer can recognize and supersede the prior session.
   id*: string
   address*: string
-  chan_size*: int
   partial*: bool
     ## Subscribe as a partial replica: only the ids in `fetch` (and anything
     ## fetched later) sync; the rest is filtered at the authority.
@@ -67,8 +66,7 @@ proc connect*(self: EdClient) =
   self.last_attempt = get_mono_time()
   if not self.ctx.is_nil:
     self.ctx.close
-  let chan_size = if self.chan_size > 0: self.chan_size else: 100
-  self.ctx = EdContext.init(chan_size = chan_size, buffer = false, id = self.id)
+  self.ctx = EdContext.init(buffer = false, id = self.id)
   self.ctx.blocking = self.blocking
   Ed.thread_ctx = self.ctx
   try:
