@@ -5,9 +5,9 @@
 ## `connected` (subscribers present) becomes an authoritative liveness
 ## signal — no application-level ping needed.
 
-import std/[times, monotimes, os]
+import std/os
 
-import ed/[types, utils/misc, utils/logging]
+import ed/[types, utils/misc, utils/logging, utils/timing]
 import ed/zens/contexts
 import ed/components/subscriptions
 
@@ -27,7 +27,7 @@ template every*(ctx: EdContext, interval: Duration, body: untyped) =
       body
       sleep interval_ms
 
-const DEFAULT_RECONNECT_INTERVAL = init_duration(seconds = 1)
+const DEFAULT_RECONNECT_INTERVAL = 1.second
 
 type EdClient* = ref object
   ## A remote `EdContext` that reconnects itself. `id` is stable across
@@ -160,7 +160,7 @@ template every*(self: EdClient, interval: Duration, body: untyped) =
       body
       sleep interval_ms
 
-const FRAME = init_duration(milliseconds = 33)
+const FRAME = 33.milliseconds
 
 template animate*(self: EdClient, seconds: float, body: untyped) =
   ## Run `body` once per ~33ms frame for `seconds`, ticking each frame so
@@ -186,6 +186,9 @@ template tick_until*(self: EdClient, timeout: Duration, cond: untyped): bool =
   block:
     let deadline = get_mono_time() + timeout
     var met = false
+    # init_duration, not 10.milliseconds: template bodies resolve at the
+    # expansion site, where std/times' TimeInterval milliseconds may also
+    # be in scope.
     self.every(init_duration(milliseconds = 10)):
       if cond:
         met = true

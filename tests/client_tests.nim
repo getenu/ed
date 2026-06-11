@@ -1,5 +1,5 @@
 import test_util
-import std/[unittest, atomics, os, times, sets]
+import std/[unittest, atomics, os, sets]
 import ed
 import ed/types {.all.}
 
@@ -145,7 +145,7 @@ proc run*() =
     stop_server()
     var lost = false
     try:
-      discard client.tick_until(init_duration(seconds = 30), false)
+      discard client.tick_until(30.seconds, false)
     except SessionLost:
       lost = true
     check lost
@@ -155,7 +155,7 @@ proc run*() =
     start_server()
     defer:
       stop_server()
-    check client.tick_until(init_duration(seconds = 10), client.connected)
+    check client.tick_until(10.seconds, client.connected)
 
 when is_main_module:
   Ed.bootstrap

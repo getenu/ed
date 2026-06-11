@@ -1,2 +1,2 @@
-import utils/[typeids, logging, misc, stats]
-export typeids, logging, misc, stats
+import utils/[typeids, logging, misc, stats, timing]
+export typeids, logging, misc, stats, timing
