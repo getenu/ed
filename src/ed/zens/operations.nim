@@ -31,14 +31,36 @@ proc untrack*(ctx: EdContext, zid: EID) =
   else:
     debug "No close index entry for zid", zid = zid
 
+template touch_read(self: untyped) =
+  ## Coarse eviction touch: mark the body as recently used and reset its churn
+  ## counter. Every read accessor runs this (it precedes `touch_placeholder`),
+  ## so the evictor's LRU clock and "updates since read" both advance on real
+  ## use — and never on the hot voxel render path, which doesn't read through
+  ## these accessors. Only meaningful on a context with a memory limit.
+  if self.ctx != nil and self.ctx.has_budget:
+    self.body.last_read = get_mono_time()
+    self.body.updates = 0
+
+template touch_placeholder(self: untyped) =
+  ## Materialize-on-access: if `self` is an unmaterialized placeholder, ask its
+  ## context to materialize it (kick a fetch; block until filled when
+  ## `ctx.blocking`). No-op for a loaded object or a context without the hook.
+  ## LAZY containers are exempt: they're pull-only by design — entries arrive
+  ## per-key (`request`), so reading one must never materialize the whole table.
+  self.touch_read
+  if self.placeholder and LAZY notin self.flags and self.ctx.materialize != nil:
+    self.ctx.materialize(self.ctx, self.id)
+
 proc contains*[T, O](self: Ed[T, O], child: O): bool =
   privileged
   assert self.valid
+  self.touch_placeholder
   child in self.tracked
 
 proc contains*[K, V](self: EdTable[K, V], key: K): bool =
   privileged
   assert self.valid
+  self.touch_placeholder
   key in self.tracked
 
 proc contains*[T, O](self: Ed[T, O], children: set[O] | seq[O]): bool =
@@ -88,26 +110,6 @@ proc loaded*(self: ref EdBase): bool =
   ## holds the reference but not the contents yet). Lets a caller distinguish
   ## "exists but not loaded" from "exists and is genuinely empty".
   not self.placeholder
-
-template touch_read(self: untyped) =
-  ## Coarse eviction touch: mark the body as recently used and reset its churn
-  ## counter. Every read accessor runs this (it precedes `touch_placeholder`),
-  ## so the evictor's LRU clock and "updates since read" both advance on real
-  ## use — and never on the hot voxel render path, which doesn't read through
-  ## these accessors. Only meaningful on a context with a memory limit.
-  if self.ctx != nil and self.ctx.has_budget:
-    self.body.last_read = get_mono_time()
-    self.body.updates = 0
-
-template touch_placeholder(self: untyped) =
-  ## Materialize-on-access: if `self` is an unmaterialized placeholder, ask its
-  ## context to materialize it (kick a fetch; block until filled when
-  ## `ctx.blocking`). No-op for a loaded object or a context without the hook.
-  ## LAZY containers are exempt: they're pull-only by design — entries arrive
-  ## per-key (`request`), so reading one must never materialize the whole table.
-  self.touch_read
-  if self.placeholder and LAZY notin self.flags and self.ctx.materialize != nil:
-    self.ctx.materialize(self.ctx, self.id)
 
 proc value*[T, O](self: Ed[T, O]): T =
   ## Get the container's current value.
@@ -303,6 +305,7 @@ proc touch*[T](self: EdValue[T], value: T, op_ctx = OperationContext()) =
 proc len*(self: Ed): int =
   privileged
   assert self.valid
+  self.touch_placeholder
   self.tracked.len
 
 proc `+`*[O](self, other: EdSet[O]): set[O] =
