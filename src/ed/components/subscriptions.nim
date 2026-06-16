@@ -709,19 +709,21 @@ proc subscribe*(
     self: EdContext,
     ctx: EdContext,
     bidirectional = true,
-    partial = false,
+    mode = FULL,
     fetch: open_array[string] = [],
     deep = false,
     upstream = true,
 ) =
-  ## Subscribe to another local context for cross-thread sync. When `partial`,
-  ## we only receive the objects in `fetch` (and ids we `fetch` later) — the
-  ## authority→us direction is filtered; our own writes still flow to it. The
-  ## fetched ids land in the registry, so `ctx[id]` works for them afterwards.
-  ## `ctx` is recorded as our upstream (we're a clone of it — eviction notices
-  ## from it are honored); the internal reverse leg passes `upstream = false`
-  ## because receiving a client's own writes doesn't make it our data source.
+  ## Subscribe to another local context for cross-thread sync. When `mode` is
+  ## partial, we only receive the objects in `fetch` (and ids we `fetch` later)
+  ## — the authority→us direction is filtered; our own writes still flow to it.
+  ## The fetched ids land in the registry, so `ctx[id]` works for them
+  ## afterwards. `ctx` is recorded as our upstream (we're a clone of it —
+  ## eviction notices from it are honored); the internal reverse leg passes
+  ## `upstream = false` because receiving a client's own writes doesn't make
+  ## it our data source.
   privileged
+  let partial = mode != FULL
   debug "local subscribe", ctx = self.id
   self.materialize = materialize_impl # enable materialize-on-access
   if upstream:
@@ -1018,17 +1020,21 @@ proc subscribe*(
     self: EdContext,
     address: string,
     bidirectional = true,
-    partial = false,
+    mode = FULL,
     fetch: open_array[string] = [],
     deep = false,
     callback: proc() {.gcsafe.} = nil,
 ) =
   ## Subscribe to a remote context for network sync. Address format: "host" or
-  ## "host:port". When `partial`, the authority only sends the objects in `fetch`
-  ## (and ids fetched later); the reference graph + materialize-on-access pull the
-  ## rest. Mirrors the local `subscribe(partial = ..., fetch = ...)`.
+  ## "host:port". When `mode` is partial, the authority only sends the objects
+  ## in `fetch` (and ids fetched later); the reference graph + materialize-on-
+  ## access pull the rest. Mirrors the local `subscribe(mode = ..., fetch =
+  ## ...)`. Blocking semantics (PARTIAL vs PARTIAL_ASYNC) are a property of the
+  ## context (`self.blocking`), set by the caller — the handshake only carries
+  ## the partial filter.
   var address = address
   var port = 9632
+  let partial = mode != FULL
 
   debug "remote subscribe", address
   self.materialize = materialize_impl # enable materialize-on-access

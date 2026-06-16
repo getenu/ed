@@ -39,7 +39,7 @@ proc run*() =
       units.add u
 
       client.subscribe(
-        authority, partial = true, fetch = ["lzf_units"], deep = true
+        authority, mode = PARTIAL_ASYNC, fetch = ["lzf_units"], deep = true
       )
       client.tick()
 
@@ -66,7 +66,7 @@ proc run*() =
       var y = EdSeq[int].init(ctx = authority, id = "pd_y") # never fetched
       y.add 1
 
-      client.subscribe(authority, partial = true, fetch = ["pd_x"])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["pd_x"])
       client.tick()
       check "pd_x" in client
 
@@ -151,7 +151,7 @@ proc run*() =
       # The subscribe pushes u1's closure ahead of the collection: the client's
       # parse links the member's fields to real containers - no husks.
       client.subscribe(
-        authority, partial = true, fetch = ["omp_units"], deep = true
+        authority, mode = PARTIAL_ASYNC, fetch = ["omp_units"], deep = true
       )
       client.tick()
       check "omp_u1_items" in client
@@ -191,7 +191,7 @@ proc run*() =
 
       # Narrow subscriber (an enu_mcp-style utility): the directory arrives,
       # the members' closures don't.
-      client.subscribe(authority, partial = true, fetch = ["omd_units"])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["omd_units"])
       client.tick()
       check "omd_units" in client
       # The member's container arrives only as a placeholder stand-in (the
@@ -213,7 +213,7 @@ proc run*() =
       y.value = 2
 
       # Interested only in obj_x.
-      client.subscribe(authority, partial = true, fetch = ["obj_x"])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["obj_x"])
       client.tick()
 
       check "obj_x" in client # pushed (in interest)
@@ -236,7 +236,7 @@ proc run*() =
       x.value = 1
       y.value = 2
 
-      client.subscribe(authority, partial = true, fetch = ["f_x"])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["f_x"])
       client.tick()
       check "f_y" notin client
 
@@ -257,7 +257,7 @@ proc run*() =
       var client = EdContext.init(id = "fh_client")
       var x = EdValue[int].init(ctx = authority, id = "fh_x")
       x.value = 4
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
 
       let handle = client.fetch("fh_x")
@@ -270,7 +270,7 @@ proc run*() =
     test "fetching a missing id resolves NotFound (authority NACK)":
       var authority = EdContext.init(id = "nf_auth", is_authority = true)
       var client = EdContext.init(id = "nf_client")
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
 
       let handle = client.fetch("does_not_exist")
@@ -283,7 +283,7 @@ proc run*() =
     test "follow (default): a missing fetch is delivered when created later":
       var authority = EdContext.init(id = "fl_auth", is_authority = true)
       var client = EdContext.init(id = "fl_client")
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
 
       let handle = client.fetch("late_obj")
@@ -302,7 +302,7 @@ proc run*() =
       var client = EdContext.init(id = "bk_client")
       var x = EdValue[int].init(ctx = authority, id = "bk_x")
       x.value = 7
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
       check "bk_x" notin client
 
@@ -332,9 +332,9 @@ proc run*() =
       var c = EdContext.init(id = "ch_leaf")
       var x = EdValue[int].init(ctx = a, id = "ch_x")
       x.value = 11
-      b.subscribe(a, partial = true, fetch = [])
+      b.subscribe(a, mode = PARTIAL_ASYNC, fetch = [])
       b.tick()
-      c.subscribe(b, partial = true, fetch = [])
+      c.subscribe(b, mode = PARTIAL_ASYNC, fetch = [])
       c.tick()
       check "ch_x" notin b # the hub doesn't have it either
 
@@ -351,9 +351,9 @@ proc run*() =
       var a = EdContext.init(id = "chn_auth", is_authority = true)
       var b = EdContext.init(id = "chn_hub")
       var c = EdContext.init(id = "chn_leaf")
-      b.subscribe(a, partial = true, fetch = [])
+      b.subscribe(a, mode = PARTIAL_ASYNC, fetch = [])
       b.tick()
-      c.subscribe(b, partial = true, fetch = [])
+      c.subscribe(b, mode = PARTIAL_ASYNC, fetch = [])
       c.tick()
 
       let handle = c.fetch("chn_missing")
@@ -374,9 +374,9 @@ proc run*() =
       # for it (the voxel topology: worker holds the table unloaded).
       var pointer_value = EdValue[string].init(ctx = a, id = "chk_ptr")
       parent += pointer_value
-      b.subscribe(a, partial = true, fetch = ["chk_parent", "chk_tbl_ph"])
+      b.subscribe(a, mode = PARTIAL_ASYNC, fetch = ["chk_parent", "chk_tbl_ph"])
       b.tick()
-      c.subscribe(b, partial = true, fetch = ["chk_parent"])
+      c.subscribe(b, mode = PARTIAL_ASYNC, fetch = ["chk_parent"])
       c.tick()
 
       # Mint the placeholder relationship directly: leaf + hub hold the table
@@ -414,7 +414,7 @@ proc run*() =
         )
       EdTable[int, string](authority["lz_big"])[1] = "huge"
 
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
       discard client.fetch("lz_owner", deep = true)
       authority.tick()
@@ -444,7 +444,7 @@ proc run*() =
         )
       tbl[1] = "one"
 
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
       discard client.fetch("ki_owner", deep = true) # handle rides the closure
       authority.tick()
@@ -497,7 +497,7 @@ proc run*() =
         )
       tbl[1] = "one"
 
-      pager.subscribe(authority, partial = true, fetch = [])
+      pager.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       pager.tick()
       clone.subscribe(pager) # full clone of the partial pager (a node ctx)
       clone.tick()
@@ -556,7 +556,7 @@ proc run*() =
       tbl[1] = 'x'.repeat(200)
       tbl[2] = 'y'.repeat(200)
 
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
       discard client.fetch("pk_owner", deep = true) # the LAZY handle rides in
       authority.tick()
@@ -590,9 +590,9 @@ proc run*() =
       discard EdValue[string].init(ctx = authority, id = "it_x")
       EdValue[string](authority["it_x"]).value = 'z'.repeat(400)
 
-      hub.subscribe(authority, partial = true, fetch = [])
+      hub.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       hub.tick()
-      leaf.subscribe(hub, partial = true, fetch = [])
+      leaf.subscribe(hub, mode = PARTIAL_ASYNC, fetch = [])
       leaf.tick()
 
       # L fetches X live (chains L→H→A); H holds it because L is live on it.
@@ -638,7 +638,7 @@ proc run*() =
       discard EdValue[string].init(ctx = authority, id = "ub_x")
       EdValue[string](authority["ub_x"]).value = "hi"
 
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
       var f = client.fetch("ub_x")
       authority.tick()
@@ -661,7 +661,7 @@ proc run*() =
       discard EdValue[string].init(ctx = authority, id = "nc_x")
       EdValue[string](authority["nc_x"]).value = "hi"
 
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
       var f = client.fetch("nc_x")
       authority.tick()
@@ -688,7 +688,7 @@ proc run*() =
       EdValue[string](authority["ev_2"]).value = 'b'.repeat(100)
       EdValue[string](authority["ev_3"]).value = 'c'.repeat(100)
 
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
       # Fetch all three. On a leaf (no downstream), an object with no live
       # proxy is an eviction candidate regardless of our own upstream interest
@@ -737,9 +737,9 @@ proc run*() =
       tbl[2] = 'b'.repeat(200)
       tbl[3] = 'c'.repeat(200)
 
-      hub.subscribe(authority, partial = true, fetch = [])
+      hub.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       hub.tick()
-      leaf.subscribe(hub, partial = true, fetch = [])
+      leaf.subscribe(hub, mode = PARTIAL_ASYNC, fetch = [])
       leaf.tick()
       # Both pull the owner's closure (the LAZY table arrives as a handle).
       discard hub.fetch("ck_owner", deep = true)
@@ -798,7 +798,7 @@ proc run*() =
         )
       tbl[1] = "one"
 
-      hub.subscribe(authority, partial = true, fetch = [])
+      hub.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       hub.tick()
       leaf.subscribe(hub) # full clone of the partial hub
       leaf.tick()
@@ -861,7 +861,7 @@ proc run*() =
       entry.add 7
       tbl[1] = entry
 
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
       discard client.fetch("nb_owner", deep = true)
       authority.tick()
@@ -906,7 +906,7 @@ proc run*() =
       )
       tbl[1] = "one"
 
-      hub.subscribe(authority, partial = true, fetch = [])
+      hub.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       hub.tick()
       leaf.subscribe(hub)
       leaf.tick()
@@ -935,7 +935,7 @@ proc run*() =
         tbl = EdTable[int, EdSeq[int]].init(
           ctx = authority, id = "kd_tbl", flags = DEFAULT_FLAGS + {LAZY}
         )
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
       discard client.fetch("kd_owner", deep = true) # LAZY handle rides the closure
       authority.tick()
@@ -968,7 +968,7 @@ proc run*() =
         bot.val = EdValue[int].init(ctx = authority, id = "d_val")
       bot.items.add 3
 
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
       check "d_items" notin client # out of interest
       check "d_val" notin client
@@ -992,7 +992,7 @@ proc run*() =
     test "objects created after subscribe respect partial interest":
       var authority = EdContext.init(id = "pc_auth", is_authority = true)
       var client = EdContext.init(id = "pc_client")
-      client.subscribe(authority, partial = true, fetch = ["pc_root"])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["pc_root"])
       client.tick()
 
       # Created after the subscribe — the broadcast CREATE must still be filtered.
@@ -1005,7 +1005,7 @@ proc run*() =
     test "a partial client's own object syncs back from the authority":
       var authority = EdContext.init(id = "po_auth", is_authority = true)
       var client = EdContext.init(id = "po_client")
-      client.subscribe(authority, partial = true, fetch = [])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
 
       # Client creates its own object; the authority should pick it up and

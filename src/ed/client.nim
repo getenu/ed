@@ -9,6 +9,7 @@ import std/os
 
 import ed/[types, utils/misc, utils/logging, utils/timing]
 import ed/zens/contexts
+import ed/zens/initializers
 import ed/components/subscriptions
 
 proc connected*(self: EdContext): bool =
@@ -34,9 +35,11 @@ type EdClient* = ref object
   ## reconnects so the peer can recognize and supersede the prior session.
   id*: string
   address*: string
-  partial*: bool
-    ## Subscribe as a partial replica: only the ids in `fetch` (and anything
-    ## fetched later) sync; the rest is filtered at the authority.
+  mode*: SyncMode
+    ## How this client replicates: FULL (everything), PARTIAL (on-demand,
+    ## blocking reads) or PARTIAL_ASYNC (on-demand, frame-paced). Drives both
+    ## the subscribe filter and the context's blocking flag, so the
+    ## full-but-blocking nonsense can't be configured.
   fetch*: seq[string]
     ## Ids fetched as part of each (re)subscribe (partial only). They land in
     ## the registry, so `ctx[id]` works for them afterwards.
@@ -47,11 +50,6 @@ type EdClient* = ref object
     ## (Re)create this client's objects after each (re)connect. Runs with
     ## `Ed.thread_ctx` set to the fresh context. Single-threaded — runs on
     ## the caller's thread, so it may touch the caller's globals.
-  blocking*: bool
-    ## Applied to each (re)created context: touching an unmaterialized
-    ## placeholder — by read or local write — pumps I/O until it fills.
-    ## Synchronous semantics for CLIs and narrow agents; leave off for
-    ## anything frame-paced.
   ctx*: EdContext
   prev*: EdContext
     ## The session before the current one (one generation only). Each
@@ -64,26 +62,39 @@ type EdClient* = ref object
     ## prevent any handshake from completing; the gap lets one settle.
   last_attempt: MonoTime
 
-proc connect*(self: EdClient) =
+proc reconnect*(self: EdClient): EdClient {.discardable.} =
   ## (Re)create the context with the stable `id`, subscribe to `address`,
   ## and run `on_connect`. Resilient: if the peer is unreachable the new
-  ## context simply has no subscribers, so a later `tick` retries.
+  ## context simply has no subscribers, so a later `tick` retries. Returns
+  ## `self` so it can be chained (`EdClient(...).reconnect`).
+  ##
+  ## Assumes the Ed runtime is already bootstrapped — use `connect` for the
+  ## initial connection (it bootstraps first). This is the bootstrap-free
+  ## routine the reconnect paths (`tick`/`online`) drive; call it directly
+  ## only where `connect`'s `Ed.bootstrap` can't expand (e.g. inside another
+  ## template), after bootstrapping at top level yourself.
   ##
   ## The context is NOT reused across reconnects (tried; doesn't work):
   ## an existing object's CREATE never re-broadcasts, so a restarted peer
   ## would never learn about this client's objects — they'd survive
   ## locally as ghosts whose ops the peer skips. Same-session resync is
   ## the body-persistence/revive work, not a client-side trick.
+  result = self
+  # Mint a stable id on first use if the caller didn't supply one, so it
+  # survives reconnects (the peer recognizes and supersedes the prior
+  # session by id).
+  if self.id == "":
+    self.id = generate_id()
   self.last_attempt = get_mono_time()
   if not self.ctx.is_nil:
     self.ctx.close
     self.prev = self.ctx
   self.ctx = EdContext.init(buffer = false, id = self.id)
-  self.ctx.blocking = self.blocking
+  self.ctx.blocking = self.mode == PARTIAL
   Ed.thread_ctx = self.ctx
   try:
     self.ctx.subscribe(
-      self.address, partial = self.partial, fetch = self.fetch, deep = self.deep
+      self.address, mode = self.mode, fetch = self.fetch, deep = self.deep
     )
     if self.on_connect != nil:
       self.on_connect()
@@ -91,13 +102,35 @@ proc connect*(self: EdClient) =
     debug "EdClient connect failed; will retry",
       address = self.address, msg = e.msg
 
+template connect*(self: EdClient) =
+  ## Bootstrap the Ed runtime, then connect. Call once from your application's
+  ## main module — `Ed.bootstrap` + `reconnect` in one step, so the app never
+  ## names `bootstrap` itself.
+  ##
+  ## `Ed.bootstrap` is a macro that registers an initializer for every
+  ## `Ed[T, O]` the program has instantiated, and only yields the complete
+  ## set when expanded in the final module after every type-instantiating
+  ## import. `connect` is a template so the macro expands at YOUR call site,
+  ## where the full set is known. The registry is a process-wide runtime
+  ## table, so it lands once; the reconnects `tick`/`online` drive go through
+  ## the bootstrap-free `reconnect` and reuse it.
+  ##
+  ## Caveat: `Ed.bootstrap`'s generated code only compiles at module top
+  ## level or inside a plain proc — not inside another template's expansion
+  ## (e.g. a `unittest` `test` block). In those spots bootstrap once at top
+  ## level and call `reconnect` instead.
+  ##
+  ## Returns the client, so it can be chained: `let c = EdClient(...).connect`.
+  Ed.bootstrap
+  self.reconnect
+
 proc connected*(self: EdClient): bool =
   not self.ctx.is_nil and self.ctx.connected
 
 proc online*(self: EdClient) =
   ## Reconnect if the link is down. Cheap when already connected.
   if not self.connected:
-    self.connect
+    self.reconnect
 
 proc tick*(self: EdClient) =
   ## Tick the context, reconnecting if it has dropped. Call on a timer to
@@ -106,13 +139,13 @@ proc tick*(self: EdClient) =
   ## re-subscribe once per `reconnect_interval` — re-subscribing every tick
   ## would restart the handshake before it finishes and spin the CPU.
   if self.ctx.is_nil:
-    self.connect
+    self.reconnect
     return
   try:
     self.ctx.tick
   except CatchableError as e:
     debug "EdClient tick raised; reconnecting", msg = e.msg
-    self.connect
+    self.reconnect
     return
   if self.ctx.connected:
     return
@@ -120,7 +153,7 @@ proc tick*(self: EdClient) =
     if self.reconnect_interval > DurationZero: self.reconnect_interval
     else: DEFAULT_RECONNECT_INTERVAL
   if get_mono_time() - self.last_attempt >= interval:
-    self.connect
+    self.reconnect
 
 template online*(self: EdClient, body: untyped): untyped =
   ## Ensure the link is up, run `body`, then tick so its writes drain to
@@ -162,18 +195,18 @@ template every*(self: EdClient, interval: Duration, body: untyped) =
 
 const FRAME = 33.milliseconds
 
-template animate*(self: EdClient, seconds: float, body: untyped) =
-  ## Run `body` once per ~33ms frame for `seconds`, ticking each frame so
-  ## changes sync. Injects `t` in 0..1 (1.0 on the final frame); a final
-  ## tick flushes the last frame.
+template animate*(self: EdClient, duration: Duration, body: untyped) =
+  ## Run `body` once per ~33ms frame for `duration`, ticking each frame so
+  ## changes sync. Injects `t` (float) in 0..1 (1.0 on the final frame); a
+  ## final tick flushes the last frame.
   block:
     let
-      frame_sec = FRAME.in_milliseconds.float / 1000.0
-      total = max(seconds, frame_sec)
+      frame_ms = FRAME.in_milliseconds.float
+      total_ms = max(duration.in_milliseconds.float, frame_ms)
     var elapsed = 0.0
     self.every(FRAME):
-      elapsed += frame_sec
-      let t {.inject.} = min(elapsed / total, 1.0)
+      elapsed += frame_ms
+      let t {.inject.} = min(elapsed / total_ms, 1.0)
       body
       if t >= 1.0:
         self.tick

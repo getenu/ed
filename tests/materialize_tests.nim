@@ -34,7 +34,7 @@ proc run*() =
       var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
 
       # Client is interested only in the parent, not its children.
-      client.subscribe(authority, partial = true, fetch = ["parent"])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent"])
       client.tick()
       check "parent" in client
 
@@ -62,7 +62,7 @@ proc run*() =
       var authority = EdContext.init(id = "ma_auth", is_authority = true)
       var client = EdContext.init(id = "ma_client")
       var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
-      client.subscribe(authority, partial = true, fetch = ["parent"])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent"])
       client.tick()
 
       var child = EdValue[string].init(ctx = authority, id = "child")
@@ -83,7 +83,7 @@ proc run*() =
       var authority = EdContext.init(id = "mf_auth", is_authority = true)
       var client = EdContext.init(id = "mf_client")
       var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
-      client.subscribe(authority, partial = true, fetch = ["parent"])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent"])
       client.tick()
       var child = EdValue[string].init(ctx = authority, id = "child")
       child.value = "hi"
@@ -108,7 +108,7 @@ proc run*() =
       var client = EdContext.init(id = "ms_client")
       var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
       var other = EdValue[int].init(ctx = authority, id = "other")
-      client.subscribe(authority, partial = true, fetch = ["parent", "other"])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent", "other"])
       client.tick()
 
       var child = EdValue[string].init(ctx = authority, id = "child")
@@ -162,7 +162,7 @@ proc run*() =
 
       var client = EdContext.init(id = "rmat-client")
       # Partial subscribe over the network: interested only in the parent.
-      client.subscribe(address, partial = true, fetch = ["parent"])
+      client.subscribe(address, mode = PARTIAL_ASYNC, fetch = ["parent"])
 
       # The pre-populated parent arrives; its out-of-interest child is a
       # placeholder (created in from_flatty). Wait briefly for it (UDP).
@@ -196,7 +196,7 @@ proc run*() =
       child[3] = "three"
       parent += child
 
-      client.subscribe(authority, partial = true, fetch = ["parent"])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent"])
       client.tick()
       let table = EdTable[int, string](client["child"])
       check "child" in client
@@ -259,7 +259,7 @@ proc run*() =
       var child = EdValue[string].init(ctx = authority, id = "child")
       child.value = "old"
       parent += child
-      client.subscribe(authority, partial = true, fetch = ["parent"])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent"])
       client.tick()
       check not client["child"].loaded
 
@@ -286,7 +286,7 @@ proc run*() =
       var child = EdSet[char].init(ctx = authority, id = "child")
       child += 'a'
       parent += child
-      client.subscribe(authority, partial = true, fetch = ["parent"])
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent"])
       client.tick()
       check not client["child"].loaded
 

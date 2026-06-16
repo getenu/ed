@@ -57,7 +57,7 @@ proc run*() =
     )
 
     check not client.connected
-    client.connect
+    client.reconnect
     check client.connected
     check setups == 1
 
@@ -85,7 +85,7 @@ proc run*() =
 
     # An explicit reconnect rebuilds the context under the same id and
     # reruns on_connect; the server's stale-sub sweep accepts it.
-    client.connect
+    client.reconnect
     check client.connected
     check setups == 2
 
@@ -101,7 +101,7 @@ proc run*() =
       address: test_address,
       on_connect: on_connect,
     )
-    client.connect
+    client.reconnect
     check client.connected
     check setups == 1
 
@@ -136,7 +136,7 @@ proc run*() =
     setups = 0
     start_server()
     let client = EdClient(id: "test-agent-sl", address: test_address)
-    client.connect
+    client.reconnect
     check client.connected
 
     # The peer dies mid-wait. tick_until's ticking reaps the dead

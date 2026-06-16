@@ -8,6 +8,17 @@ type
   EID* = uint16
     ## Callback identifier for tracking registered callbacks.
 
+  SyncMode* = enum
+    ## How a context replicates its authority. Replaces the old
+    ## `partial`/`blocking` pair so the nonsensical combination (a full
+    ## replica that blocks waiting to materialize — it never needs to, it
+    ## has everything) can't be expressed.
+    FULL          ## full replica; everything syncs, reads never block.
+    PARTIAL       ## partial replica, blocking: touching an unmaterialized
+                  ## id pumps I/O until it fills (synchronous semantics).
+    PARTIAL_ASYNC ## partial replica, non-blocking: a touch returns a
+                  ## placeholder that fills on a later tick (frame-paced).
+
   Lifetime* = ref object
     ## Owns a set of teardown actions (typically untracking callbacks). An owner
     ## — a Unit, a scope, and eventually an object proxy — holds a Lifetime and
