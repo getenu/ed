@@ -1238,7 +1238,9 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         return
 
     {.gcsafe.}:
-      let fn = type_initializers[msg.type_id]
+      # Stored as a raw pointer (see initializers.register_initializer); cast
+      # back to the materializer proc type to call it.
+      let fn = cast[CreateInitializer](type_initializers[msg.type_id])
       # Synced ownership: materialize INSIDE the owner's scope, not after — the
       # initializer (`defaults`) re-broadcasts the CREATE to our own subscribers
       # while it runs (a relay: e.g. worker -> node ctx for an object an MCP

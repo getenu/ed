@@ -68,11 +68,10 @@ proc reconnect*(self: EdClient): EdClient {.discardable.} =
   ## context simply has no subscribers, so a later `tick` retries. Returns
   ## `self` so it can be chained (`EdClient(...).reconnect`).
   ##
-  ## Assumes the Ed runtime is already bootstrapped — use `connect` for the
-  ## initial connection (it bootstraps first). This is the bootstrap-free
-  ## routine the reconnect paths (`tick`/`online`) drive; call it directly
-  ## only where `connect`'s `Ed.bootstrap` can't expand (e.g. inside another
-  ## template), after bootstrapping at top level yourself.
+  ## `connect` is an alias; both are plain procs callable anywhere (including
+  ## inside a `unittest` `test` block). Type initializers self-register at
+  ## program startup (see `create_initializer`), so there's no bootstrap step.
+  ## The reconnect paths (`tick`/`online`) drive this.
   ##
   ## The context is NOT reused across reconnects (tried; doesn't work):
   ## an existing object's CREATE never re-broadcasts, so a restarted peer
@@ -103,25 +102,21 @@ proc reconnect*(self: EdClient): EdClient {.discardable.} =
       address = self.address, msg = e.msg
 
 template connect*(self: EdClient) =
-  ## Bootstrap the Ed runtime, then connect. Call once from your application's
-  ## main module — `Ed.bootstrap` + `reconnect` in one step, so the app never
-  ## names `bootstrap` itself.
+  ## Bootstrap the Ed runtime, then connect — `Ed.bootstrap` + `reconnect` in
+  ## one step, so apps never name `bootstrap`. Returns the client, chainable:
+  ## `let c = EdClient(...).connect`.
   ##
-  ## `Ed.bootstrap` is a macro that registers an initializer for every
-  ## `Ed[T, O]` the program has instantiated, and only yields the complete
-  ## set when expanded in the final module after every type-instantiating
-  ## import. `connect` is a template so the macro expands at YOUR call site,
-  ## where the full set is known. The registry is a process-wide runtime
-  ## table, so it lands once; the reconnects `tick`/`online` drive go through
-  ## the bootstrap-free `reconnect` and reuse it.
+  ## `Ed.bootstrap` is a macro emitting one registration per `Ed[T,O]` the
+  ## program has instantiated; `connect` is a template so it expands at YOUR
+  ## call site, picking up everything instantiated by then (so call it after
+  ## your imports). The registrations are trivial calls referencing named
+  ## procs, so — unlike before — this expands cleanly inside a `unittest test`
+  ## block. `tick`/`online` reconnect through the bootstrap-free `reconnect`.
   ##
-  ## Caveat: `Ed.bootstrap`'s generated code only compiles at module top
-  ## level or inside a plain proc — not inside another template's expansion
-  ## (e.g. a `unittest` `test` block). In those spots bootstrap once at top
-  ## level and call `reconnect` instead.
-  ##
-  ## Returns the client, so it can be chained: `let c = EdClient(...).connect`.
-  Ed.bootstrap
+  ## `-d:ed_disable_auto_bootstrap` makes this skip `Ed.bootstrap`; call
+  ## `Ed.bootstrap` yourself once, wherever it fits, independent of connect.
+  when not defined(ed_disable_auto_bootstrap):
+    Ed.bootstrap
   self.reconnect
 
 proc connected*(self: EdClient): bool =

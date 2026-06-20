@@ -200,7 +200,11 @@ type
     id: string,
     flags: set[EdFlags],
     op_ctx: OperationContext,
-  )
+  ) {.nimcall.}
+    ## Materializer for a received object of one container type. Stored in
+    ## `type_initializers` as a raw `pointer` (so registration can launder the
+    ## proc reference past gcsafe inference) and cast back to this type at the
+    ## `subscribe` call site. `nimcall`, so the pointer round-trips cleanly.
 
   Change*[O] = ref object of BaseChange
     ## Represents a change to an `Ed` container, including the affected item.
