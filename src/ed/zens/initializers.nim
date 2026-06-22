@@ -100,9 +100,18 @@ proc defaults[T, O](
     id: string,
     op_ctx: OperationContext,
     broadcast = true,
+    flags = DEFAULT_FLAGS,
+    placeholder = false,
 ): Ed[T, O] =
   privileged
   log_defaults
+
+  # The proxy/body split: the body carries the data + sync state; field access
+  # on the proxy forwards to it (types.nim templates). Minted here — before
+  # anything reads a forwarded field — since object construction can no longer
+  # set what are now body fields.
+  let body = EdBody[T, O](flags: flags, placeholder: placeholder)
+  self.body = body
 
   create_initializer(self)
 
@@ -123,7 +132,44 @@ proc defaults[T, O](
 
   if self.id in ctx.objects and not ?ctx.objects[self.id]:
     ctx.pack_objects
-  ctx.objects[self.id] = self
+  # The registry owns the body; the proxy is reachable through the backref +
+  # mint (resolve_proxy). `ctx_uid` by value so the handle's destructor never
+  # dereferences the context.
+  ctx.objects[self.id] = body
+  let ctx_uid = ctx.uid
+  body.mint = proc(): ref EdBase {.gcsafe.} =
+    let proxy = Ed[T, O](body: body)
+    inc body.proxy_gen
+    proxy.proxy_handle = ProxyHandle(
+      ctx_uid: ctx_uid, object_id: body.id, gen: body.proxy_gen
+    )
+    body.proxy = proxy
+    proxy
+  body.untrack_zid = proc(zid: EID) {.gcsafe.} =
+    # Context-level untrack: only meaningful while a proxy is live — a dead
+    # proxy's callbacks died with it. Prune first so the backref read is safe.
+    if body.ctx != nil:
+      body.ctx.prune_dead_proxies
+    if zid in body.changed_callbacks:
+      # Mirrors proxy-level `untrack` (defined downstream in subscriptions —
+      # not importable here): CLOSED notification, then drop the callback.
+      # `it` is the live proxy or nil — callbacks are body-side now.
+      let callback = body.changed_callbacks[zid]
+      if zid notin body.paused_eids:
+        callback(@[Change.init(O, {CLOSED})], body.proxy)
+      body.changed_callbacks.del(zid)
+      body.callback_gens.del(zid)
+  body.sweep_gen = proc(gen: int): seq[EID] {.gcsafe.} =
+    for zid, g in tables.pairs(body.callback_gens):
+      if g == gen:
+        result.add zid
+    for zid in result:
+      body.changed_callbacks.del(zid)
+      body.callback_gens.del(zid)
+  body.proxy_gen = 1
+  body.proxy = self
+  self.proxy_handle =
+    ProxyHandle(ctx_uid: ctx_uid, object_id: self.id, gen: 1)
 
   # If created inside an `own` scope, record the owner: bake its id into the
   # container and index it, so the owner's `destroy_owned` can tear this down in
@@ -134,7 +180,7 @@ proc defaults[T, O](
       self.owner_id = current_owner_id
       ctx.owned_by.mgetOrPut(current_owner_id, initHashSet[string]()).incl(self.id)
 
-  self.publish_create = proc(
+  self.body.publish_create = proc(
       sub: Subscription,
       broadcast: bool,
       op_ctx = OperationContext(),
@@ -147,13 +193,13 @@ proc defaults[T, O](
       # `contents = false` sends a handle: an empty-body CREATE (id + flags,
       # no data). Used to push LAZY containers to partial subscribers — the
       # receiver registers a placeholder and pulls entries per-key.
-      let bin = if contents: self.tracked.to_flatty else: ""
-    let id = self.id
-    let owner_id = self.owner_id
-    let flags = self.flags
+      let bin = if contents: body.tracked.to_flatty else: ""
+    let id = body.id
+    let owner_id = body.owner_id
+    let flags = body.flags
 
     template send_msg(src_ctx, sub) =
-      const ed_type_id = self.type.tid
+      const ed_type_id = Ed[T, O].tid
 
       # Capability filter: don't send an object to a peer that can't materialize
       # its type. Empty `capabilities` = unfiltered (same-build / no handshake).
@@ -172,7 +218,7 @@ proc defaults[T, O](
           msg.trace = get_stack_trace()
 
         src_ctx.send(
-          sub, msg, op_ctx, flags = self.flags & {SYNC_ALL_NO_OVERWRITE}
+          sub, msg, op_ctx, flags = body.flags & {SYNC_ALL_NO_OVERWRITE}
         )
 
     if sub.kind != BLANK:
@@ -184,8 +230,8 @@ proc defaults[T, O](
           ctx.send_msg(sub)
     ctx.tick_reactor
 
-  self.build_message = proc(
-      self: ref EdBase, change: BaseChange, id, trace: string
+  self.body.build_message = proc(
+      body: ref EdBodyBase, change: BaseChange, id, trace: string
   ): Message =
     var msg = Message(object_id: id, type_id: Ed[T, O].tid)
     # Collections (change object O differs from tracked T) are delta /
@@ -237,11 +283,13 @@ proc defaults[T, O](
         fail "Can't build message for changes " & $change.changes
     result = msg
 
-  self.change_receiver = proc(
-      self: ref EdBase, msg: Message, op_ctx: OperationContext
+  self.body.change_receiver = proc(
+      body: ref EdBodyBase, msg: Message, op_ctx: OperationContext
   ) =
-    assert self of Ed[T, O]
-    let self = Ed[T, O](self)
+    # Resolve (minting if none is live) the typed proxy: assign/unassign and
+    # callback triggering run through it. A fresh mint simply has no app
+    # callbacks to fire.
+    let self = Ed[T, O](body.ctx.resolve_proxy(body))
 
     if msg.kind == DESTROY:
       self.destroy
@@ -254,7 +302,7 @@ proc defaults[T, O](
         # placeholder so the container op applies and cardinality is correct.
         # Reading the placeholder later triggers a fetch (materialize-on-access).
         discard O.init_placeholder(self.ctx, object_id)
-      let item = O(self.ctx.objects[object_id])
+      let item = O(self.ctx.resolve_proxy(self.ctx.objects[object_id]))
     elif O is Pair[auto, Ed]:
       # Workaround for compile issue. This should be `O`, not `O.default.type`.
       type K = generic_params(O.default.type).get(0)
@@ -273,7 +321,7 @@ proc defaults[T, O](
           return
         # Value object not materialized yet — placeholder it (see above).
         discard V.init_placeholder(self.ctx, msg.change_object_id)
-      let value = V(self.ctx.objects[msg.change_object_id])
+      let value = V(self.ctx.resolve_proxy(self.ctx.objects[msg.change_object_id]))
       {.gcsafe.}:
         let item = O(key: msg.obj.from_flatty(K, self.ctx), value: value)
     else:
@@ -311,8 +359,8 @@ proc defaults[T, O](
     else:
       fail "Can't handle message " & $msg.kind
 
-  self.publish_key = proc(
-      self: ref EdBase, key_bin: string
+  self.body.publish_key = proc(
+      body: ref EdBodyBase, key_bin: string
   ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.} =
     # Per-key fetch: build the ADD op for one entry so a partial subscriber can
     # pull it without the whole table. `nested` carries the ids of Ed
@@ -320,7 +368,7 @@ proc defaults[T, O](
     # publish them ahead of the entry — per-key deep. Only meaningful for
     # table containers.
     when O is Pair:
-      let self = Ed[T, O](self)
+      let self = Ed[T, O](body.ctx.resolve_proxy(body))
       type K = generic_params(O.default.type).get(0)
       {.gcsafe.}:
         let key = key_bin.from_flatty(K, self.ctx)
@@ -345,15 +393,15 @@ proc defaults[T, O](
     else:
       discard
 
-  self.evict_key = proc(
-      self: ref EdBase, key_bin: string
+  self.body.evict_key = proc(
+      body: ref EdBodyBase, key_bin: string
   ): tuple[found: bool, nested: seq[string]] {.gcsafe.} =
     # Per-key eviction: drop the entry locally (REMOVED callbacks fire so
     # watchers un-render; nothing publishes — the authority keeps the data) and
     # report nested Ed containers so the caller can shed them. The local half
     # of `release` and the receiving half of an eviction notice.
     when O is Pair:
-      let self = Ed[T, O](self)
+      let self = Ed[T, O](body.ctx.resolve_proxy(body))
       type K = generic_params(O.default.type).get(0)
       {.gcsafe.}:
         let key = key_bin.from_flatty(K, self.ctx)
@@ -389,8 +437,8 @@ proc init_placeholder*[T, O](
   ## `ctx.objects` under `id` and marked `placeholder`; no CREATE goes out.
   ## Reading it triggers a fetch; the real state fills it in later.
   # `op_ctx` is only consulted by defaults' broadcast, which we skip.
-  result = Ed[T, O](flags: DEFAULT_FLAGS, placeholder: true).defaults(
-    ctx, id, OperationContext(), broadcast = false
+  result = Ed[T, O]().defaults(
+    ctx, id, OperationContext(), broadcast = false, placeholder = true
   )
 
 proc init*(
@@ -402,7 +450,7 @@ proc init*(
 ): T =
   ## Initialize an empty `Ed` container of the given type.
   ctx.setup_op_ctx
-  T(flags: flags).defaults(ctx, id, op_ctx)
+  T().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*(
     _: type,
@@ -413,7 +461,7 @@ proc init*(
     op_ctx = OperationContext(),
 ): Ed[string, string] =
   ctx.setup_op_ctx
-  result = Ed[string, string](flags: flags).defaults(ctx, id, op_ctx)
+  result = Ed[string, string]().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*(
     _: type Ed,
@@ -424,7 +472,7 @@ proc init*(
     op_ctx = OperationContext(),
 ): Ed[T, T] =
   ctx.setup_op_ctx
-  result = Ed[T, T](flags: flags).defaults(ctx, id, op_ctx)
+  result = Ed[T, T]().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*[T: ref | object | tuple | array | SomeOrdinal | SomeNumber | string | ptr](
     _: type Ed,
@@ -435,7 +483,7 @@ proc init*[T: ref | object | tuple | array | SomeOrdinal | SomeNumber | string |
     op_ctx = OperationContext(),
 ): Ed[T, T] =
   ctx.setup_op_ctx
-  var self = Ed[T, T](flags: flags).defaults(ctx, id, op_ctx)
+  var self = Ed[T, T]().defaults(ctx, id, op_ctx, flags = flags)
 
   mutate(op_ctx):
     self.tracked = tracked
@@ -450,7 +498,7 @@ proc init*[O](
     op_ctx = OperationContext(),
 ): Ed[set[O], O] =
   ctx.setup_op_ctx
-  var self = Ed[set[O], O](flags: flags).defaults(ctx, id, op_ctx)
+  var self = Ed[set[O], O]().defaults(ctx, id, op_ctx, flags = flags)
 
   mutate(op_ctx):
     self.tracked = tracked
@@ -465,7 +513,7 @@ proc init*[K, V](
     op_ctx = OperationContext(),
 ): EdTable[K, V] =
   ctx.setup_op_ctx
-  var self = EdTable[K, V](flags: flags).defaults(ctx, id, op_ctx)
+  var self = EdTable[K, V]().defaults(ctx, id, op_ctx, flags = flags)
 
   mutate(op_ctx):
     self.tracked = tracked
@@ -480,7 +528,7 @@ proc init*[O](
     op_ctx = OperationContext(),
 ): Ed[seq[O], O] =
   ctx.setup_op_ctx
-  var self = Ed[seq[O], O](flags: flags).defaults(ctx, id, op_ctx)
+  var self = Ed[seq[O], O]().defaults(ctx, id, op_ctx, flags = flags)
 
   mutate(op_ctx):
     self.tracked = tracked
@@ -495,7 +543,7 @@ proc init*[O](
     op_ctx = OperationContext(),
 ): Ed[seq[O], O] =
   ctx.setup_op_ctx
-  result = Ed[seq[O], O](flags: flags).defaults(ctx, id, op_ctx)
+  result = Ed[seq[O], O]().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*[O](
     _: type Ed,
@@ -506,7 +554,7 @@ proc init*[O](
     op_ctx = OperationContext(),
 ): Ed[set[O], O] =
   ctx.setup_op_ctx
-  result = Ed[set[O], O](flags: flags).defaults(ctx, id, op_ctx)
+  result = Ed[set[O], O]().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*[K, V](
     _: type Ed,
@@ -517,7 +565,7 @@ proc init*[K, V](
     op_ctx = OperationContext(),
 ): Ed[Table[K, V], Pair[K, V]] =
   ctx.setup_op_ctx
-  result = Ed[Table[K, V], Pair[K, V]](flags: flags).defaults(ctx, id, op_ctx)
+  result = Ed[Table[K, V], Pair[K, V]]().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*(
     _: type Ed,
@@ -528,7 +576,7 @@ proc init*(
     op_ctx = OperationContext(),
 ): EdTable[K, V] =
   ctx.setup_op_ctx
-  result = EdTable[K, V](flags: flags).defaults(ctx, id, op_ctx)
+  result = EdTable[K, V]().defaults(ctx, id, op_ctx, flags = flags)
 
 proc init*[T, O](
     self: var Ed[T, O],

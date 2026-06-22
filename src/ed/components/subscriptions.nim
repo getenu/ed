@@ -108,7 +108,7 @@ proc from_flatty*[T: ref RootObj](s: string, i: var int, value: var T) =
       s.from_flatty(i, info)
       # :(
       if info.object_id in flatty_ctx:
-        value = value.type()(flatty_ctx.objects[info.object_id])
+        value = value.type()(flatty_ctx.resolve_proxy(flatty_ctx.objects[info.object_id]))
       else:
         # A nested Ed reference we don't hold (a partial replica receiving a
         # pre-populated parent, or a parent that arrived before its child).
@@ -757,7 +757,11 @@ proc fetch*(
   ## its whole owned state in one request. The already-loaded short-circuit is
   ## skipped for deep fetches: holding the root says nothing about the closure.
   if not deep and object_id in self and not self.objects[object_id].placeholder:
-    return Fetch(id: object_id, state: Found, obj: self.objects[object_id])
+    return Fetch(
+      id: object_id,
+      state: Found,
+      obj: self.resolve_proxy(self.objects[object_id]),
+    )
   if object_id in self.fetches and self.fetches[object_id].state == Pending:
     return self.fetches[object_id]
   result = Fetch(id: object_id, state: Pending)
@@ -1047,7 +1051,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       let pending_fetch = self.fetches[msg.object_id]
       pending_fetch.state = Found
       if msg.object_id in self.objects and ?self.objects[msg.object_id]:
-        pending_fetch.obj = self.objects[msg.object_id]
+        pending_fetch.obj = self.resolve_proxy(self.objects[msg.object_id])
       self.fetches.del(msg.object_id)
     if msg.owner_id.len > 0 and msg.owner_id in self.fetches:
       self.fetches[msg.owner_id].state = Found
@@ -1169,7 +1173,8 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           if msg.object_id in self:
             let obj = self.objects[msg.object_id]
             if obj.evict_key != nil:
-              discard obj.evict_key(obj, key_bin)
+              let evicted = obj.evict_key(obj, key_bin)
+              self.drop_nested_bodies(evicted.nested)
           self.pending_key_releases.mgetOrPut(msg.object_id, @[]).add key_bin
     if not retracted:
       var from_upstream = false
@@ -1182,7 +1187,8 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           let obj = self.objects[msg.object_id]
           if obj.evict_key != nil:
             for key_bin in keys:
-              discard obj.evict_key(obj, key_bin)
+              let evicted = obj.evict_key(obj, key_bin)
+              self.drop_nested_bodies(evicted.nested)
         if not self.is_authority:
           # Relay to our own subscribers (downstream clones); the accumulated
           # source stops it echoing back the way it came.
@@ -1356,13 +1362,14 @@ proc untrack*[T, O](self: Ed[T, O], zid: EID) =
   assert self.valid
 
   # :(
-  if zid in self.changed_callbacks:
-    let callback = self.changed_callbacks[zid]
-    if zid notin self.paused_eids:
-      callback(@[Change.init(O, {CLOSED})])
-    self.ctx.close_procs.del(zid)
-    debug "removing close proc", zid
-    self.changed_callbacks.del(zid)
+  let body = self.typed_body
+  if zid in body.changed_callbacks:
+    let callback = body.changed_callbacks[zid]
+    if zid notin body.paused_eids:
+      callback(@[Change.init(O, {CLOSED})], self)
+    self.ctx.close_index.del(zid)
+    body.changed_callbacks.del(zid)
+    body.callback_gens.del(zid)
   else:
     error "no change callback for zid", zid = zid
 
@@ -1374,7 +1381,7 @@ proc bind_lifetime*[T, O](self: Ed[T, O], lifetime: Lifetime, zid: EID) =
   ## owner dying first — is safe and idempotent.
   privileged
   lifetime.add proc() {.gcsafe.} =
-    if not self.destroyed and zid in self.changed_callbacks:
+    if not self.destroyed and zid in self.typed_body.changed_callbacks:
       self.untrack(zid)
 
 proc track*[T, O](
@@ -1388,10 +1395,15 @@ proc track*[T, O](
   assert self.valid
   inc self.ctx.changed_callback_eid
   let zid = self.ctx.changed_callback_eid
-  self.changed_callbacks[zid] = callback
-  debug "adding close proc", zid
-  self.ctx.close_procs[zid] = proc() =
-    self.untrack(zid)
+  let body = self.typed_body
+  # Wrap the 1-arg callback in the stored 2-arg shape; the wrapper captures
+  # only the user's closure (their captures are their pins).
+  body.changed_callbacks[zid] = proc(
+      changes: seq[Change[O]], it: ref EdBase
+  ) {.gcsafe.} =
+    callback(changes)
+  body.callback_gens[zid] = body.proxy_gen
+  self.ctx.close_index[zid] = self.id
   result = zid
 
   # Inside an `own` scope, route this callback's untrack through the owner's
@@ -1411,6 +1423,31 @@ proc track*[T, O](
     callback(changes, zid)
 
   result = zid
+
+proc track*[T, O](
+    self: Ed[T, O],
+    callback:
+      proc(changes: seq[Change[O]], zid: EID, it: Ed[T, O]) {.gcsafe.},
+): EID {.discardable.} =
+  ## The non-capturing form: the live proxy arrives as `it` each fire, so the
+  ## callback needs no reference to the watched object at all — a proxy
+  ## tracked this way still dies promptly when the app drops it. The sugar
+  ## (`changes`/`watch`) builds on this.
+  privileged
+  assert self.valid
+  inc self.ctx.changed_callback_eid
+  let zid = self.ctx.changed_callback_eid
+  let body = self.typed_body
+  body.changed_callbacks[zid] = proc(
+      changes: seq[Change[O]], it: ref EdBase
+  ) {.gcsafe.} =
+    callback(changes, zid, Ed[T, O](it))
+  body.callback_gens[zid] = body.proxy_gen
+  self.ctx.close_index[zid] = self.id
+  result = zid
+  {.gcsafe.}:
+    if not current_lifetime.is_nil:
+      self.bind_lifetime(current_lifetime, zid)
 
 proc track*[T, O](
     self: Ed[T, O],
@@ -1488,6 +1525,7 @@ proc tick*(
   self.unsubscribed = @[]
   var count = 0
   self.free_refs
+  self.prune_dead_proxies # clear backrefs of proxies ORC reclaimed
   let timeout =
     if not ?max_duration:
       MonoTime.high
@@ -1743,13 +1781,42 @@ macro check_no_return*(body: untyped): untyped =
     )
   result = body
 
+macro warn_self_capture(watched: untyped, body: untyped): untyped =
+  ## Bare-identifier self-capture detection for the `changes`/`watch` sugar:
+  ## a callback body that references the watched *variable* captures it,
+  ## pinning the object until untracked (closure cycles are not collected).
+  ## Deliberately narrow — only a bare identifier, only outside dot-RHS
+  ## positions — so it stays near-zero false positives (enu fires none).
+  result = new_empty_node()
+  if watched.kind in {nnk_ident, nnk_sym}:
+    let name = watched.str_val
+    proc references(n: NimNode): bool =
+      if n.kind in {nnk_ident, nnk_sym} and eq_ident(n, name):
+        return true
+      for i in 0 ..< n.len:
+        if n.kind == nnk_dot_expr and i == 1:
+          continue # `x.foo` — foo is a field, not a capture
+        if references(n[i]):
+          return true
+    if references(body):
+      warning(
+        "callback closes over '" & name &
+          "', pinning it until untracked — use `it` (the injected live " &
+          "proxy) or bind a Lifetime",
+        watched,
+      )
+
 template changes*[T, O](self: Ed[T, O], pause_me, body) =
-  let zen = self
+  warn_self_capture(self, body)
   make_discardable block:
     {.line.}:
-      zen.track proc(changes: seq[Change[O]], zid {.inject.}: EID) {.gcsafe.} =
+      track self, proc(
+          changes: seq[Change[O]], zid {.inject.}: EID, it {.inject.}: Ed[T, O]
+      ) {.gcsafe.} =
+        # `it` is the live proxy, delivered as a parameter — referencing it
+        # captures nothing, so sugar watchers never pin their object.
         let pause_zid = if pause_me: zid else: 0
-        zen.pause(pause_zid):
+        it.pause(pause_zid):
           for change {.inject.} in changes:
             template added(): bool =
               ADDED in change.changes

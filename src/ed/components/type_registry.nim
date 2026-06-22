@@ -51,9 +51,9 @@ proc register_type(typ: type) =
       for src, dest in fields(self[], clone[]):
         when src is Ed:
           if ?src:
-            var field = type(src)()
-            field.id = src.id
-            dest = field
+            # Proxy/body split: a bare `type(src)()` has no body, and `.id`
+            # forwards there — mint a husk that carries one.
+            dest = type(src).init_husk(src.id)
         elif src is ref:
           dest = nil
         elif src is ptr:
@@ -75,8 +75,10 @@ proc register_type(typ: type) =
           if ?field and field.id in ctx:
             # Direct registry read — `ctx[...]` would blocking-materialize in a
             # `blocking` scope, which deserialization must never do (and a func
-            # can't have side effects).
-            field = type(field)(ctx.objects[field.id])
+            # can't have side effects; resolve_proxy's registry upkeep is cast
+            # away as the one tolerated effect).
+            {.no_side_effect.}:
+              field = type(field)(ctx.resolve_proxy(ctx.objects[field.id]))
       result = self
 
   with_lock:

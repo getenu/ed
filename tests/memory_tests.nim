@@ -167,6 +167,28 @@ proc run*() =
     obj.value = "no_trigger"
     check callback_count == 0
 
+  test "dropped proxy frees promptly; its callbacks sweep on the next prune":
+    # The sentinel model (callbacks live on the registry-owned body): a proxy
+    # holds nothing, so it dies at refcount zero — no cycle collector — and
+    # the next prune sweeps the callbacks registered through it. No GC_full_
+    # collect anywhere in this test.
+    var ctx = EdContext.init(id = "pc_ctx")
+    Ed.thread_ctx = ctx
+    var fired = 0
+    block:
+      var obj = EdValue[string].init(ctx = ctx, id = "pc_obj")
+      discard obj.track proc(changes: seq[Change[string]]) {.gcsafe.} =
+        inc fired # no reference to obj: nothing pins the proxy
+      obj.value = "one"
+      check fired >= 1
+      fired = 0
+    # Proxy died promptly at block exit; resolving the id prunes the dead
+    # generation, sweeping its callbacks, and mints a fresh proxy.
+    var again = EdValue[string](ctx["pc_obj"])
+    again.value = "two"
+    check fired == 0 # the dead generation's callback did not survive
+    check again.value == "two" # canonical data lives on the body throughout
+
 when is_main_module:
   Ed.bootstrap
   run()

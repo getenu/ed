@@ -13,16 +13,33 @@ proc `-`*[T](a, b: seq[T]): seq[T] =
 template `&`*[T](a, b: set[T]): set[T] =
   a + b
 
-proc trigger_callbacks*[T, O](self: Ed[T, O], changes: seq[Change[O]]) {.gcsafe.} =
-  private_access EdObject[T, O]
-  private_access EdBase
+proc trigger_callbacks*[T, O](body: EdBody[T, O], changes: seq[Change[O]]) {.gcsafe.}
 
-  if changes.len == 0:
+proc trigger_callbacks_deferred[T, O](body: EdBody[T, O], changes: seq[Change[O]]) =
+  # Silent-materialize deferral: re-fires at the next tick. Captures the body
+  # (registry-owned) in a ctx-held seq — a plain chain, dropped when replayed.
+  privileged
+  body.ctx.pending_fills.add proc() {.gcsafe.} =
+    body.trigger_callbacks(changes)
+
+proc trigger_callbacks*[T, O](body: EdBody[T, O], changes: seq[Change[O]]) {.gcsafe.} =
+  ## Body-side: callbacks are registry-owned (see EdBody). The live proxy is
+  ## resolved lazily — only when there are callbacks to fire — and passed as
+  ## the `it` parameter, never captured.
+  privileged
+
+  if changes.len == 0 or body.changed_callbacks.len == 0:
     return
+  let ctx = body.ctx
+  let it: ref EdBase =
+    if ctx != nil:
+      ctx.resolve_proxy(body)
+    else:
+      nil
 
   # Tag changes produced while filling a placeholder so callbacks can tell a
   # materialize-on-access fill from an ordinary mutation.
-  if self.ctx != nil and self.ctx.filling:
+  if ctx != nil and ctx.filling:
     for c in changes:
       c.reason = Fill
 
@@ -30,31 +47,35 @@ proc trigger_callbacks*[T, O](self: Ed[T, O], changes: seq[Change[O]]) {.gcsafe.
   # defer the callbacks to the next explicit tick (preserves tick-boundary
   # semantics and clean reentrancy). The value is already applied, so the
   # blocking read still returns real data.
-  if self.ctx != nil and self.ctx.silent:
+  if ctx != nil and ctx.silent:
     let deferred = changes
-    self.ctx.pending_fills.add proc() {.gcsafe.} =
-      self.trigger_callbacks(deferred)
+    body.trigger_callbacks_deferred(deferred)
     return
 
-  let callbacks = self.changed_callbacks.dup
+  let callbacks = body.changed_callbacks.dup
   for zid, callback in callbacks.pairs:
-    if zid in self.changed_callbacks and zid notin self.paused_eids:
-      callback(changes)
+    if zid in body.changed_callbacks and zid notin body.paused_eids:
+      callback(changes, it)
+
+proc trigger_callbacks*[T, O](self: Ed[T, O], changes: seq[Change[O]]) {.gcsafe.} =
+  privileged
+  EdBody[T, O](self.body).trigger_callbacks(changes)
 
 proc link_child*[K, V](
     self: EdTable[K, V], child, obj: Pair[K, V], field_name = ""
 ) =
   proc link[S, K, V, T, O](self: S, pair: Pair[K, V], child: Ed[T, O]) =
-    private_access EdBase
+    privileged
     log_defaults
-    child.link_eid = child.track proc(changes: seq[Change[O]]) =
+    let parent_body = self.typed_body # capture the body, never the proxy
+    child.typed_body.link_eid = child.track proc(changes: seq[Change[O]]) =
       if changes.len == 1 and changes[0].changes == {CLOSED}:
         # Don't propagate CLOSED changes
         return
       let change = Change.init(pair, {MODIFIED})
       change.triggered_by = cast[seq[BaseChange]](changes)
       change.triggered_by_type = $O
-      self.trigger_callbacks(@[change])
+      parent_body.trigger_callbacks(@[change])
     debug "linking zen",
       child = ($child.type, $child.id), self = ($self.type, $self.id)
 
@@ -67,9 +88,10 @@ proc link_child*[T, O, L](self: EdSeq[T], child: O, obj: L, field_name = "") =
     self = self
     obj = obj
   proc link[T, O](child: Ed[T, O]) =
-    private_access EdBase
+    privileged
     log_defaults
-    child.link_eid = child.track proc(changes: seq[Change[O]]) =
+    let parent_body = self.typed_body # capture the body, never the proxy
+    child.typed_body.link_eid = child.track proc(changes: seq[Change[O]]) =
       if changes.len == 1 and changes[0].changes == {CLOSED}:
         # Don't propagate CLOSED changes
         return
@@ -77,28 +99,29 @@ proc link_child*[T, O, L](self: EdSeq[T], child: O, obj: L, field_name = "") =
       let change = Change.init(obj, {MODIFIED}, field_name = field_name)
       change.triggered_by = cast[seq[BaseChange]](changes)
       change.triggered_by_type = $O
-      self.trigger_callbacks(@[change])
+      parent_body.trigger_callbacks(@[change])
     debug "linking zen",
       child = ($child.type, $child.id),
       self = ($self.type, $self.id),
-      zid = child.link_eid,
+      zid = child.typed_body.link_eid,
       child_addr = cast[int](unsafe_addr child[]).to_hex
 
   if ?child:
     link(child)
 
 proc unlink*(self: Ed) =
-  private_access EdBase
+  privileged
   log_defaults
-  debug "unlinking", id = self.id, zid = self.link_eid
-  self.untrack(self.link_eid)
-  self.link_eid = 0
+  debug "unlinking", id = self.id, zid = self.typed_body.link_eid
+  self.untrack(self.typed_body.link_eid)
+  self.typed_body.link_eid = 0
 
 proc unlink*[T: Pair](pair: T) =
+  privileged
   log_defaults
-  debug "unlinking", id = pair.value.id, zid = pair.value.link_eid
-  pair.value.untrack(pair.value.link_eid)
-  pair.value.link_eid = 0
+  debug "unlinking", id = pair.value.id, zid = pair.value.typed_body.link_eid
+  pair.value.untrack(pair.value.typed_body.link_eid)
+  pair.value.typed_body.link_eid = 0
 
 proc link_or_unlink*[T, O](self: Ed[T, O], change: Change[O], link: bool) =
   log_defaults

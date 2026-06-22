@@ -470,7 +470,7 @@ proc run*() =
     var calls = 0
     s.changes:
       calls += 1
-      s.value = "cal"
+      it.value = "cal"
 
     s.value = "vin"
     check calls == 2

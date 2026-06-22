@@ -301,8 +301,17 @@ type
     warned_missing*: HashSet[string]
     changed_callback_eid: EID
     last_id: int
-    close_procs: Table[EID, proc() {.gcsafe.}]
-    objects*: OrderedTable[string, ref EdBase]
+    # zid -> object id, for context-level `untrack(zid)`. Plain data on
+    # purpose: the old shape stored a closure capturing the proxy, which made
+    # the context strong-hold every tracked proxy until explicit untrack —
+    # never-collected callbacks (caught by the memory tests). Stale entries
+    # for proxies that died untracked linger as tiny strings, pinning nothing.
+    close_index: Table[EID, string]
+    # The body registry: canonical, registry-owned state per id (phase 2 of the
+    # proxy/body split). Proxies are minted on demand over these — see
+    # `resolve_proxy`; `ctx[id]` still returns the proxy, so the public API is
+    # unchanged.
+    objects*: OrderedTable[string, ref EdBodyBase]
     objects_need_packing*: bool
     # Ownership index: owner EdRef id -> ids of the containers it owns (whose
     # `owner_id` points back here). Built as containers are created/materialized,
@@ -356,8 +365,14 @@ type
       dump_at*: MonoTime
       counts*: array[MessageKind, int]
 
-  EdBase* = object of RootObj
-    ## Base type for all `Ed` containers. Not used directly.
+  EdBodyBase* = object of RootObj
+    ## Registry-side state of a container — the *body* of the proxy/body split
+    ## (docs/proxy-body-design.md). Carries the data and everything the wire
+    ## needs; the app-facing proxy (`Ed`) forwards here via templates, so call
+    ## sites read unchanged. Phase 1 is purely structural: each proxy
+    ## strong-holds its body 1:1 and the registry still holds proxies — bodies
+    ## become registry-owned (and proxies weak-backref'd) with the identity
+    ## map in phase 2.
     id*: string
     # The EdRef (by id) that owns this container, or "" if unowned. Set when the
     # container is created inside an `own` scope, and on materialize from the
@@ -371,12 +386,9 @@ type
     # it triggers a fetch; when the real state arrives the bit clears and a Fill
     # change fires. Default false = a normal, fully-loaded object.
     placeholder*: bool
-    link_eid: EID
-    paused_eids: set[EID]
-    bound_eids: seq[EID]
     flags*: set[EdFlags]
     build_message: proc(
-      self: ref EdBase, change: BaseChange, id: string, trace: string
+      body: ref EdBodyBase, change: BaseChange, id: string, trace: string
     ): Message {.gcsafe.}
 
     publish_create: proc(
@@ -387,7 +399,7 @@ type
     ) {.gcsafe.}
 
     change_receiver:
-      proc(self: ref EdBase, msg: Message, op_ctx: OperationContext) {.gcsafe.}
+      proc(body: ref EdBodyBase, msg: Message, op_ctx: OperationContext) {.gcsafe.}
 
     # Per-key fetch (partial EdTable). Given a serialized key, build the ADD op
     # carrying that key's current value, so a partial subscriber can pull one
@@ -397,7 +409,7 @@ type
     # (per-key deep, one round trip). nil for non-table containers.
     publish_key:
       proc(
-        self: ref EdBase, key_bin: string
+        body: ref EdBodyBase, key_bin: string
       ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.}
 
     # Per-key eviction (paging). Given a serialized key, drop the entry locally
@@ -407,7 +419,7 @@ type
     # of a RELEASE eviction notice. nil for non-table containers.
     evict_key:
       proc(
-        self: ref EdBase, key_bin: string
+        body: ref EdBodyBase, key_bin: string
       ): tuple[found: bool, nested: seq[string]] {.gcsafe.}
 
     # Back-reference to the owning context. `{.cursor.}` (non-owning): the
@@ -420,12 +432,70 @@ type
     # while the context is alive, and no Ed object has an ORC `=destroy` that
     # dereferences `ctx`). Validated under AddressSanitizer (tests/asan.sh).
     ctx* {.cursor.}: EdContext
+    # The live proxy for this body, or nil. Non-owning ({.cursor.}): the app
+    # and containers own proxies; when the last reference drops, the proxy's
+    # ProxyHandle records the death and `prune_dead_proxies` clears this —
+    # always *before* an identity read, so the cursor is never read dangling
+    # (the RefHandle discipline, applied to containers).
+    proxy {.cursor.}: ref EdBase
+    proxy_gen: int
+    # Typed proxy factory, wired in `defaults` (the only place the concrete
+    # Ed[T, O] is known). Mints over this body, sets the backref + handle.
+    mint: proc(): ref EdBase {.gcsafe.}
+    # Typed context-level untrack (see EdContext.close_index): untracks `zid`
+    # on the live proxy, or no-ops — a dead proxy already took its callbacks
+    # with it. Captures only the body (the mint pattern).
+    untrack_zid: proc(zid: EID) {.gcsafe.}
+    # Sweep callbacks registered through a now-dead proxy generation; returns
+    # the swept zids so the context can clear its close_index. Typed work
+    # behind an untyped hook (the publish_key pattern).
+    sweep_gen: proc(gen: int): seq[EID] {.gcsafe.}
 
-  ChangeCallback[O] = proc(changes: seq[Change[O]]) {.gcsafe.}
+  ChangeCallback[O] = proc(
+    changes: seq[Change[O]], it: ref EdBase
+  ) {.gcsafe.}
+    ## Stored callback shape: the live proxy arrives as a *parameter* (`it`),
+    ## never a capture — parameters pin nothing, so a watcher written against
+    ## `it` lets its proxy die promptly at refcount zero. `it` is nil only for
+    ## CLOSED notifications fired after the proxy is already gone.
+
+  EdBody*[T, O] = ref object of EdBodyBase
+    ## Typed body: the canonical data AND the callbacks live here — registry-
+    ## owned, no reliance on cycle collection (which Nim's ORC empirically
+    ## does not perform for closure environments). A closure stored here must
+    ## capture nothing that reaches a body or a context, or it leaks for the
+    ## registry's lifetime; the `it` parameter exists so it never needs to.
+    tracked: T
+    changed_callbacks: OrderedTable[EID, ChangeCallback[O]]
+    # zid -> proxy generation that registered it. When a dead proxy's gen is
+    # pruned, its callbacks sweep with it — deterministic next-tick cleanup.
+    callback_gens: Table[EID, int]
+    link_eid: EID
+    paused_eids: set[EID]
+
+  ProxyHandle* = ref object
+    ## Per-proxy registry-cleanup handle (the container twin of `RefHandle`).
+    ## When a proxy's last reference drops, ORC destroys its fields and this
+    ## handle's `=destroy` records the death for the context to prune — the
+    ## destructor dereferences *nothing* (the context, even the body, may be
+    ## reclaimed in the same ORC batch). `gen` guards out-of-order prunes: a
+    ## body only clears its backref if the dead proxy was its *current* one.
+    ctx_uid*: int
+    object_id*: string
+    gen*: int
+
+  EdBase* = object of RootObj
+    ## Base type for all `Ed` containers — the *proxy* side of the split: what
+    ## the app holds. Local, handle-scoped state only (change callbacks and
+    ## their EID bookkeeping die with the proxy); everything synced forwards
+    ## to `body`. Minted by `ctx[id]`/`resolve_proxy` when none is live —
+    ## reference identity holds because the body's backref always points at
+    ## *the* live proxy (prune-before-read keeps it honest).
+    body*: ref EdBodyBase
+    proxy_handle: ProxyHandle
+    bound_eids: seq[EID]
 
   EdObject[T, O] = object of EdBase
-    changed_callbacks: OrderedTable[EID, ChangeCallback[O]]
-    tracked: T
 
   Ed*[T, O] = ref object of EdObject[T, O]
     ## Generic reactive container. T is the contained type, O is the change object type.
@@ -445,13 +515,88 @@ type
 const DEFAULT_FLAGS* = {SYNC_LOCAL, SYNC_REMOTE}
   ## Default flags for `Ed` containers: sync both locally and remotely.
 
-var next_ctx_uid* {.threadvar.}: int
-  ## Thread-local source of `EdContext.uid`. Per-thread is enough: a context is
-  ## created on, ticks on, and frees its refs on, one home thread, and
-  ## `pending_dead_refs` is thread-local too — so uids only ever collide across
-  ## threads, where the separate pending tables keep them apart.
+# Proxy → body forwarding (proxy/body split, phase 1). Templates expand at the
+# call site, so existing field accesses — reads *and* writes — compile
+# unchanged; private body fields still require `privileged` there, preserving
+# today's visibility discipline. The typed `tracked` forward casts through
+# `EdBody[T]`; everything else lives on the untyped base.
+template tracked*[T, O](self: Ed[T, O]): untyped =
+  EdBody[T, O](self.body).tracked
 
-var pending_dead_refs* {.threadvar.}: Table[int, seq[string]]
+template typed_body*[T, O](self: Ed[T, O]): EdBody[T, O] =
+  EdBody[T, O](self.body)
+
+template id*(self: ref EdBase): untyped =
+  self.body.id
+
+template owner_id*(self: ref EdBase): untyped =
+  self.body.owner_id
+
+template destroyed*(self: ref EdBase): untyped =
+  self.body.destroyed
+
+template placeholder*(self: ref EdBase): untyped =
+  self.body.placeholder
+
+template flags*(self: ref EdBase): untyped =
+  self.body.flags
+
+template ctx*(self: ref EdBase): untyped =
+  self.body.ctx
+
+proc init_husk*[T, O](_: typedesc[Ed[T, O]], id: string): Ed[T, O] =
+  ## A bare serialization stand-in: proxy + body carrying only the id. Used by
+  ## registered-type `stringify`, which clones a ref and reduces its Ed fields
+  ## to their ids — the receiver re-links them from its own registry. Not
+  ## registered anywhere; never escapes serialization.
+  result = Ed[T, O]()
+  result.body = EdBody[T, O](id: id)
+
+# The sync closures: the call-arity procs forward invocations (a dotted call
+# through a proc field parses as a call of the *symbol*, so a field-resolving
+# template alone can't take the arguments). Assignment and nil checks go
+# through `self.body.X` directly under `privileged`.
+proc build_message*(
+    self: ref EdBase, slf: ref EdBase, change: BaseChange, id, trace: string
+): Message {.gcsafe.} =
+  self.body.build_message(slf.body, change, id, trace)
+
+proc publish_create*(
+    self: ref EdBase,
+    sub = Subscription(),
+    broadcast = false,
+    op_ctx = OperationContext(),
+    contents = true,
+) {.gcsafe.} =
+  self.body.publish_create(sub, broadcast, op_ctx, contents)
+
+proc change_receiver*(
+    self: ref EdBase, slf: ref EdBase, msg: Message, op_ctx: OperationContext
+) {.gcsafe.} =
+  self.body.change_receiver(slf.body, msg, op_ctx)
+
+proc publish_key*(
+    self: ref EdBase, slf: ref EdBase, key_bin: string
+): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.} =
+  self.body.publish_key(slf.body, key_bin)
+
+proc evict_key*(
+    self: ref EdBase, slf: ref EdBase, key_bin: string
+): tuple[found: bool, nested: seq[string]] {.gcsafe.} =
+  self.body.evict_key(slf.body, key_bin)
+
+var next_ctx_uid*: Atomic[int]
+  ## Global source of `EdContext.uid`. Must be process-wide: the dead-handle
+  ## pending tables are global (a context can be created on one thread and
+  ## live on another), so colliding uids across threads would misattribute
+  ## deaths — a thread-local counter did exactly that (two threads' first
+  ## contexts both got uid 1, one drained the other's records, and the
+  ## undrained backref cursor dangled).
+
+var dead_handles_lock: Lock
+dead_handles_lock.init_lock
+
+var pending_dead_refs*: Table[int, seq[string]]
   ## ctx uid -> ref_ids whose registered instance ORC has reclaimed. Populated by
   ## `RefHandle.=destroy`, which must NOT touch its `EdContext` (it may already be
   ## freed — even within the same cycle-collection batch). Each context drains its
@@ -468,19 +613,102 @@ proc `=destroy`(h: var typeof(RefHandle()[])) =
   ## until the registry sets `ctx_uid`/`ref_id` on the instance's first ADD.
   if h.ctx_uid != 0 and h.ref_id.len > 0:
     {.cast(gcsafe).}:
+      dead_handles_lock.acquire()
       pending_dead_refs.mget_or_put(h.ctx_uid, @[]).add(h.ref_id)
+      dead_handles_lock.release()
   `=destroy`(h.ref_id)
+
+var pending_dead_proxies*: Table[int, seq[(string, int)]]
+  ## ctx uid -> (object_id, gen) of container proxies ORC has reclaimed.
+  ## Populated by `ProxyHandle.=destroy` (which must touch nothing); drained by
+  ## `prune_dead_proxies` before any proxy-identity read and on tick. Global +
+  ## lock-guarded (NOT a threadvar): a context can be created on one thread —
+  ## minting proxies there — and then live on another (the threading tests'
+  ## worker handoff), so deaths must be visible to the pruning thread.
+
+proc `=destroy`(h: var typeof(ProxyHandle()[])) =
+  ## Records a dead proxy for its context to prune. Dereferences nothing — the
+  ## body and even the context may be reclaimed in the same ORC batch. A custom
+  ## `=destroy` replaces field destruction, so `object_id` is freed by hand.
+  if h.ctx_uid != 0 and h.object_id.len > 0:
+    {.cast(gcsafe).}:
+      dead_handles_lock.acquire()
+      pending_dead_proxies.mget_or_put(h.ctx_uid, @[]).add((h.object_id, h.gen))
+      dead_handles_lock.release()
+  `=destroy`(h.object_id)
+
+proc prune_dead_proxies*(self: EdContext) =
+  ## Clear body→proxy backrefs whose proxies ORC has reclaimed. Must run before
+  ## any backref read so a dangling cursor is never returned; `gen` ensures a
+  ## late prune can't clear a *newer* proxy minted after the death was recorded.
+  {.cast(gcsafe).}:
+    var dead: seq[(string, int)]
+    dead_handles_lock.acquire()
+    if self.uid in pending_dead_proxies:
+      dead = pending_dead_proxies[self.uid]
+      pending_dead_proxies.del(self.uid)
+    dead_handles_lock.release()
+    for (object_id, gen) in dead:
+      if object_id in self.objects and self.objects[object_id] != nil and
+          self.objects[object_id].proxy_gen == gen:
+        let body = self.objects[object_id]
+        body.proxy = nil
+        # The dead proxy's callbacks die with it — registered through it,
+        # cleaned when it goes (the sentinel model). Deterministic: next
+        # prune, not cycle-collector cadence.
+        if body.sweep_gen != nil:
+          for zid in body.sweep_gen(gen):
+            self.close_index.del(zid)
+
+proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
+  ## The identity map: the one live proxy for `body`, minting if none. Two
+  ## resolutions of the same id are reference-equal while anything holds the
+  ## proxy — honest `ref` identity (docs/proxy-body-design.md).
+  if body == nil:
+    return nil
+  self.prune_dead_proxies
+  if body.proxy != nil:
+    return body.proxy
+  if body.mint != nil:
+    return body.mint()
+
+proc release_closures*(body: ref EdBodyBase) =
+  ## Break the body's self-capturing closures (mint/untrack_zid/sweep_gen all
+  ## capture the body). Required at unregistration: ORC does not collect
+  ## closure cycles, so an unreleased body would leak with its environment.
+  body.mint = nil
+  body.untrack_zid = nil
+  body.sweep_gen = nil
+
+proc drop_nested_bodies*(self: EdContext, nested: seq[string]) =
+  ## Unregister the nested container bodies an evicted entry carried (a paged-
+  ## out chunk's delta seq): the registry releases its strong hold, so the
+  ## memory frees once any remaining holder drops, and the id resolves fresh
+  ## on re-page-in. Local only — eviction never destroys upstream data.
+  for id in nested:
+    if id in self.objects:
+      let body = self.objects[id]
+      if body != nil:
+        if body.owner_id.len > 0 and body.owner_id in self.owned_by:
+          self.owned_by[body.owner_id].excl id
+        body.release_closures
+      self.objects.del id
+
 
 proc prune_dead_refs*(self: EdContext) =
   ## Remove from `ref_pool` the entries whose instances ORC has reclaimed (see
   ## `pending_dead_refs`). Must run before any `ref_pool` identity lookup so a
   ## dangling cursor is never read, and on tick to keep the pool tidy. Idempotent;
   ## cheap when nothing is pending.
-  if self.uid in pending_dead_refs:
-    {.cast(gcsafe).}:
-      for ref_id in pending_dead_refs[self.uid]:
-        self.ref_pool.del(ref_id)
+  {.cast(gcsafe).}:
+    var dead: seq[string]
+    dead_handles_lock.acquire()
+    if self.uid in pending_dead_refs:
+      dead = pending_dead_refs[self.uid]
       pending_dead_refs.del(self.uid)
+    dead_handles_lock.release()
+    for ref_id in dead:
+      self.ref_pool.del(ref_id)
 
 proc to_flatty*(s: var string, x: RefHandle) =
   ## Per-context-local state (uid + id), never synced — its uid is meaningless in
