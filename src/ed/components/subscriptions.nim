@@ -430,8 +430,8 @@ proc request_targets(self: EdContext): seq[Subscription] =
   ## Who to send a REQUEST to: our upstreams (the contexts we page from).
   ## Never downstream — a clone's copy of us is stale-by-definition, and
   ## letting it answer can overwrite fresher local state with its echo.
-  ## No known upstream (a one-way local subscribe never told us) falls back
-  ## to everyone, preserving the old behavior for legacy topologies.
+  ## No known upstream (e.g. a one-way local subscribe) falls back to all
+  ## subscribers.
   for sub in self.subscribers:
     if sub.ctx_id in self.upstream_ctx_ids:
       result.add sub
@@ -1201,8 +1201,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     #
     # Never serve a REQUEST from our own upstream: our copy is a stale subset
     # of theirs, and answering would echo old state back over fresher data.
-    # (Requests are routed upstream-only, so this shouldn't arrive; guard
-    # against legacy senders.)
+    # (Requests route upstream-only, so this shouldn't normally arrive.)
     for src in source:
       if src in self.upstream_ctx_ids:
         return
