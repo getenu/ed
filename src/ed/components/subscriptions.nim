@@ -848,7 +848,7 @@ const churn_limit = 8
   ## much traffic, and refill is a single fetch. A see-it-work default.
 
 proc evict_sweep*(self: EdContext) =
-  ## Partial-replica eviction (docs/proxy-body-design.md phase 4), by mode (see
+  ## Partial-replica eviction (docs/partial-replicas.md), by mode (see
   ## EdContext.mem_limit): 0 evict every unclaimed body now; finite n churn +
   ## LRU-to-budget; Unbounded never evict. All eviction is gated on
   ## `evict_candidate`.
@@ -856,9 +856,8 @@ proc evict_sweep*(self: EdContext) =
   ## ONLY partial replicas evict (`evicts`). A full clone (partial_replica =
   ## false) mirrors everything its upstream has — there's no safe "residue" to
   ## drop, because anything it holds is synced state something may read back.
-  ## Evicting on a full clone breaks live round-trips (observed: an enu node ctx
-  ## given a finite limit intermittently hung the bot test mid-sync, and hung
-  ## godot's shutdown). So `mem_limit` is ignored on a full clone.
+  ## Evicting on a full clone breaks live round-trips, so `mem_limit` is ignored
+  ## there.
   if not self.evicts:
     return
   self.prune_dead_proxies

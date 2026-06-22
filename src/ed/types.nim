@@ -219,7 +219,7 @@ type
     # making it tri-state.
     deep*: bool
     interest*: HashSet[string]
-    # Live/cache interest tiers (Option 2; docs/interest-tiers-design.md).
+    # Live/cache interest tiers (Option 2; docs/partial-replicas.md).
     # `interest_cache` is a subset of `interest`: those objects still stream
     # (the subscriber's cache stays current), but they're *cache tier* — this
     # subscriber holds them cached, not live, so they DON'T protect against
@@ -297,9 +297,9 @@ type
     # object fills; otherwise it kicks a fetch and returns the empty placeholder.
     materialize*: proc(self: EdContext, id: string) {.gcsafe.}
     blocking*: bool
-    # Partial-replica evictor (docs/proxy-body-design.md phase 4). `mem_limit`
-    # is a cache budget for unclaimed bodies, in bytes — an honest, monotonic
-    # value from "no cache" up to "unlimited":
+    # Partial-replica evictor (docs/partial-replicas.md). `mem_limit` is a cache
+    # budget for unclaimed bodies, in bytes — an honest, monotonic value from
+    # "no cache" up to "unlimited":
     #     0  no cache — evict everything the moment it isn't live (a utility
     #        client that holds nothing it isn't actively using). Negatives are
     #        clamped to this at init.
@@ -427,7 +427,7 @@ type
     # change fires. Default false = a normal, fully-loaded object.
     placeholder*: bool
     flags*: set[EdFlags]
-    # Eviction accounting (partial-replica evictor, docs/proxy-body-design.md
+    # Eviction accounting (partial-replica evictor, docs/partial-replicas.md
     # phase 4). All cheap to maintain; only the partial-replica sweep reads them.
     last_read*: MonoTime  # stamped on a read-touch (value/[]/items/pairs)
     bytes*: int           # wire-weight, stamped where we serialize (drift-ok)
