@@ -301,16 +301,13 @@ type
     warned_missing*: HashSet[string]
     changed_callback_eid: EID
     last_id: int
-    # zid -> object id, for context-level `untrack(zid)`. Plain data on
-    # purpose: the old shape stored a closure capturing the proxy, which made
-    # the context strong-hold every tracked proxy until explicit untrack —
-    # never-collected callbacks (caught by the memory tests). Stale entries
-    # for proxies that died untracked linger as tiny strings, pinning nothing.
+    # zid -> object id, for context-level `untrack(zid)`. Plain data (not a
+    # closure) so it pins nothing: a stale entry for a proxy that died untracked
+    # lingers as a tiny string, holding nothing alive.
     close_index: Table[EID, string]
-    # The body registry: canonical, registry-owned state per id (phase 2 of the
-    # proxy/body split). Proxies are minted on demand over these — see
-    # `resolve_proxy`; `ctx[id]` still returns the proxy, so the public API is
-    # unchanged.
+    # The body registry: canonical, registry-owned state per id. Proxies are
+    # minted on demand over these — see `resolve_proxy`; `ctx[id]` still returns
+    # the proxy, so the public API is unchanged.
     objects*: OrderedTable[string, ref EdBodyBase]
     objects_need_packing*: bool
     # Ownership index: owner EdRef id -> ids of the containers it owns (whose
@@ -367,12 +364,10 @@ type
 
   EdBodyBase* = object of RootObj
     ## Registry-side state of a container — the *body* of the proxy/body split
-    ## (docs/proxy-body-design.md). Carries the data and everything the wire
-    ## needs; the app-facing proxy (`Ed`) forwards here via templates, so call
-    ## sites read unchanged. Phase 1 is purely structural: each proxy
-    ## strong-holds its body 1:1 and the registry still holds proxies — bodies
-    ## become registry-owned (and proxies weak-backref'd) with the identity
-    ## map in phase 2.
+    ## (docs/proxy-body.md). Carries the data and everything the wire needs; the
+    ## app-facing proxy (`Ed`) forwards here via templates, so call sites read
+    ## unchanged. The registry owns the body; the proxy is reached through the
+    ## `proxy` backref + `mint` (resolve_proxy).
     id*: string
     # The EdRef (by id) that owns this container, or "" if unowned. Set when the
     # container is created inside an `own` scope, and on materialize from the
@@ -515,11 +510,10 @@ type
 const DEFAULT_FLAGS* = {SYNC_LOCAL, SYNC_REMOTE}
   ## Default flags for `Ed` containers: sync both locally and remotely.
 
-# Proxy → body forwarding (proxy/body split, phase 1). Templates expand at the
-# call site, so existing field accesses — reads *and* writes — compile
-# unchanged; private body fields still require `privileged` there, preserving
-# today's visibility discipline. The typed `tracked` forward casts through
-# `EdBody[T]`; everything else lives on the untyped base.
+# Proxy → body forwarding. Templates expand at the call site, so field accesses
+# (reads *and* writes) compile unchanged; private body fields still require
+# `privileged` there. The typed `tracked` forward casts through `EdBody[T]`;
+# everything else lives on the untyped base.
 template tracked*[T, O](self: Ed[T, O]): untyped =
   EdBody[T, O](self.body).tracked
 
@@ -587,11 +581,9 @@ proc evict_key*(
 
 var next_ctx_uid*: Atomic[int]
   ## Global source of `EdContext.uid`. Must be process-wide: the dead-handle
-  ## pending tables are global (a context can be created on one thread and
-  ## live on another), so colliding uids across threads would misattribute
-  ## deaths — a thread-local counter did exactly that (two threads' first
-  ## contexts both got uid 1, one drained the other's records, and the
-  ## undrained backref cursor dangled).
+  ## pending tables are global (a context can be created on one thread and live
+  ## on another), so a uid colliding across threads would misattribute deaths —
+  ## one context draining another's records and dangling its backref cursor.
 
 var dead_handles_lock: Lock
 dead_handles_lock.init_lock
@@ -663,7 +655,7 @@ proc prune_dead_proxies*(self: EdContext) =
 proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
   ## The identity map: the one live proxy for `body`, minting if none. Two
   ## resolutions of the same id are reference-equal while anything holds the
-  ## proxy — honest `ref` identity (docs/proxy-body-design.md).
+  ## proxy — honest `ref` identity (docs/proxy-body.md).
   if body == nil:
     return nil
   self.prune_dead_proxies

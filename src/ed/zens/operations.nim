@@ -125,7 +125,7 @@ proc release*[K, V](self: EdTable[K, V], key: K) =
   if key in self.tracked:
     let evicted = self.evict_key(self, key_bin)
     # The entry's nested containers (a chunk's delta seq) leave the registry
-    # too — paging out actually frees their memory (proxy/body phase 3).
+    # too, so paging out actually frees their memory.
     self.ctx.drop_nested_bodies(evicted.nested)
   self.ctx.pending_key_releases.mgetOrPut(self.id, @[]).add key_bin
 
