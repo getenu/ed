@@ -930,8 +930,7 @@ proc track*[T, O](
 ): EID {.discardable.} =
   ## Like `track`, but the callback's removal is owned by `lifetime`: when the
   ## owner calls `lifetime.finish` the callback untracks automatically — no
-  ## manual `zid` bookkeeping. (Standalone Lifetime, per the lifecycle redesign;
-  ## becomes the proxy's cleanup set under the future proxy/body split.)
+  ## manual `zid` bookkeeping.
   result = self.track(callback)
   self.bind_lifetime(lifetime, result)
 

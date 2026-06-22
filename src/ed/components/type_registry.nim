@@ -231,7 +231,7 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
     # REMOVE only unlinks a container from the ref; it never frees. ORC reclaims
     # the instance when its last real reference drops (RefHandle then cleans the
     # pool), giving move-identity for free: a removed-then-readded replica
-    # re-links the same instance across any gap, with no grace timer.
+    # re-links the same instance across any gap.
 
 proc find_ref*[T](self: EdContext, value: var T): bool =
   privileged

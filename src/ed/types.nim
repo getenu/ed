@@ -9,52 +9,42 @@ type
     ## Callback identifier for tracking registered callbacks.
 
   Lifetime* = ref object
-    ## Owns a set of teardown actions (typically untracking callbacks). An owner
-    ## — a Unit, a scope, and eventually an object proxy — holds a Lifetime and
-    ## `finish`es it on teardown, so everything bound to it cleans up at once with
-    ## no manual `zid` bookkeeping. Standalone on purpose (not welded to EdBase):
-    ## under the future proxy/body split it becomes the proxy's cleanup set with
-    ## no change to call sites.
+    ## A set of teardown actions (typically untracking callbacks). An owner — a
+    ## Unit or a scope — holds a Lifetime and `finish`es it on teardown, so
+    ## everything bound to it cleans up at once with no manual `zid` bookkeeping.
+    ## Standalone (not part of EdBase) so an owner holds one directly.
     cleanups: seq[proc() {.gcsafe.}]
     finished: bool
 
   RefHandle* = ref object
-    ## Per-instance registry-cleanup handle carried by every `EdRef`. When a
-    ## registered ref's last reference drops, ORC destroys its fields and this
-    ## handle's `=destroy` records the (now-dead) instance for removal from its
-    ## context's `ref_pool`. It identifies the context by *value* — a uid, not a
-    ## reference — on purpose: the destructor must never dereference its
-    ## `EdContext`, because at teardown the context can be reclaimed in the *same*
-    ## ORC cycle-collection batch as the ref (a dangling-cursor UAF, caught by
-    ## ASan). So instead of touching `ctx.ref_pool` directly it appends to a
-    ## thread-local pending list (`pending_dead_refs`); each context prunes its
-    ## own dead ids before any identity read and on tick. A bare registered ref
-    ## carries no such handle — and `Ed.thread_ctx` is wrong under multiple
-    ## contexts per thread (load-bearing for sync identity: two contexts hold
-    ## different instances of one ref_id) — which is why the uid lives here.
-    ## `ctx_uid`/`ref_id` stay unset until the instance's first ADD into a
-    ## `ref_pool`; until then `=destroy` is a no-op.
+    ## Per-instance registry-cleanup handle on every `EdRef`. When a registered
+    ## ref's last reference drops, ORC destroys this handle and its `=destroy`
+    ## records the dead instance for removal from its context's `ref_pool`.
+    ##
+    ## It identifies the context by *value* (a uid, not a reference): the
+    ## destructor must never dereference its `EdContext`, because at teardown the
+    ## context can be reclaimed in the same ORC cycle-collection batch as the ref
+    ## (a dangling-cursor UAF, caught by ASan). So it only appends the dead id to
+    ## `pending_dead_refs`; each context prunes its own dead ids before any
+    ## `ref_pool` identity read and on tick. The uid (not `id`, which is reused
+    ## across contexts) is what lets a freed ref find the right pool with no live
+    ## reference. `ctx_uid`/`ref_id` stay unset until the first `ref_pool` add;
+    ## until then `=destroy` is a no-op.
     ctx_uid*: int  # owning context's per-instance uid (0 = unset). NOT the id.
     ref_id*: string
 
   EdRef* = ref object of RootObj
     ## Base for registered (network-syncable) refs. Carries a `RefHandle` so the
-    ## registry can clean up `ref_pool` when ORC reclaims the instance — keeping
-    ## the registry's non-owning (cursor) hold from dangling, with the Unit's own
-    ## DEFAULT destructor intact (only the trivial `RefHandle` gets a custom
-    ## one, so fields don't leak). enu's `Model` and the test's `RefType`
-    ## inherit this; the eviction-phase proxy/observability hangs off the same
-    ## base.
+    ## registry can clean up `ref_pool` when ORC reclaims the instance, keeping the
+    ## pool's non-owning (cursor) hold from dangling — the subtype's own default
+    ## destructor stays intact (only the trivial `RefHandle` gets a custom one).
     ref_handle*: RefHandle
     destroyed* {.ed_ignore.}: bool
-      ## Idempotency latch for `destroy`, set at its top. Mirrors
-      ## `EdBase.destroyed` (containers). `ed_ignore`: it's local teardown state,
-      ## never synced (a freshly received ref must arrive un-destroyed).
+      ## Idempotency latch for `destroy`, set at its top. `ed_ignore`: local
+      ## teardown state, never synced (a received ref must arrive un-destroyed).
     lifetime*: Lifetime
-      ## Owns this ref's teardown actions — external subscriptions, and (via the
-      ## `own` scope) its owned containers. `destroy` runs `lifetime.finish`. Local
-      ## state: it's a ref, so stringify nils it, and the `Lifetime` flatty skip
-      ## covers the rest — never synced.
+      ## This ref's teardown actions — external subscriptions and (via `own`) its
+      ## owned containers. `destroy` runs `lifetime.finish`. Never synced.
 
   EdFlags* = enum
     ## Flags controlling `Ed` container behavior.
@@ -393,12 +383,9 @@ proc prune_dead_refs*(self: EdContext) =
       pending_dead_refs.del(self.uid)
 
 proc to_flatty*(s: var string, x: RefHandle) =
-  ## The registry-cleanup handle is per-context-local state (a context uid + id),
-  ## never part of the synced value — its uid is meaningless in another context.
-  ## Skip it; `ref_count` re-mints the handle on the receiver's first ADD. Defined
-  ## here (with the Message overrides) so it's visible where `type_registry`'s
-  ## `stringify` instantiates flatty. Mirrors the Lifetime/proc skips in
-  ## subscriptions.nim.
+  ## Per-context-local state (uid + id), never synced — its uid is meaningless in
+  ## another context. Skip it; `ref_count` re-mints the handle on the receiver's
+  ## first ADD.
   discard
 
 proc from_flatty*(s: string, i: var int, x: var RefHandle) =
@@ -441,13 +428,11 @@ var current_owner_id* {.threadvar.}: string
   ## `owner_id`. "" outside a scope → containers are unowned.
 
 template own*(owner_id: string, body: untyped) =
-  ## Like `self.own:`, but keyed by an owner *id* you already hold rather than the
-  ## owner object — for construction, where you know the id (it's a parameter) but
-  ## the owner doesn't exist yet. Every Ed container created in the block records
-  ## `owner_id`. Wrap the whole construction (`id.own:`); anything it calls —
-  ## `init_unit`, nested constructors — inherits the scope through the threadvar,
-  ## so their containers are owned too with no scope of their own. No lifetime is
-  ## set (callbacks bind via the EdRef form once the owner exists).
+  ## Like `self.own:`, but keyed by an owner *id* — for construction, where you
+  ## have the id but the owner object doesn't exist yet. Every Ed container created
+  ## in the block (including by procs it calls — the scope is dynamic) records
+  ## `owner_id`. No lifetime is set; callbacks bind via the `EdRef` form once the
+  ## owner exists.
   let prev_owner_id = current_owner_id
   current_owner_id = owner_id
   try:
