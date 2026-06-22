@@ -1,4 +1,4 @@
-import std/[net, tables, times, options, sugar, math]
+import std/[net, tables, times, options, sugar, math, sets, isolation]
 import pkg/threading/channels {.all.}
 
 import
@@ -252,6 +252,15 @@ proc destroy*(self: EdContext) =
   ## reference drops. Idempotent.
   privileged
   debug "destroying EdContext", id = self.id
+  # Notify LOCAL peers so they drop their reverse subscription and stop fanning
+  # ops into our about-to-be-freed inbox — cross-thread channels have no
+  # keepalive signal (REMOTE peers learn from the closed socket below). Enqueue
+  # directly and non-blocking: if a peer's inbox is full we skip rather than hang
+  # teardown (the peer keeps the stale sub, the pre-existing behavior).
+  for sub in self.subscribers:
+    if sub.kind == LOCAL:
+      var iso = isolate(Message(kind: UNSUBSCRIBE, source_set: [self.id].toHashSet))
+      discard sub.chan.try_take(iso)
   for id, body in self.objects:
     if ?body:
       body.release_closures
