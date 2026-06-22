@@ -1,7 +1,4 @@
-import
-  std/[importutils, tables, sets, sequtils, algorithm, intsets, locks, sugar]
-
-import pkg/[flatty, supersnappy, threading/channels {.all.}]
+import std/[importutils, tables, sets, sequtils, intsets, locks, sugar]
 import
   ed/
     [core, components/type_registry, zens/contexts, zens/private, types {.all.}]

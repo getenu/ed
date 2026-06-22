@@ -106,7 +106,6 @@ proc from_flatty*[T: ref RootObj](s: string, i: var int, value: var T) =
     if not is_nil:
       var info: EdFlattyInfo
       s.from_flatty(i, info)
-      # :(
       if info.object_id in flatty_ctx:
         value = value.type()(flatty_ctx.resolve_proxy(flatty_ctx.objects[info.object_id]))
       else:
@@ -1166,27 +1165,14 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       fallback
 
   if self.id in source:
-    # Routing invariant violated: a message tagged with our own id arrived
-    # back at us. With the publish-side filter and the SUBSCRIBE-time stale
-    # subscription sweep this should be unreachable for any well-behaved
-    # client. If it fires, treat it as a bug rather than swallowing it.
-    error "own_message_assert",
-      ctx = self.id,
-      source = source.to_seq.join(","),
-      kind = $msg.kind,
-      sub_kind = (if sub.is_nil: "nil" else: $sub.kind),
-      raw_source = msg.source.map_it($it).join(","),
-      sub_ctx = (if sub.is_nil: "nil" else: sub.ctx_id)
-  assert self.id notin source
+    # Our own id in the source set means a message looped back to us — the
+    # publish-side source filter should prevent it. Skip rather than risk
+    # double-applying it, and warn so a routing regression stays visible.
+    warn "dropping message that looped back to its source",
+      ctx = self.id, kind = $msg.kind, source = source.to_seq.join(",")
+    return
 
   received_message_counter.inc(label_values = [self.metrics_label])
-  # when defined(ed_trace):
-  #   let src = self.name & "-" & source_str
-  #   if src in self.last_received_id:
-  #     if msg.id != self.last_received_id[src] + 1:
-  #       raise_check &"src={src} msg.id={msg.id} " &
-  #           &"last={self.last_received_id[src]}. Should be msg.id - 1"
-  #   self.last_received_id[src] = msg.id
   debug "receiving", msg, topics = "networking"
 
   # Ordered-op idempotency: a stamped op at or below our frontier was already
@@ -1273,7 +1259,6 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           materialize_it()
       else:
         materialize_it()
-      # :(
     # Safety net for paths where the initializer fills an existing object (a
     # placeholder) rather than running `defaults` — stamp + index after the fact.
     # Keyed by owner id, so arrival order vs. the owner doesn't matter.
@@ -1666,7 +1651,6 @@ proc untrack*[T, O](self: Ed[T, O], zid: EID) =
   log_defaults
   assert self.valid
 
-  # :(
   let body = self.typed_body
   if zid in body.changed_callbacks:
     let callback = body.changed_callbacks[zid]

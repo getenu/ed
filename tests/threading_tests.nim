@@ -1,5 +1,4 @@
-import std/[locks, os, unittest, tables]
-import pkg/[pretty, chronicles]
+import std/[locks, unittest]
 import ed
 import test_util
 

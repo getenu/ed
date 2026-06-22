@@ -1,5 +1,5 @@
 import std/[tables, sugar, unittest, sequtils, strutils]
-import pkg/[flatty, chronicles, pretty, netty]
+import pkg/[flatty, chronicles, netty]
 import ed
 import ed/types {.all.}
 import ed/zens/private {.all.}

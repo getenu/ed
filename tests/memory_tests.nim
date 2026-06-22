@@ -1,5 +1,5 @@
-import std/[unittest, sets, tables, times, strutils]
-import pkg/[pretty, chronicles]
+import std/[unittest, sets, tables, strutils]
+import pkg/[chronicles]
 import ed
 import ed/components/type_registry
 

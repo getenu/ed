@@ -321,6 +321,10 @@ type
     # they touch a placeholder. When `blocking`, that call pumps I/O until the
     # object fills; otherwise it kicks a fetch and returns the empty placeholder.
     materialize*: proc(self: EdContext, id: string) {.gcsafe.}
+    # Blocking materialize: a read of an unmaterialized placeholder pumps I/O
+    # until it fills. Normally driven by SyncMode (EdClient sets it for PARTIAL)
+    # or scoped via the `blocking:` template — not set on its own (a full replica
+    # never needs to block; that's why SyncMode pairs the two).
     blocking*: bool
     # Partial-replica evictor (docs/partial-replicas.md). `mem_limit` is a cache
     # budget for unclaimed bodies, in bytes — an honest, monotonic value from

@@ -1,10 +1,16 @@
 import std/[typetraits, macros, macrocache, monotimes, times]
 import ed/[core, components/private/tracking]
 import ed/components/private/global_state
-import ed/types {.all.}, ed/zens/[validations, operations, contexts, private]
+import ed/types {.all.}, ed/zens/[operations, contexts, private]
 import ed/utils/misc # ZenError
 
-export new_ident_node
+# `quote do` (in create_initializer) expands to code referencing `newIdentNode`,
+# so it must be in scope here. Re-exported so it also resolves at `Ed.bootstrap`
+# expansion sites. Deprecated alias of `ident`; suppress the notice rather than
+# rewrite the macro to genAst for 0.3.
+{.push warning[Deprecated]: off.}
+export newIdentNode
+{.pop.}
 
 # Per-type registration statements collected at compile time (one per
 # instantiated `Ed[T,O]`), emitted by `Ed.bootstrap`. Each is a trivial call —
@@ -62,7 +68,6 @@ proc materialize_received*[T, O](
   ## and that's fine: it only ever runs via `subscribe`, which guards the call.
   ## `create_initializer` references it through `cast[pointer]`, which launders
   ## the effect so the reference can't poison the gcsafe defaults/init chain.
-  mixin new_ident_node
   if bin != "":
     debug "creating received object", id
     if not ctx.subscribing and id notin ctx:
@@ -290,7 +295,9 @@ proc defaults[T, O](
     when change.item is Ed:
       msg.change_object_id = change.item.id
     elif change.item is Pair[auto, Ed]:
-      # TODO: Properly sync ref keys
+      # EdTable whose value is an Ed container (e.g. EdTable[Vector3, EdSeq]):
+      # the value syncs by id, the key by value. Ref-typed keys aren't supported
+      # here — `to_flatty` nils refs, so the key wouldn't round-trip.
       {.gcsafe.}:
         msg.obj = change.item.key.to_flatty
       msg.change_object_id = change.item.value.id
