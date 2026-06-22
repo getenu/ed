@@ -475,6 +475,34 @@ proc run*() =
     s.value = "vin"
     check calls == 2
 
+  test "pause_changes / resume_changes procs (incl. pause-all/resume-all)":
+    # The pause-all / resume-all branches read changed_callbacks/paused_eids,
+    # which the proxy/body split moved onto the body; this exercises them so a
+    # regression is a test failure, not a latent compile error on first use.
+    # Relative checks (a set may emit >1 change) — what matters is that pause
+    # stops the increments and resume restarts them, for both per-eid and all.
+    var s = EdValue[string].init
+    var calls = 0
+    let zid = s.track proc(c: seq[Change[string]]) {.gcsafe.} =
+      calls.inc
+    let c0 = calls
+    s.value = "a"
+    check calls > c0 # fires
+    s.pause_changes zid # per-eid pause
+    let c1 = calls
+    s.value = "b"
+    check calls == c1 # paused → silent
+    s.resume_changes zid
+    s.value = "c"
+    check calls > c1 # resumed
+    let c2 = calls
+    s.pause_changes # pause all
+    s.value = "d"
+    check calls == c2
+    s.resume_changes # resume all
+    s.value = "e"
+    check calls > c2
+
   test "closed":
     var s = ed("")
     var changed = false

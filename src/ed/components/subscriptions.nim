@@ -1,7 +1,7 @@
 import
   std/[
     importutils, isolation, tables, sets, sequtils, algorithm, intsets, locks,
-    math, times, strutils, macros, os,
+    math, times, strutils, macros, os, heapqueue,
   ]
 
 import pkg/threading/channels {.all.}
@@ -212,7 +212,6 @@ proc remote_body(msg: Message, no_overwrite: bool): string =
   var body_msg = msg
   body_msg.source = @[]
   body_msg.id_mappings = @[]
-  body_msg.key_bin = "" # sender-side per-key filter tag; not wire data
   if no_overwrite:
     body_msg.obj = ""
   result = body_msg.to_flatty.ed_compress
@@ -348,7 +347,7 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
   self.ctx.tick_reactor
 
 proc publish_closure(
-    self: EdContext, s: Subscription, root_id: string, follow = true
+    self: EdContext, s: Subscription, root_id: string
 ): bool {.discardable.} =
   ## Serve an ownership closure to `s`: BFS from `root_id` over `owned_by`,
   ## publishing every container and following member keys (tid:id) into the
@@ -356,7 +355,8 @@ proc publish_closure(
   ## OWNS_MEMBERS collection's member closures *before* the collection itself —
   ## so a partial subscriber's parse links member fields to real containers
   ## instead of minting unregistered husks. Returns whether anything was found.
-  ## With `follow`, everything published joins `s.interest` so future ops flow.
+  ## Everything published (except LAZY handles) joins `s.interest` so future ops
+  ## flow.
   privileged
   var ids = @[root_id]
   var to_publish: seq[string]
@@ -392,8 +392,7 @@ proc publish_closure(
       # entries with request/release; a whole-table push would defeat LAZY.
       zen.publish_create(s, contents = false)
     else:
-      if follow:
-        s.interest.incl id
+      s.interest.incl id
       zen.publish_create(s)
 
 proc serve_key_wants(self: EdContext, object_id: string) =
@@ -463,9 +462,9 @@ proc add_obj_want(self: EdContext, requester: Subscription, msg: Message) =
     for want in self.pending_obj_wants[msg.object_id]:
       if want.sub.ctx_id == requester.ctx_id:
         return
-    self.pending_obj_wants[msg.object_id].add (requester, msg.deep, msg.follow)
+    self.pending_obj_wants[msg.object_id].add (requester, msg.deep)
   else:
-    self.pending_obj_wants[msg.object_id] = @[(requester, msg.deep, msg.follow)]
+    self.pending_obj_wants[msg.object_id] = @[(requester, msg.deep)]
     self.forward_request(requester, msg)
 
 proc pack_messages(msgs: seq[Message]): seq[Message] =
@@ -488,7 +487,10 @@ proc pack_messages(msgs: seq[Message]): seq[Message] =
         assert packed_msg.type_id == 0 or packed_msg.type_id == msg.type_id
 
         packed_msg.type_id = msg.type_id
-      ops.add (msg.kind, msg.ref_id, msg.change_object_id, msg.obj)
+      ops.add (
+        msg.kind, msg.ref_id, msg.change_object_id, msg.obj, msg.delta,
+        msg.key_bin,
+      )
 
     packed_msg.obj = ops.to_flatty
     result = @[packed_msg]
@@ -739,18 +741,217 @@ proc subscribe*(
     # Reverse direction (us → authority) stays full: we push our own writes.
     ctx.subscribe(self, bidirectional = false, upstream = false)
 
+proc any_interest*(self: EdContext, object_id: string): bool =
+  ## Does any subscriber below us still hold *live* interest in this object —
+  ## directly or via a key? Cache-tier interest (`interest_cache`) does NOT
+  ## count: the subscriber only has it cached, so we may evict it and
+  ## invalidate them (Option 2). Interest auto-propagates downward, so "no live
+  ## interest" means nothing live in the whole subtree beneath us.
+  for s in self.subscribers:
+    if s.ctx_id in self.upstream_ctx_ids:
+      continue # the reverse link to our upstream is not downstream interest
+    if object_id in s.interest and object_id notin s.interest_cache:
+      return true
+    if object_id in s.key_interest:
+      return true
+  result = false
+
+proc cache_holders(self: EdContext, object_id: string): seq[Subscription] =
+  ## Subscribers holding `object_id` at cache tier — they need an invalidation
+  ## when we evict it, so they drop their now-orphaned cache.
+  for s in self.subscribers:
+    if s.ctx_id in self.upstream_ctx_ids:
+      continue
+    if object_id in s.interest_cache:
+      result.add s
+
+proc evict_body*(self: EdContext, object_id: string) =
+  ## Reclaim a dormant, unclaimed body: drop it locally and retract our
+  ## interest upstream so its ops stop flowing (otherwise the next op would
+  ## just re-materialize it). No downstream relay — by the candidate gate
+  ## nobody below us wants it. The data is safe on the authority; a later
+  ## access re-fetches. Partial replicas only.
+  if object_id notin self.objects or self.objects[object_id] == nil:
+    return
+  let body = self.objects[object_id]
+  # Retract upstream: a whole-object RELEASE (empty key batch) tells our
+  # source to stop following it for us.
+  let msg = Message(kind: RELEASE, object_id: object_id)
+  for sub in self.subscribers:
+    if sub.ctx_id in self.upstream_ctx_ids:
+      self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
+  # Invalidate any downstream cache holders: the body's gone, so the cache they
+  # hold of it is orphaned (a whole-object RELEASE from us = eviction notice).
+  for holder in self.cache_holders(object_id):
+    holder.interest.excl object_id
+    holder.interest_cache.excl object_id
+    self.send(holder, msg, OperationContext(), DEFAULT_FLAGS)
+  # Stop following it ourselves, drop ownership-index + bytes, unregister.
+  if body.owner_id.len > 0 and body.owner_id in self.owned_by:
+    self.owned_by[body.owner_id].excl object_id
+  self.forget_body_bytes(body)
+  body.release_closures
+  self.objects.del object_id
+  self.objects_need_packing = true
+  self.tick_reactor
+
+proc is_live_here(self: EdContext, body: ref EdBodyBase): bool =
+  ## Is this object live at our node — actively used, not merely cached?
+  ## True when we hold a live proxy, it's a piece of a live owner, or some
+  ## downstream holds *live* interest. Drives the interest tier we report
+  ## upstream (live vs cache) and the eviction gate.
+  if body == nil:
+    return false
+  if body.proxy != nil:
+    return true
+  if body.owner_id.len > 0 and body.owner_id in self.objects and
+      self.objects[body.owner_id] != nil and self.objects[body.owner_id].proxy != nil:
+    return true
+  if self.any_interest(body.id): # any_interest is live-only (Option 2)
+    return true
+  result = false
+
+proc evict_candidate(self: EdContext, body: ref EdBodyBase): bool =
+  ## Eligible for eviction: not live here (no live use, nobody below wants it
+  ## live), and it actually holds data worth reclaiming. Placeholders and LAZY
+  ## handles are never candidates (no resident data; LAZY is paged per-key).
+  if body == nil or body.placeholder or LAZY in body.flags:
+    return false
+  result = not self.is_live_here(body)
+
+const up_live = 1
+const up_cache = 2
+
+proc reconcile_tier(self: EdContext, body: ref EdBodyBase) =
+  ## Tell our upstream whether we hold this object live or merely cached, when
+  ## that flips (Option 2). Only for objects we follow from upstream (up_tier
+  ## set on materialize); our own creations are left alone. A demote lets the
+  ## upstream reclaim it under *its* pressure; a promote re-protects it.
+  if body == nil or body.up_tier == 0:
+    return
+  let live = self.is_live_here(body)
+  if not live and body.up_tier != up_cache:
+    body.up_tier = up_cache
+    let msg = Message(kind: INTEREST, object_id: body.id, demote: true)
+    for sub in self.subscribers:
+      if sub.ctx_id in self.upstream_ctx_ids:
+        self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
+  elif live and body.up_tier == up_cache:
+    body.up_tier = up_live
+    let msg = Message(kind: INTEREST, object_id: body.id, demote: false)
+    for sub in self.subscribers:
+      if sub.ctx_id in self.upstream_ctx_ids:
+        self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
+
+const churn_limit = 8
+  ## Arriving ops on a dormant body before we evict it: holding it costs that
+  ## much traffic, and refill is a single fetch. A see-it-work default.
+
+proc evict_sweep*(self: EdContext) =
+  ## Partial-replica eviction (docs/proxy-body-design.md phase 4), by mode (see
+  ## EdContext.mem_limit): 0 evict every unclaimed body now; finite n churn +
+  ## LRU-to-budget; Unbounded never evict. All eviction is gated on
+  ## `evict_candidate`.
+  ##
+  ## ONLY partial replicas evict (`evicts`). A full clone (partial_replica =
+  ## false) mirrors everything its upstream has — there's no safe "residue" to
+  ## drop, because anything it holds is synced state something may read back.
+  ## Evicting on a full clone breaks live round-trips (observed: an enu node ctx
+  ## given a finite limit intermittently hung the bot test mid-sync, and hung
+  ## godot's shutdown). So `mem_limit` is ignored on a full clone.
+  if not self.evicts:
+    return
+  self.prune_dead_proxies
+  # Idle fast path: nothing an eviction would act on has changed since the last
+  # sweep, and we're within budget — so there's nothing to reconcile, churn, or
+  # shed. Skip the O(objects) scans entirely (a calm context pays ~nothing per
+  # tick). prune_dead_proxies above may have set sweep_dirty (a liveness flip).
+  if not self.sweep_dirty and self.used_bytes <= self.mem_limit:
+    return
+  self.sweep_dirty = false # we're doing the work now
+  if self.mem_limit == 0:
+    # No cache: shed everything that isn't live, this tick. No byte accounting.
+    var gone: seq[string]
+    for id, body in self.objects:
+      if self.evict_candidate(body):
+        gone.add id
+    for id in gone:
+      debug "evicting (no-cache)", object_id = id
+      self.evict_body(id)
+    return
+  # Cache mode (mem_limit > 0). One scan does both: reconcile interest tiers (an
+  # object gone non-live here demotes upstream so it can reclaim it under its own
+  # pressure; one back live re-promotes) and collect churn candidates (a dormant
+  # body that keeps taking ops costs more than a refetch). What we shed is, by
+  # definition, cache tier.
+  var churned: seq[string]
+  for id, body in self.objects:
+    if body == nil:
+      continue
+    self.reconcile_tier(body)
+    if body.updates >= churn_limit and self.evict_candidate(body):
+      churned.add id
+  for id in churned:
+    debug "evicting (churn)", object_id = id, updates = self.objects[id].updates
+    self.evict_body(id)
+  # Pressure pass — only when over budget. LRU: oldest read goes first. A heap
+  # (O(n) build, O(k log n) to pop the k we actually evict) avoids sorting the
+  # whole candidate set just to drop a few off the cold end.
+  if self.used_bytes <= self.mem_limit:
+    return
+  var cands: seq[(MonoTime, string)]
+  for id, body in self.objects:
+    if self.evict_candidate(body):
+      cands.add (body.last_read, id)
+  var cand_heap = cands.to_heap_queue # min by last_read: least-recently-read first
+  while self.used_bytes > self.mem_limit and cand_heap.len > 0:
+    let (_, id) = cand_heap.pop
+    debug "evicting (pressure)",
+      object_id = id, used = self.used_bytes, limit = self.mem_limit
+    self.evict_body(id)
+  # Per-key cache pass — the bulk of a paging client's memory is in LAZY tables
+  # (voxel chunks), which the whole-object passes skip. If still over budget,
+  # shed cache-tier keys (no live downstream interest) least-recently-served
+  # first, retracting each upstream so its stream stops too.
+  if self.used_bytes <= self.mem_limit:
+    return
+  var keyed: seq[(MonoTime, string, string)] # (recency, object_id, key_bin)
+  for id, body in self.objects:
+    if body == nil or LAZY notin body.flags:
+      continue
+    for key_bin in body.key_bytes.keys:
+      var live = false
+      for s in self.subscribers:
+        if s.ctx_id in self.upstream_ctx_ids:
+          continue
+        if id in s.key_interest and key_bin in s.key_interest[id]:
+          live = true
+          break
+      if not live:
+        keyed.add (body.key_last_read.getOrDefault(key_bin), id, key_bin)
+  var key_heap = keyed.to_heap_queue # min by recency: least-recently-served first
+  while self.used_bytes > self.mem_limit and key_heap.len > 0:
+    let (_, id, key_bin) = key_heap.pop
+    debug "evicting key (pressure)", object_id = id
+    let obj = self.objects[id]
+    if obj != nil and obj.evict_key != nil:
+      let evicted = obj.evict_key(obj, key_bin) # evict_key → forget_key_bytes
+      self.drop_nested_bodies(evicted.nested)    # ...clears key_last_read too
+    self.pending_key_releases.mgetOrPut(id, @[]).add key_bin # retract upstream
+
 proc fetch*(
-    self: EdContext, object_id: string, deep = false, follow = true
+    self: EdContext, object_id: string, deep = false
 ): Fetch {.discardable.} =
   ## Ask the authority for `object_id`. Returns a handle that resolves on a
   ## later tick: `Found` (with `obj` linking the container) when it arrives, or
   ## `NotFound` if the authority NACKs. Already holding it loaded resolves
   ## immediately; fetching an id already in flight returns the same handle.
   ##
-  ## `follow` (default) registers interest with the authority, so future ops
-  ## follow — and a *missing* id is delivered whenever something creates it
-  ## (the handle still resolves NotFound for "not there right now").
-  ## `follow = false` is a snapshot: current state only, nothing afterwards.
+  ## Always registers interest, so future ops follow — and a *missing* id is
+  ## delivered whenever something creates it (the handle still resolves NotFound
+  ## for "not there right now"). To stop following, drop your reference: with no
+  ## live proxy the object becomes an eviction candidate and its interest is
+  ## retracted upstream when it's reclaimed (see the evictor / `mem_limit`).
   ##
   ## `deep` also fetches everything the id *owns* (the synced-ownership closure,
   ## recursively) — so an owner id (a unit, which isn't itself a container) pulls
@@ -766,8 +967,7 @@ proc fetch*(
     return self.fetches[object_id]
   result = Fetch(id: object_id, state: Pending)
   self.fetches[object_id] = result
-  var msg =
-    Message(kind: REQUEST, object_id: object_id, deep: deep, follow: follow)
+  var msg = Message(kind: REQUEST, object_id: object_id, deep: deep)
   for sub in self.request_targets:
     self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
   self.tick_reactor
@@ -915,6 +1115,11 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
   privileged
   log_defaults("ed publishing")
 
+  # Any inbound message can change what an eviction sweep would act on (resident
+  # bytes, interest, liveness), so mark the sweep dirty. Coarse but cheap; the
+  # sweep does its O(objects) work only when this (or a pruned death) is set.
+  self.sweep_dirty = true
+
   # Get source: either from source_set (Local) or decode from source (Remote)
   let source =
     if msg.source_set.len > 0:
@@ -991,6 +1196,8 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         ref_id: op.ref_id,
         change_object_id: op.change_object_id,
         obj: op.obj,
+        delta: op.delta,
+        key_bin: op.key_bin,
         flags: msg.flags,
         source: msg.source,
         source_set: msg.source_set,
@@ -1044,6 +1251,13 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       self.owned_by.mgetOrPut(msg.owner_id, initHashSet[string]()).incl(
         msg.object_id
       )
+    # Interest tiering (Option 2): a body materialized from an upstream CREATE
+    # is one we follow — mark it live-up so the sweep reconciles its tier as it
+    # goes live/cache here. Only on an evicting partial replica with an upstream.
+    if self.evicts and self.upstream_ctx_ids.len > 0 and
+        msg.object_id in self.objects and self.objects[msg.object_id] != nil:
+      if self.objects[msg.object_id].up_tier == 0:
+        self.objects[msg.object_id].up_tier = up_live
     # Resolve fetch handles: the object itself and — for a deep fetch of an
     # *owner* id — the owner its containers point back to (the owner has no
     # container of its own, so its handle resolves via the arriving closure).
@@ -1064,10 +1278,9 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         let wants = self.pending_obj_wants[id]
         self.pending_obj_wants.del(id)
         for want in wants:
-          if want.follow:
-            want.sub.interest.incl id
+          want.sub.interest.incl id
           if want.deep:
-            discard self.publish_closure(want.sub, id, follow = want.follow)
+            discard self.publish_closure(want.sub, id)
           elif id in self.objects and ?self.objects[id]:
             self.objects[id].publish_create(want.sub)
 
@@ -1118,6 +1331,43 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
             DEFAULT_FLAGS,
           )
         self.pending_obj_wants.del msg.object_id
+  elif msg.kind == RELEASE and msg.obj.len == 0:
+    # Whole-object release (evictor): a peer dropped object_id entirely.
+    #  - From a subscriber: an interest retract — stop streaming it to them.
+    #  - From upstream: an eviction notice — but a received drop is NEVER
+    #    authoritative over a live local hold (Scott's rule). Evict only if we
+    #    aren't using it ourselves and nobody below us wants it; otherwise keep
+    #    using it and let our own evictor reclaim it when it goes dormant.
+    for s in self.subscribers:
+      if s.ctx_id notin source:
+        continue
+      s.interest.excl msg.object_id
+      s.interest_cache.excl msg.object_id
+      s.key_interest.del msg.object_id
+    var from_upstream = false
+    for src in source:
+      if src in self.upstream_ctx_ids:
+        from_upstream = true
+        break
+    if from_upstream and msg.object_id in self and
+        self.objects[msg.object_id].proxy == nil and
+        not self.any_interest(msg.object_id):
+      self.evict_body(msg.object_id)
+  elif msg.kind == INTEREST:
+    # Live/cache tier change from a downstream subscriber (Option 2). Demote
+    # moves the object to that subscriber's cache tier — it still streams, but
+    # no longer protects the object from our eviction; promote moves it back.
+    # Our own up-tier to the authority then reconciles on the next sweep (our
+    # aggregate downstream liveness changed).
+    for s in self.subscribers:
+      if s.ctx_id notin source:
+        continue
+      if msg.object_id notin s.interest:
+        continue
+      if msg.demote:
+        s.interest_cache.incl msg.object_id
+      else:
+        s.interest_cache.excl msg.object_id
   elif msg.kind == RELEASE:
     # Per-key paging notice (see `release`). Role decides the meaning:
     #  - From a subscriber that pages from us: an interest retract — stop
@@ -1156,12 +1406,15 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
                 self.pending_key_wants[msg.object_id][key_bin].filter_it(
                   it.ctx_id != s.ctx_id
                 )
-    if retracted and self.partial_replica and not self.is_authority:
-      # Hub shedding — the symmetric counterpart of request chaining. A
-      # partial hub holds paged keys only to serve its subscribers; when the
-      # last interest in a key retracts, drop our copy and chain the release
-      # upstream (the queued broadcast also notifies any remaining downstream
-      # clones, where eviction is an idempotent no-op).
+    if retracted and self.partial_replica and not self.is_authority and
+        self.mem_limit == 0:
+      # No-cache hub: shed immediately (the symmetric counterpart of request
+      # chaining). When the last interest in a key retracts, drop our copy and
+      # chain the release upstream. A caching hub (mem_limit > 0) instead KEEPS
+      # the key — it becomes cache-tier (no live downstream wants it), stays
+      # current via the stream, and the per-key cache LRU sheds it under our
+      # own pressure (so a downstream's release doesn't force us to refetch on
+      # its return).
       for key_bin in keys:
         var still_wanted = false
         for s in self.subscribers:
@@ -1251,6 +1504,8 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           for key_bin in msg.obj.from_flatty(seq[string]):
             let reply = obj.publish_key(obj, key_bin)
             if reply.found:
+              if self.has_budget: # recency only feeds the cache LRU
+                obj.key_last_read[key_bin] = get_mono_time() # served → in-view
               # Per-key deep: nested containers (a chunk's delta seq) go
               # first so the receiver's parse links them — and they're
               # followed, so their future ops (delta appends) stream.
@@ -1294,11 +1549,10 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         # Deep fetch: the id plus its ownership closure (see publish_closure —
         # the requested id may be an *owner*, a unit id with no container of its
         # own, and the walk recurses through owned members into their subtrees).
-        let found = self.publish_closure(s, msg.object_id, follow = msg.follow)
-        if msg.follow:
-          # Follow the root id itself even if nothing exists yet: a later
-          # CREATE under this id is then delivered without re-fetching.
-          s.interest.incl msg.object_id
+        let found = self.publish_closure(s, msg.object_id)
+        # Follow the root id itself even if nothing exists yet: a later CREATE
+        # under this id is then delivered without re-fetching.
+        s.interest.incl msg.object_id
         if not found:
           if self.is_authority:
             self.send(
@@ -1311,16 +1565,13 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
             self.add_obj_want(s, msg)
       else:
         if msg.object_id in self and not self.objects[msg.object_id].placeholder:
-          if msg.follow:
-            s.interest.incl msg.object_id
+          s.interest.incl msg.object_id
           self.objects[msg.object_id].publish_create(s)
         else:
           # Missing — or held only as an unloaded placeholder, which would
-          # serve empty state; chain instead so the real data comes back.
-          if msg.follow:
-            # Keep the interest so a later CREATE under this id is delivered
-            # without re-fetching.
-            s.interest.incl msg.object_id
+          # serve empty state; chain instead so the real data comes back. Keep
+          # the interest so a later CREATE under this id is delivered.
+          s.interest.incl msg.object_id
           if self.is_authority:
             self.send(
               s,
@@ -1342,6 +1593,20 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           object_id = msg.object_id, kind = msg.kind
       return
     let obj = self.objects[msg.object_id]
+    # Eviction accounting: an arriving op for a body we're not reading is churn
+    # (the signal that holding it costs traffic); collection deltas also move
+    # its resident size. Cheap, and only when there's a finite budget to track.
+    if self.has_budget:
+      inc obj.updates
+      if msg.delta and msg.key_bin.len > 0:
+        # Table entry: account per-key so per-key evict can subtract exactly.
+        if msg.kind == ASSIGN:
+          self.set_key_bytes(obj, msg.key_bin, msg.obj.len)
+          obj.key_last_read[msg.key_bin] = get_mono_time() # updated → recent
+        elif msg.kind == UNASSIGN:
+          self.forget_key_bytes(obj, msg.key_bin)
+      elif msg.delta and msg.kind == ASSIGN:
+        self.set_body_bytes(obj, obj.bytes + msg.obj.len)
     obj.change_receiver(
       obj,
       msg,
@@ -1540,6 +1805,7 @@ proc tick*(
   self.flush_buffers
   self.flush_key_requests # send this frame's batched per-key fetches
   self.flush_key_releases # ...and its batched per-key releases (paging out)
+  self.evict_sweep        # reclaim dormant/over-budget bodies (partial replicas)
 
   # Replay whatever a silent (blocking) materialize deferred — at this tick
   # boundary, before new traffic: first the messages it buffered (apply + fire

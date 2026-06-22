@@ -50,16 +50,19 @@ proc create_initializer[T, O](self: Ed[T, O]) =
           debug "creating received object", id
           if not ctx.subscribing and id notin ctx:
             var value = bin.from_flatty(T, ctx)
-            discard Ed.init(value, ctx = ctx, id = id, flags = flags, op_ctx)
+            let item = Ed.init(value, ctx = ctx, id = id, flags = flags, op_ctx)
+            ctx.set_body_bytes(item.body, bin.len) # evictor accounting
           elif not ctx.subscribing:
             debug "restoring received object", id
             var value = bin.from_flatty(T, ctx)
             let item = Ed[T, O](ctx[id])
             let was_placeholder = item.placeholder
+            let prev_filling = ctx.filling # save: `value=` may nest a fill
             ctx.filling = was_placeholder # fill of a placeholder → tag Fill
             item.placeholder = false # fill: real state arrived
             `value=`(item, value, op_ctx = op_ctx)
-            ctx.filling = false
+            ctx.filling = prev_filling # restore (not unconditionally false)
+            ctx.set_body_bytes(item.body, bin.len) # evictor accounting
             if was_placeholder:
               relay_fill(item, op_ctx)
           else:
@@ -72,10 +75,12 @@ proc create_initializer[T, O](self: Ed[T, O]) =
                 let value = bin.from_flatty(T, ctx)
               let item = Ed[T, O](ctx[id])
               let was_placeholder = item.placeholder
+              let prev_filling = ctx.filling # save: `value=` may nest a fill
               ctx.filling = was_placeholder # fill of a placeholder → tag Fill
               item.placeholder = false # fill: real state arrived
               `value=`(item, value, op_ctx = op_ctx)
-              ctx.filling = false
+              ctx.filling = prev_filling # restore (not unconditionally false)
+              ctx.set_body_bytes(item.body, bin.len) # evictor accounting
               if was_placeholder:
                 relay_fill(item, op_ctx)
             ctx.value_initializers.add(initializer)
@@ -418,6 +423,7 @@ proc defaults[T, O](
                 if ?field:
                   nested.add field.id
         self.tracked.del key
+        body.ctx.forget_key_bytes(body, key_bin) # shrink used_bytes on evict
         self.trigger_callbacks(@[Change[O](changes: {REMOVED}, item: pair)])
         result = (found: true, nested: nested)
     else:

@@ -1,4 +1,4 @@
-import std/[unittest, sets, tables, times, monotimes]
+import std/[unittest, sets, tables, times, monotimes, strutils]
 import ed
 import ed/zens/contexts
 
@@ -149,7 +149,7 @@ proc run*() =
       client.subscribe(authority, partial = true, fetch = [])
       client.tick()
 
-      let handle = client.fetch("does_not_exist", follow = false)
+      let handle = client.fetch("does_not_exist")
       check handle.state == Pending
       authority.tick()
       client.tick()
@@ -173,33 +173,6 @@ proc run*() =
       check "late_obj" in client # ...but the kept interest delivered it
       check EdValue[int](client["late_obj"]).value == 9
 
-    test "follow = false: snapshot only — no future ops, no late delivery":
-      var authority = EdContext.init(id = "sn_auth", is_authority = true)
-      var client = EdContext.init(id = "sn_client")
-      var snap = EdValue[int].init(ctx = authority, id = "snap_x")
-      snap.value = 1
-      client.subscribe(authority, partial = true, fetch = [])
-      client.tick()
-
-      let handle = client.fetch("snap_x", follow = false)
-      authority.tick()
-      client.tick()
-      check handle.state == Found
-      check EdValue[int](client["snap_x"]).value == 1
-
-      snap.value = 2
-      client.tick()
-      check EdValue[int](client["snap_x"]).value == 1 # frozen: no interest
-
-      let missing = client.fetch("snap_later", follow = false)
-      authority.tick()
-      client.tick()
-      check missing.state == NotFound
-      var later = EdValue[int].init(ctx = authority, id = "snap_later")
-      later.value = 3
-      client.tick()
-      check "snap_later" notin client # never arrives without follow
-
     test "blocking ctx[] pulls an unknown id; a NACK fails fast":
       var authority = EdContext.init(id = "bk_auth", is_authority = true)
       var client = EdContext.init(id = "bk_client")
@@ -221,7 +194,7 @@ proc run*() =
 
       # Unknown id: the NACK resolves the blocking wait promptly (KeyError),
       # well inside the pump's safety deadline.
-      discard client.fetch("bk_missing", follow = false)
+      discard client.fetch("bk_missing")
       authority.tick()
       let started = get_mono_time()
       expect KeyError:
@@ -259,7 +232,7 @@ proc run*() =
       c.subscribe(b, partial = true, fetch = [])
       c.tick()
 
-      let handle = c.fetch("chn_missing", follow = false)
+      let handle = c.fetch("chn_missing")
       b.tick() # forward
       a.tick() # authority: real miss -> NOT_FOUND
       b.tick() # relay to the waiter
@@ -442,13 +415,255 @@ proc run*() =
       check ptbl[1] == "one, unseen"
       check ntbl[1] == "one, unseen"
 
+    test "evictor: per-key release shrinks used_bytes (paging out frees mem)":
+      # The voxel case: a LAZY table grows per-key as chunks page in, and
+      # releasing a chunk must subtract exactly what it added — otherwise the
+      # memory figure only ever climbs (the bug Scott saw: ed mem up on
+      # move-in, never down on move-out).
+      var authority = EdContext.init(id = "pk_auth", is_authority = true)
+      var client = EdContext.init(id = "pk_client", mem_limit = 1024 * 1024)
+      Ed.thread_ctx = authority
+      var owner = DeepOwner(id: "pk_owner")
+      var tbl: EdTable[int, string]
+      owner.own:
+        tbl = EdTable[int, string].init(
+          ctx = authority, id = "pk_tbl", flags = DEFAULT_FLAGS + {LAZY}
+        )
+      tbl[1] = 'x'.repeat(200)
+      tbl[2] = 'y'.repeat(200)
+
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      discard client.fetch("pk_owner", deep = true) # the LAZY handle rides in
+      authority.tick()
+      client.tick()
+      let ctbl = EdTable[int, string](client["pk_tbl"])
+      check client.used_bytes == 0 # handle only, no entries yet
+
+      ctbl.request(1)
+      ctbl.request(2)
+      client.tick()
+      authority.tick()
+      client.tick()
+      check ctbl.loaded(1) and ctbl.loaded(2)
+      let loaded = client.used_bytes
+      check loaded >= 400 # both entries accounted
+
+      ctbl.release(1) # page one chunk out
+      client.tick()
+      check not ctbl.loaded(1)
+      check client.used_bytes < loaded # ...and the memory actually dropped
+      check client.used_bytes >= 200 # the still-loaded entry remains accounted
+
+    test "interest tiers: a downstream cache doesn't pin its hub (Option 2)":
+      # A ← H ← L. L caches X with a big limit; that must NOT force H to hold X.
+      # When L demotes X (it goes non-live), H may reclaim X under its own
+      # pressure and invalidate L.
+      var authority = EdContext.init(id = "it_auth", is_authority = true)
+      var hub = EdContext.init(id = "it_hub", mem_limit = 200)
+      var leaf = EdContext.init(id = "it_leaf", mem_limit = 10_000_000)
+      Ed.thread_ctx = authority
+      discard EdValue[string].init(ctx = authority, id = "it_x")
+      EdValue[string](authority["it_x"]).value = 'z'.repeat(400)
+
+      hub.subscribe(authority, partial = true, fetch = [])
+      hub.tick()
+      leaf.subscribe(hub, partial = true, fetch = [])
+      leaf.tick()
+
+      # L fetches X live (chains L→H→A); H holds it because L is live on it.
+      var f = leaf.fetch("it_x")
+      leaf.tick()
+      hub.tick()
+      authority.tick()
+      hub.tick()
+      leaf.tick()
+      check "it_x" in leaf
+      check "it_x" in hub # H holds X for live L
+      # H must not evict X while L is live on it.
+      hub.tick()
+      check "it_x" in hub
+
+      # L drops its live reference but keeps caching (big limit). It demotes X.
+      f.obj = nil
+      f = nil
+      GC_full_collect()
+      leaf.tick() # reconcile: X non-live here → demote upstream
+      hub.tick() # H records X as cache-tier for L
+      check "it_x" in leaf # L still caches it
+      check "it_x" in hub
+
+      # H is over its own budget (X is 400+ bytes, limit 200) and X is now
+      # cache-tier (unprotected) — H sheds X and invalidates L.
+      for i in 1 .. 4:
+        hub.tick()
+        leaf.tick()
+      check "it_x" notin hub # H reclaimed it — not pinned by L's cache
+      check "it_x" notin leaf # ...and invalidated L's cache
+
+    test "mem_limit encoding: default budget, negative clamps, Unbounded holds":
+      # Honest byte budget: a small default cache, negatives clamp to no-cache,
+      # and Unbounded means never evict — the mirror image of the mem_limit 0
+      # case below (there the dropped object is shed; here it's kept).
+      check EdContext.init(id = "ml_def").mem_limit == DEFAULT_MEM_LIMIT
+      check EdContext.init(id = "ml_neg", mem_limit = -5).mem_limit == 0
+
+      var authority = EdContext.init(id = "ub_auth", is_authority = true)
+      var client = EdContext.init(id = "ub_client", mem_limit = Unbounded)
+      Ed.thread_ctx = authority
+      discard EdValue[string].init(ctx = authority, id = "ub_x")
+      EdValue[string](authority["ub_x"]).value = "hi"
+
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      var f = client.fetch("ub_x")
+      authority.tick()
+      client.tick()
+      check "ub_x" in client and f.obj != nil
+
+      f.obj = nil
+      f = nil # drop the reference — nothing is live now
+      GC_full_collect()
+      client.tick() # Unbounded: the sweep is a no-op, the cache holds it
+      check "ub_x" in client # a finite limit / no-cache would have shed it
+
+    test "evictor: mem_limit 0 evicts everything the moment it isn't live":
+      # The no-cache mode for utility clients: a fetched object survives only
+      # while a reference holds it; drop the reference and it's gone next sweep,
+      # its interest retracted upstream.
+      var authority = EdContext.init(id = "nc_auth", is_authority = true)
+      var client = EdContext.init(id = "nc_client", mem_limit = 0)
+      Ed.thread_ctx = authority
+      discard EdValue[string].init(ctx = authority, id = "nc_x")
+      EdValue[string](authority["nc_x"]).value = "hi"
+
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      var f = client.fetch("nc_x")
+      authority.tick()
+      client.tick()
+      check "nc_x" in client # held by the live handle
+      check f.obj != nil
+
+      f.obj = nil
+      f = nil # drop the reference — nothing is live now
+      GC_full_collect()
+      client.tick() # no-cache sweep evicts it immediately
+      check "nc_x" notin client
+
+    test "evictor: pressure sheds the least-recently-read body":
+      # mem_limit turns on the partial-replica evictor. Snapshot three bodies
+      # we don't keep open, go over budget, and watch the stalest shed first.
+      var authority = EdContext.init(id = "ev_auth", is_authority = true)
+      var client = EdContext.init(id = "ev_client", mem_limit = 250)
+      Ed.thread_ctx = authority
+      discard EdValue[string].init(ctx = authority, id = "ev_1")
+      discard EdValue[string].init(ctx = authority, id = "ev_2")
+      discard EdValue[string].init(ctx = authority, id = "ev_3")
+      EdValue[string](authority["ev_1"]).value = 'a'.repeat(100)
+      EdValue[string](authority["ev_2"]).value = 'b'.repeat(100)
+      EdValue[string](authority["ev_3"]).value = 'c'.repeat(100)
+
+      client.subscribe(authority, partial = true, fetch = [])
+      client.tick()
+      # Fetch all three. On a leaf (no downstream), an object with no live
+      # proxy is an eviction candidate regardless of our own upstream interest
+      # — so dropping the handles makes them evictable. Hold the handles until
+      # we're set up, then drop them (the app is done with them).
+      var f1 = client.fetch("ev_1")
+      var f2 = client.fetch("ev_2")
+      var f3 = client.fetch("ev_3")
+      authority.tick()
+      client.tick()
+      check "ev_1" in client and "ev_2" in client and "ev_3" in client
+      check client.used_bytes >= 300
+
+      # Read ev_2 and ev_3 (recently used); ev_1 is never read, so it stays the
+      # stalest. Drop the handles and force ORC so the bodies read as unheld
+      # (production reaches this as allocation drives collection).
+      discard EdValue[string](client["ev_2"]).value
+      discard EdValue[string](client["ev_3"]).value
+      f1.obj = nil
+      f2.obj = nil
+      f3.obj = nil
+      f1 = nil
+      f2 = nil
+      f3 = nil
+      GC_full_collect()
+      client.tick() # evict_sweep: over 250, sheds the stalest (ev_1) and stops
+      check "ev_1" notin client # least-recently-read went
+      check "ev_2" in client and "ev_3" in client # newer survive under budget
+      check client.used_bytes <= 250
+
+    test "caching hub keeps released keys; per-key LRU sheds under pressure":
+      # A ← H(cache) ← L. L pages a chunk in then out; a caching hub keeps it
+      # (so L's return is served from H, no refetch to A) until H's own budget
+      # forces it out, least-recently-served first.
+      var authority = EdContext.init(id = "ck_auth", is_authority = true)
+      var hub = EdContext.init(id = "ck_hub", mem_limit = 600)
+      var leaf = EdContext.init(id = "ck_leaf", mem_limit = 0)
+      Ed.thread_ctx = authority
+      var owner = DeepOwner(id: "ck_owner")
+      var tbl: EdTable[int, string]
+      owner.own:
+        tbl = EdTable[int, string].init(
+          ctx = authority, id = "ck_tbl", flags = DEFAULT_FLAGS + {LAZY}
+        )
+      tbl[1] = 'a'.repeat(200)
+      tbl[2] = 'b'.repeat(200)
+      tbl[3] = 'c'.repeat(200)
+
+      hub.subscribe(authority, partial = true, fetch = [])
+      hub.tick()
+      leaf.subscribe(hub, partial = true, fetch = [])
+      leaf.tick()
+      # Both pull the owner's closure (the LAZY table arrives as a handle).
+      discard hub.fetch("ck_owner", deep = true)
+      authority.tick()
+      hub.tick()
+      discard leaf.fetch("ck_owner", deep = true) # chains to the hub
+      leaf.tick()
+      hub.tick()
+      leaf.tick()
+      let htbl = EdTable[int, string](hub["ck_tbl"])
+      let ltbl = EdTable[int, string](leaf["ck_tbl"])
+
+      # L pages key 1 in, then releases it (out of view).
+      ltbl.request(1)
+      leaf.tick()
+      hub.tick()
+      authority.tick()
+      hub.tick()
+      leaf.tick()
+      check ltbl.loaded(1)
+      check htbl.loaded(1)
+      ltbl.release(1)
+      leaf.tick()
+      hub.tick()
+      check not ltbl.loaded(1) # L (no-cache) dropped it
+      check htbl.loaded(1) # ...but the caching hub KEPT it (no refetch on return)
+
+      # Now drive H over its 600 budget: page in 2 and 3 too (still under after
+      # 1+2+3 ≈ 600+? push past it). Least-recently-served (key 1) sheds first.
+      ltbl.request(2)
+      ltbl.request(3)
+      leaf.tick()
+      hub.tick()
+      authority.tick()
+      hub.tick()
+      leaf.tick()
+      for i in 1 .. 3:
+        hub.tick()
+      check htbl.loaded(2) and htbl.loaded(3) # live (L wants them) — protected
+      check not htbl.loaded(1) # cache-tier + stalest → shed under pressure
+
     test "hub shedding: last retract releases the hub's copy upstream":
       # The enu client topology: authority (server) <- partial hub (worker)
       # <- full leaf (node ctx). The leaf drives paging; releases must shed
       # the hub's copy and chain the retract up, or the hub re-accumulates
       # a full replica and keeps paying for ops it no longer needs.
       var authority = EdContext.init(id = "hs_auth", is_authority = true)
-      var hub = EdContext.init(id = "hs_hub")
+      var hub = EdContext.init(id = "hs_hub", mem_limit = 0) # no-cache: shed now
       var leaf = EdContext.init(id = "hs_leaf")
       Ed.thread_ctx = authority
       var owner = DeepOwner(id: "hs_owner")
@@ -589,17 +804,23 @@ proc run*() =
     test "per-key replies carry nested containers (chunk-deep)":
       var authority = EdContext.init(id = "kd_auth", is_authority = true)
       var client = EdContext.init(id = "kd_client")
-      var tbl = EdTable[int, EdSeq[int]].init(ctx = authority, id = "kd_tbl")
+      Ed.thread_ctx = authority
+      var owner = DeepOwner(id: "kd_owner")
+      var tbl: EdTable[int, EdSeq[int]]
+      owner.own:
+        tbl = EdTable[int, EdSeq[int]].init(
+          ctx = authority, id = "kd_tbl", flags = DEFAULT_FLAGS + {LAZY}
+        )
       client.subscribe(authority, partial = true, fetch = [])
       client.tick()
-      discard client.fetch("kd_tbl", follow = false) # snapshot: empty, no interest
+      discard client.fetch("kd_owner", deep = true) # LAZY handle rides the closure
       authority.tick()
       client.tick()
       check "kd_tbl" in client
 
       var entry = EdSeq[int].init(ctx = authority, id = "kd_entry")
       entry.add 7
-      tbl[1] = entry # not streamed: the client holds no interest
+      tbl[1] = entry # LAZY + no per-key interest: not streamed
       client.tick()
       let ctbl = EdTable[int, EdSeq[int]](client["kd_tbl"])
       check not ctbl.loaded(1)

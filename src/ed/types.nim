@@ -49,6 +49,13 @@ type
     lifetime*: Lifetime
       ## This ref's teardown actions — external subscriptions and (via `own`) its
       ## owned containers. `destroy` runs `lifetime.finish`. Never synced.
+    ctx* {.cursor.}: EdContext
+      ## The context this instance lives in, stamped on first `ref_pool` add. A
+      ## registered ref belongs to exactly one context (sync mints a separate
+      ## instance per context), so `destroy` uses it — not `Ed.thread_ctx`, which
+      ## is wrong under multiple contexts per thread — to find the right
+      ## `owned_by`/`ref_pool` for the cascade. Non-owning cursor (the context
+      ## outlives its refs); never synced.
 
   EdFlags* = enum
     ## Flags controlling `Ed` container behavior.
@@ -80,7 +87,6 @@ type
     ## Why a change fired, orthogonal to `ChangeKind`. (Unrelated to
     ## `Change.triggered_by`, which is the upstream changes that caused this one.)
     Update    ## An ordinary live change — a mutation or touch
-    Initial   ## Replay of existing contents at `track` time (reserved)
     Fill      ## A placeholder materialized (partial-replica fetch landed)
 
   MessageKind* = enum
@@ -100,6 +106,10 @@ type
                # is an eviction notice — drop the keys locally and relay
                # downstream. Full clones forward without evicting; the
                # authority terminates it.
+    INTEREST   # live/cache tier change (Option 2). Subscriber → upstream:
+               # `demote` (true) downgrades object_id to cache tier (still
+               # streamed, but no longer protects it from eviction); `demote`
+               # false promotes it back to live. Lightweight — no data.
 
   BaseChange* = ref object of RootObj
     changes*: set[ChangeKind]
@@ -116,8 +126,14 @@ type
     when defined(ed_trace):
       trace*: string
 
-  PackedMessageOperation* =
-    tuple[kind: MessageKind, ref_id: int, change_object_id: string, obj: string]
+  PackedMessageOperation* = tuple[
+    kind: MessageKind, ref_id: int, change_object_id: string, obj: string,
+    # Carried so a packed table op unpacks to the same Message a standalone one
+    # would: a receiver's per-key byte accounting / fanout filtering keys off
+    # delta + key_bin, and would silently skip packed-delivered table entries
+    # without them (the per-key cache then can't account or evict those keys).
+    delta: bool, key_bin: string,
+  ]
 
   IdMapping* = tuple[short_id: uint8, full_id: string]
 
@@ -142,12 +158,11 @@ type
     delta*: bool    # true for collection (non-idempotent) ops, false for registers
     deep*: bool     # REQUEST only: also send the ownership closure (everything
                     # the requested id owns via owned_by, recursively)
-    follow*: bool   # REQUEST only: register interest so future ops follow — and,
-                    # for a missing id, so it's delivered when it's created later
     key_bin*: string # Table ops only: the serialized key, stamped by
                      # build_message so fanout can filter per-key (LAZY tables /
                      # key interest) without deserializing `obj`. Sender-side
                      # only — blanked from the remote body.
+    demote*: bool    # INTEREST only: true = demote (live→cache), false = promote.
     when defined(ed_trace):
       trace*: string
       id*: int
@@ -204,6 +219,14 @@ type
     # making it tri-state.
     deep*: bool
     interest*: HashSet[string]
+    # Live/cache interest tiers (Option 2; docs/interest-tiers-design.md).
+    # `interest_cache` is a subset of `interest`: those objects still stream
+    # (the subscriber's cache stays current), but they're *cache tier* — this
+    # subscriber holds them cached, not live, so they DON'T protect against
+    # eviction. We may evict a cache-tier object under our own memory pressure
+    # and invalidate the subscriber. Live interest = `interest - interest_cache`
+    # is mandatory: an upstream must hold what's live on a downstream.
+    interest_cache*: HashSet[string]
     # Per-key interest (LAZY tables): object_id -> serialized keys this
     # subscriber has requested. A requested key streams its future ops — even
     # one that was missing at request time (an empty-space voxel chunk someone
@@ -274,6 +297,28 @@ type
     # object fills; otherwise it kicks a fetch and returns the empty placeholder.
     materialize*: proc(self: EdContext, id: string) {.gcsafe.}
     blocking*: bool
+    # Partial-replica evictor (docs/proxy-body-design.md phase 4). `mem_limit`
+    # is a cache budget for unclaimed bodies, in bytes — an honest, monotonic
+    # value from "no cache" up to "unlimited":
+    #     0  no cache — evict everything the moment it isn't live (a utility
+    #        client that holds nothing it isn't actively using). Negatives are
+    #        clamped to this at init.
+    #   0<n  cache up to n bytes; over budget, shed least-recently-read (LRU).
+    #   Unbounded (= int.high)  never evict — unlimited cache.
+    # Only a partial replica evicts (a full clone / authority never does, so the
+    # value is moot there). `used_bytes` is the running sum of resident body
+    # bytes (finite-budget mode only). See `evicts` / `has_budget`.
+    mem_limit*: int
+    used_bytes*: int
+    sweep_dirty*: bool
+      ## Set whenever something an eviction sweep would act on changed since the
+      ## last sweep: a message was processed, or a dead proxy/ref was pruned. The
+      ## sweep skips its (O(objects)) reconcile/churn/pressure work when this is
+      ## false and we're under budget — so a calm context pays ~nothing per tick.
+      ## (A pure read that mints a proxy without any message can delay a promote
+      ## by a tick; harmless and self-correcting.)
+    last_proxy_prune_epoch*: int # last dead_proxy_epoch this ctx pruned at
+    last_ref_prune_epoch*: int   # last dead_ref_epoch this ctx pruned at
     filling*: bool        # set while a placeholder fill applies → tags Fill changes
     silent*: bool         # silent (blocking) materialize: defer callbacks to next tick
     pending_msgs*: seq[Message]            # received-but-deferred during a silent pump
@@ -324,7 +369,7 @@ type
     # when the upstream answers NOT_FOUND. The authority never forwards — a
     # miss there is a real NOT_FOUND.
     pending_obj_wants*:
-      Table[string, seq[tuple[sub: Subscription, deep: bool, follow: bool]]]
+      Table[string, seq[tuple[sub: Subscription, deep: bool]]]
     # object_id -> key_bin -> waiting subscribers (per-key table requests).
     pending_key_wants*: Table[string, Table[string, seq[Subscription]]]
     ref_pool: Table[string, CountedRef]
@@ -382,6 +427,26 @@ type
     # change fires. Default false = a normal, fully-loaded object.
     placeholder*: bool
     flags*: set[EdFlags]
+    # Eviction accounting (partial-replica evictor, docs/proxy-body-design.md
+    # phase 4). All cheap to maintain; only the partial-replica sweep reads them.
+    last_read*: MonoTime  # stamped on a read-touch (value/[]/items/pairs)
+    bytes*: int           # wire-weight, stamped where we serialize (drift-ok)
+    updates*: int         # arriving ops since the last read — the churn signal
+    # Interest tier we last reported to our upstream for this object (Option 2).
+    # Reconciled each sweep against `is_live_here`: when liveness flips we send
+    # a demote (live→cache) or promote (cache→live) so the upstream isn't
+    # obligated to hold what we only have cached. 0 = none, 1 = live, 2 = cache.
+    up_tier*: int
+    # Per-key wire bytes for a table (key_bin -> last ASSIGN obj.len). Lets a
+    # per-key evict/release subtract exactly what the entry added to `bytes`,
+    # so paging out actually shrinks `used_bytes` (whole-body fill leaves this
+    # empty — only delta-grown tables populate it).
+    key_bytes*: Table[string, int]
+    # Per-key recency (key_bin -> last activity), for the per-key cache LRU on
+    # LAZY tables: stamped when a key is served to a downstream (last in-view)
+    # or updated. A hub caches released keys instead of shedding them and sheds
+    # the least-recently-served under memory pressure (interest-tiers stage 2).
+    key_last_read*: Table[string, MonoTime]
     build_message: proc(
       body: ref EdBodyBase, change: BaseChange, id: string, trace: string
     ): Message {.gcsafe.}
@@ -588,6 +653,15 @@ var next_ctx_uid*: Atomic[int]
 var dead_handles_lock: Lock
 dead_handles_lock.init_lock
 
+var dead_proxy_epoch*: Atomic[int]
+var dead_ref_epoch*: Atomic[int]
+  ## Bumped (under the lock) whenever a proxy/ref death is recorded. A context
+  ## remembers the epoch at its last prune (`last_*_prune_epoch`) and skips the
+  ## lock entirely when the epoch hasn't moved — so a tick with no deaths does no
+  ## locking, even though `prune_dead_*` is called from several hot paths
+  ## (tick, resolve_proxy, from_flatty). Process-global, matching the pending
+  ## tables (a context can be created on one thread and pruned on another).
+
 var pending_dead_refs*: Table[int, seq[string]]
   ## ctx uid -> ref_ids whose registered instance ORC has reclaimed. Populated by
   ## `RefHandle.=destroy`, which must NOT touch its `EdContext` (it may already be
@@ -607,6 +681,7 @@ proc `=destroy`(h: var typeof(RefHandle()[])) =
     {.cast(gcsafe).}:
       dead_handles_lock.acquire()
       pending_dead_refs.mget_or_put(h.ctx_uid, @[]).add(h.ref_id)
+      discard dead_ref_epoch.fetch_add(1) # wake the lock-free prune skip
       dead_handles_lock.release()
   `=destroy`(h.ref_id)
 
@@ -626,6 +701,7 @@ proc `=destroy`(h: var typeof(ProxyHandle()[])) =
     {.cast(gcsafe).}:
       dead_handles_lock.acquire()
       pending_dead_proxies.mget_or_put(h.ctx_uid, @[]).add((h.object_id, h.gen))
+      discard dead_proxy_epoch.fetch_add(1) # wake the lock-free prune skip
       dead_handles_lock.release()
   `=destroy`(h.object_id)
 
@@ -634,12 +710,22 @@ proc prune_dead_proxies*(self: EdContext) =
   ## any backref read so a dangling cursor is never returned; `gen` ensures a
   ## late prune can't clear a *newer* proxy minted after the death was recorded.
   {.cast(gcsafe).}:
+    # Lock-free fast path: if no proxy has died anywhere since our last prune,
+    # there's nothing for us to drain — skip the global lock entirely. (A death
+    # in another context can cost us one redundant lock; a tick with no deaths
+    # costs none.)
+    let epoch = dead_proxy_epoch.load
+    if epoch == self.last_proxy_prune_epoch:
+      return
     var dead: seq[(string, int)]
     dead_handles_lock.acquire()
     if self.uid in pending_dead_proxies:
       dead = pending_dead_proxies[self.uid]
       pending_dead_proxies.del(self.uid)
     dead_handles_lock.release()
+    self.last_proxy_prune_epoch = epoch
+    if dead.len > 0:
+      self.sweep_dirty = true # a liveness flip → the next sweep must reconcile
     for (object_id, gen) in dead:
       if object_id in self.objects and self.objects[object_id] != nil and
           self.objects[object_id].proxy_gen == gen:
@@ -672,6 +758,66 @@ proc release_closures*(body: ref EdBodyBase) =
   body.untrack_zid = nil
   body.sweep_gen = nil
 
+const Unbounded* = high(int)
+  ## `mem_limit = Unbounded` means never evict — an unlimited cache. The top of
+  ## the byte-budget range, so the value stays an honest, monotonic size.
+
+const DEFAULT_MEM_LIMIT* = 16 * 1024 * 1024
+  ## A context's default cache budget (16 MB). Moot on a full clone/authority
+  ## (they never evict); a small default cache for partial replicas.
+
+proc evicts*(self: EdContext): bool {.inline.} =
+  ## Reclaims memory under pressure: a partial replica with a finite limit. A
+  ## full clone / authority, and an `Unbounded` limit, never evict.
+  self.partial_replica and self.mem_limit < Unbounded
+
+proc has_budget*(self: EdContext): bool {.inline.} =
+  ## Tracks per-body bytes against a finite cap. No-cache (0) and `Unbounded`
+  ## skip the accounting — there's nothing to compare a running total against.
+  self.evicts and self.mem_limit > 0
+
+proc set_body_bytes*(self: EdContext, body: ref EdBodyBase, n: int) =
+  ## Record a body's resident wire-size and keep `used_bytes` in step. Called
+  ## where we already have the serialized form (publish/fill); drift between
+  ## those points is harmless — the total only gates *when* the limit trips,
+  ## and LRU ordering doesn't use bytes at all. Only the finite-budget mode
+  ## needs accounting; no-cache and Unbounded skip it.
+  if not self.has_budget:
+    return
+  self.used_bytes += n - body.bytes
+  body.bytes = n
+
+proc forget_body_bytes*(self: EdContext, body: ref EdBodyBase) =
+  ## Remove a body's bytes from the running total (on unregister/evict).
+  if not self.has_budget:
+    return
+  self.used_bytes -= body.bytes
+  body.bytes = 0
+
+proc set_key_bytes*(
+    self: EdContext, body: ref EdBodyBase, key_bin: string, n: int
+) =
+  ## Account a table entry's wire size, keyed so it can be subtracted exactly on
+  ## per-key evict. An update replaces the previous figure (no double-count).
+  if not self.has_budget or key_bin.len == 0:
+    return
+  let prev = body.key_bytes.getOrDefault(key_bin, 0)
+  self.set_body_bytes(body, body.bytes + n - prev)
+  body.key_bytes[key_bin] = n
+
+proc forget_key_bytes*(self: EdContext, body: ref EdBodyBase, key_bin: string) =
+  ## Drop a per-key entry's accounting on evict/release: its recency and its
+  ## bytes. Called from `evict_key` (so every eviction site cleans both parallel
+  ## tables — they can't drift) and on UNASSIGN. `del` of a missing key is a
+  ## no-op, so recency is cleared even if bytes were never accounted.
+  if not self.has_budget:
+    return
+  body.key_last_read.del key_bin
+  if key_bin notin body.key_bytes:
+    return
+  self.set_body_bytes(body, max(0, body.bytes - body.key_bytes[key_bin]))
+  body.key_bytes.del key_bin
+
 proc drop_nested_bodies*(self: EdContext, nested: seq[string]) =
   ## Unregister the nested container bodies an evicted entry carried (a paged-
   ## out chunk's delta seq): the registry releases its strong hold, so the
@@ -683,6 +829,7 @@ proc drop_nested_bodies*(self: EdContext, nested: seq[string]) =
       if body != nil:
         if body.owner_id.len > 0 and body.owner_id in self.owned_by:
           self.owned_by[body.owner_id].excl id
+        self.forget_body_bytes(body)
         body.release_closures
       self.objects.del id
 
@@ -693,12 +840,18 @@ proc prune_dead_refs*(self: EdContext) =
   ## dangling cursor is never read, and on tick to keep the pool tidy. Idempotent;
   ## cheap when nothing is pending.
   {.cast(gcsafe).}:
+    let epoch = dead_ref_epoch.load # lock-free skip when nothing died (see proxies)
+    if epoch == self.last_ref_prune_epoch:
+      return
     var dead: seq[string]
     dead_handles_lock.acquire()
     if self.uid in pending_dead_refs:
       dead = pending_dead_refs[self.uid]
       pending_dead_refs.del(self.uid)
     dead_handles_lock.release()
+    self.last_ref_prune_epoch = epoch
+    if dead.len > 0:
+      self.sweep_dirty = true
     for ref_id in dead:
       self.ref_pool.del(ref_id)
 
@@ -709,6 +862,17 @@ proc to_flatty*(s: var string, x: RefHandle) =
   discard
 
 proc from_flatty*(s: string, i: var int, x: var RefHandle) =
+  discard
+
+proc to_flatty*(s: var string, x: EdContext) =
+  ## A context is local runtime state and must never be serialized. The cursor
+  ## backref `EdRef.ctx` would otherwise drag the whole context (and its
+  ## closures) into a ref's wire form when a collection of refs is `to_flatty`d.
+  ## Re-stamped by `ref_count` on the receiver. Mirrors the RefHandle/Lifetime
+  ## skips.
+  discard
+
+proc from_flatty*(s: string, i: var int, x: var EdContext) =
   discard
 
 proc new_lifetime*(): Lifetime =
@@ -808,7 +972,8 @@ proc to_flatty*(s: var string, msg: Message) =
   s.to_flatty msg.origin
   s.to_flatty msg.delta
   s.to_flatty msg.deep
-  s.to_flatty msg.follow
+  s.to_flatty msg.key_bin
+  s.to_flatty msg.demote
   when defined(ed_trace):
     s.to_flatty msg.trace
     s.to_flatty msg.id
@@ -832,7 +997,8 @@ proc from_flatty*(s: string, i: var int, msg: var Message) =
   s.from_flatty(i, msg.origin)
   s.from_flatty(i, msg.delta)
   s.from_flatty(i, msg.deep)
-  s.from_flatty(i, msg.follow)
+  s.from_flatty(i, msg.key_bin)
+  s.from_flatty(i, msg.demote)
   when defined(ed_trace):
     s.from_flatty(i, msg.trace)
     s.from_flatty(i, msg.id)

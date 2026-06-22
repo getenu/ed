@@ -105,10 +105,38 @@ downstream interest in a key sheds its own copy and chains the release upstream.
 
 ## Notes
 
-- Whole-object interest is **grows-only** (roots + fetched ids accumulate); per-key
-  interest is sheddable via `release`. Whole-object eviction is a later layer (it
-  needs the per-key/eviction machinery, not a
-  durable log; the authority serves subsets from memory).
 - Builds on the relaxed validation (a replica already tolerates ops for objects it
   doesn't hold) and the per-object reconciliation frontier (delivery is already
   per-object). See `consistency.md`.
+
+## Eviction & interest tiers
+
+Only a **partial replica** evicts. A full clone mirrors everything its upstream
+has — there's no safe residue to drop, and evicting one breaks live round-trips
+(an enu node ctx, a full clone, given `mem_limit = 0` intermittently hung the bot
+test and godot shutdown), so a full clone ignores `mem_limit` entirely. Client
+memory is managed at the **worker** (the partial replica), on its own thread with
+orderly teardown.
+
+`mem_limit` is an honest byte budget: `0` = no cache (evict the moment something
+isn't live; negatives clamp here), `0 < n < Unbounded` = cache to `n` bytes then
+shed LRU, `Unbounded` (= `int.high`) = never evict (authority, full clones). Two
+predicates centralize the decode: `evicts` (partial + finite limit) and
+`has_budget` (evicts + positive → tracks per-body bytes). The sweep
+(`evict_sweep`) is the safety/policy split from `proxy-body.md`: a body is a
+candidate only with **no live proxy** (safety) and outside live interest (policy);
+cold/over-budget candidates drop, retracting interest upstream so the stream stops.
+
+**Interest tiers (live vs cache).** `interest` conflated "hold because I'm using
+it" with "hold because I cached it"; since interest propagates upward, a downstream
+caching freely pinned its upstream forever. So interest splits: live
+(`interest − interest_cache`, mandatory — the upstream must hold and stream it, and
+it protects against eviction) vs cache (`interest_cache`, still streamed so the
+cache stays current, but *not* eviction-protecting — the upstream may reclaim it
+under its own pressure and invalidate the holder). Each sweep `reconcile_tier`
+sends a lightweight `INTEREST` op (`demote`/`promote`) upstream when an object's
+local liveness (`is_live_here`) flips. So an upstream is bounded by
+`live(subtree) + its own budget`, never by a downstream's `mem_limit`; propagation
+cascades through hubs with no special-casing. A caching hub keeps released per-key
+entries as cache-tier and sheds them by per-key LRU under its own budget (a player
+stepping back into an area is served locally, no refetch).

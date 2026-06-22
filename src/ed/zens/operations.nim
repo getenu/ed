@@ -68,12 +68,23 @@ proc loaded*(self: ref EdBase): bool =
   ## "exists but not loaded" from "exists and is genuinely empty".
   not self.placeholder
 
+template touch_read(self: untyped) =
+  ## Coarse eviction touch: mark the body as recently used and reset its churn
+  ## counter. Every read accessor runs this (it precedes `touch_placeholder`),
+  ## so the evictor's LRU clock and "updates since read" both advance on real
+  ## use — and never on the hot voxel render path, which doesn't read through
+  ## these accessors. Only meaningful on a context with a memory limit.
+  if self.ctx != nil and self.ctx.has_budget:
+    self.body.last_read = get_mono_time()
+    self.body.updates = 0
+
 template touch_placeholder(self: untyped) =
   ## Materialize-on-access: if `self` is an unmaterialized placeholder, ask its
   ## context to materialize it (kick a fetch; block until filled when
   ## `ctx.blocking`). No-op for a loaded object or a context without the hook.
   ## LAZY containers are exempt: they're pull-only by design — entries arrive
   ## per-key (`request`), so reading one must never materialize the whole table.
+  self.touch_read
   if self.placeholder and LAZY notin self.flags and self.ctx.materialize != nil:
     self.ctx.materialize(self.ctx, self.id)
 
@@ -302,19 +313,21 @@ proc `==`*(a, b: Ed): bool =
 
 proc pause_changes*(self: Ed, eids: varargs[EID]) =
   ## Pause change callbacks. Pass specific EIDs or none to pause all.
+  privileged
   assert self.valid
   if eids.len == 0:
-    for eid in self.changed_callbacks.keys:
-      self.paused_eids.incl(eid)
+    for eid in self.typed_body.changed_callbacks.keys:
+      self.typed_body.paused_eids.incl(eid)
   else:
     for eid in eids:
-      self.paused_eids.incl(eid)
+      self.typed_body.paused_eids.incl(eid)
 
 proc resume_changes*(self: Ed, eids: varargs[EID]) =
   ## Resume change callbacks. Pass specific EIDs or none to resume all.
+  privileged
   assert self.valid
   if eids.len == 0:
-    self.paused_eids = {}
+    self.typed_body.paused_eids = {}
   else:
     for eid in eids:
       self.typed_body.paused_eids.excl(eid)
@@ -348,6 +361,7 @@ proc destroy*[T, O](self: Ed[T, O], publish = true) =
   assert self.valid
   self.untrack_all
   self.destroyed = true
+  self.ctx.forget_body_bytes(self.body) # evictor accounting
   self.body.release_closures # break body self-captures (no cycle GC)
   self.ctx.objects[self.id] = nil
   self.ctx.objects_need_packing = true
@@ -406,7 +420,12 @@ method destroy*(self: EdRef) {.base, gcsafe.} =
   ## to run afterwards.
   if not self.lifetime.is_nil:
     self.lifetime.finish()
-  Ed.thread_ctx.destroy_owned(self.id)
+  # The context this ref lives in (stamped on ref_pool add). Fall back to
+  # thread_ctx only for a ref that never entered a ref_pool — i.e. created and
+  # destroyed without ever being added to a collection, where it was minted on
+  # the current thread anyway.
+  let ctx = if self.ctx != nil: self.ctx else: Ed.thread_ctx
+  ctx.destroy_owned(self.id)
   self.destroyed = true
 
 iterator items*[T](self: EdSet[T] | EdSeq[T]): T =
