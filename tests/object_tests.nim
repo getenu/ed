@@ -1,5 +1,4 @@
 import std/[unittest]
-import pkg/[pretty, chronicles]
 import ed
 import ./object_tests_types
 

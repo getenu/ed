@@ -1,4 +1,4 @@
-import ed/[core, types]
+import ed/[types]
 export types
 
 import ed/zens/[contexts, initializers, operations, validations]

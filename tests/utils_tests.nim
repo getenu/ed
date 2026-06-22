@@ -1,5 +1,4 @@
-import std/[unittest, monotimes, sets, tables, strutils]
-import pkg/[pretty, chronicles]
+import std/[unittest, monotimes, tables, strutils]
 import ed
 import ed/utils/[stats, misc, typeids]
 from std/times import seconds, init_duration

@@ -1,9 +1,9 @@
 import
   std/[
-    tables, sequtils, sugar, macros, typetraits, sets, isolation, unittest,
+    tables, sequtils, sugar, macros, typetraits, sets, unittest,
     deques, importutils, monotimes, os
   ]
-import pkg/[pretty, chronicles, netty]
+import pkg/[chronicles, netty]
 import ed
 import test_util
 from std/times import init_duration

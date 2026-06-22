@@ -1,8 +1,7 @@
 import std/[tables, sugar, unittest]
-import pkg/[flatty, chronicles, pretty]
+import pkg/[flatty, chronicles]
 import ed
 import ed/[types, components/type_registry]
-from std/times import init_duration
 
 proc run*() =
   type

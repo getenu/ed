@@ -1,5 +1,5 @@
 import test_util
-import std/[unittest, atomics, os, sets]
+import std/[unittest, atomics, os]
 import ed
 import ed/types {.all.}
 
