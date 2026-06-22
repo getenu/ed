@@ -18,7 +18,7 @@ var flatty_ctx {.threadvar.}: EdContext
 
 type FlatRef = tuple[tid: int, ref_id: string, item: string]
 
-type ZenFlattyInfo = tuple[object_id: string, tid: int]
+type EdFlattyInfo = tuple[object_id: string, tid: int]
 
 privileged
 
@@ -78,7 +78,7 @@ proc to_flatty*[T: ref RootObj](s: var string, x: T) =
   when x is ref EdBase:
     s.to_flatty not ?x
     if ?x:
-      s.to_flatty ZenFlattyInfo((x.id, x.type.tid))
+      s.to_flatty EdFlattyInfo((x.id, x.type.tid))
   else:
     var registered_type: RegisteredType
     when compiles(x.id):
@@ -104,7 +104,7 @@ proc from_flatty*[T: ref RootObj](s: string, i: var int, value: var T) =
     var is_nil: bool
     s.from_flatty(i, is_nil)
     if not is_nil:
-      var info: ZenFlattyInfo
+      var info: EdFlattyInfo
       s.from_flatty(i, info)
       # :(
       if info.object_id in flatty_ctx:
@@ -236,7 +236,7 @@ proc send*(
     sub.send_or_buffer(msg, self.buffer)
     sent_message_counter.inc(label_values = [self.metrics_label])
   elif sub.kind == REMOTE and SYNC_REMOTE in flags:
-    when defined(zen_debug_messages):
+    when defined(ed_debug_messages):
       inc self.messages_sent
       inc self.messages_sent_by_kind[msg.kind]
       self.obj_bytes_sent += msg.obj.len
@@ -252,7 +252,7 @@ proc send*(
         self.obj_bytes_by_type[msg.type_id] += msg.obj.len
     self.send_remote(sub, source, remote_body(msg, no_overwrite = false))
   elif sub.kind == REMOTE and SYNC_ALL_NO_OVERWRITE in flags:
-    when defined(zen_debug_messages):
+    when defined(ed_debug_messages):
       inc self.messages_sent
       inc self.messages_sent_by_kind[msg.kind]
       inc self.messages_by_kind[msg.kind]
@@ -850,7 +850,7 @@ proc tick*(
           warn "dropping unparseable remote message",
             bytes = raw_msg.data.len, peer = $raw_msg.conn.address
           continue
-        when defined(zen_debug_messages):
+        when defined(ed_debug_messages):
           inc self.messages_received
           self.obj_bytes_received += msg.obj.len
           inc self.messages_by_kind[msg.kind]
@@ -999,7 +999,7 @@ template changes*[T, O](self: Ed[T, O], pause_me, body) =
 template changes*[T, O](self: Ed[T, O], body) =
   changes(self, true, body)
 
-when defined(zen_debug_messages):
+when defined(ed_debug_messages):
   proc get_type_name(tid: int): string =
     {.gcsafe.}:
       if tid in global_type_name_registry[]:
@@ -1007,9 +1007,9 @@ when defined(zen_debug_messages):
       else:
         result = "type_" & $tid
 
-  proc dump_message_stats*(self: ZenContext, label = "") =
+  proc dump_message_stats*(self: EdContext, label = "") =
     ## Dump message statistics for debugging network sync issues.
-    echo "=== ZenContext Message Stats ", label, " ==="
+    echo "=== EdContext Message Stats ", label, " ==="
     echo "  bytes_sent: ", self.bytes_sent
     echo "  bytes_received: ", self.bytes_received
     echo "  messages_sent: ", self.messages_sent

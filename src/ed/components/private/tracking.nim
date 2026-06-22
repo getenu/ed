@@ -353,11 +353,6 @@ proc put*[K, V](
   self.publish_changes changes, op_ctx
   self.trigger_callbacks changes
 
-proc len*[T, O](self: Ed[T, O]): int =
-  privileged
-  assert self.valid
-  self.tracked.len
-
 template remove*(self, key, item_exp, fun, op_ctx) =
   let obj = item_exp
   self.tracked.fun key
