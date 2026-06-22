@@ -38,6 +38,10 @@ type
     ## registry can clean up `ref_pool` when ORC reclaims the instance, keeping the
     ## pool's non-owning (cursor) hold from dangling — the subtype's own default
     ## destructor stays intact (only the trivial `RefHandle` gets a custom one).
+    id*: string
+      ## The ref's identity (sync identity rides on it via `ref_id` = tid:id).
+      ## Lives on the base so runtime code (the `destroy` method, `own` scopes,
+      ## ownership) can use it without knowing the concrete type.
     ref_handle*: RefHandle
     destroyed* {.ed_ignore.}: bool
       ## Idempotency latch for `destroy`, set at its top. `ed_ignore`: local
@@ -52,6 +56,16 @@ type
     SYNC_LOCAL        ## Sync changes to other local contexts (threads)
     SYNC_REMOTE       ## Sync changes to remote contexts (network)
     SYNC_ALL_NO_OVERWRITE  ## Sync without overwriting existing data
+    LAZY              ## Pull-only: closure pushes / deep-fetch serving skip
+                      ## this container — it syncs via explicit fetch or per-key
+                      ## requests (big voxel tables). Arrives as a placeholder
+                      ## otherwise.
+    OWNS_MEMBERS      ## This collection's EdRef members are *owned* by the
+                      ## collection's owner: membership registers them in
+                      ## `owned_by` (removal un-registers), so the owner's
+                      ## `destroy_owned` cascades into them. For true child
+                      ## collections (a unit's `units`) — NOT reference
+                      ## collections (a sign's owner, a selection list).
 
   ChangeKind* = enum
     ## Types of changes that can occur on an `Ed` container.
@@ -78,7 +92,14 @@ type
     TOUCH
     SUBSCRIBE
     PACKED
-    REQUEST  # partial replica asking the authority for an object by id
+    REQUEST    # partial replica asking the authority for an object by id
+    NOT_FOUND  # authority's NACK: the REQUESTed id isn't there (right now)
+    RELEASE    # per-key paging: a replica dropped table keys (obj = key batch).
+               # Receivers decide by role: a registered partial subscriber's
+               # RELEASE retracts its key interest; one arriving from *upstream*
+               # is an eviction notice — drop the keys locally and relay
+               # downstream. Full clones forward without evicting; the
+               # authority terminates it.
 
   BaseChange* = ref object of RootObj
     changes*: set[ChangeKind]
@@ -121,6 +142,12 @@ type
     delta*: bool    # true for collection (non-idempotent) ops, false for registers
     deep*: bool     # REQUEST only: also send the ownership closure (everything
                     # the requested id owns via owned_by, recursively)
+    follow*: bool   # REQUEST only: register interest so future ops follow — and,
+                    # for a missing id, so it's delivered when it's created later
+    key_bin*: string # Table ops only: the serialized key, stamped by
+                     # build_message so fanout can filter per-key (LAZY tables /
+                     # key interest) without deserializing `obj`. Sender-side
+                     # only — blanked from the remote body.
     when defined(ed_trace):
       trace*: string
       id*: int
@@ -169,7 +196,20 @@ type
     # `interest` (its roots + ids it has fetched). Default (not partial) gets
     # everything — the existing full-replica behavior.
     partial*: bool
+    # Partial + deep: push the ownership closure of OWNS_MEMBERS collection
+    # members (ahead of the collection / the member ADD). A game client wants
+    # this — units arrive render-ready; a narrow utility (enu_mcp) doesn't, and
+    # deep-fetches the few things it touches. Explicit per subscription for now;
+    # the default may later defer to a per-object preference (an EdFlags bit),
+    # making it tri-state.
+    deep*: bool
     interest*: HashSet[string]
+    # Per-key interest (LAZY tables): object_id -> serialized keys this
+    # subscriber has requested. A requested key streams its future ops — even
+    # one that was missing at request time (an empty-space voxel chunk someone
+    # later builds in). RELEASE retracts. Orthogonal to `interest`: a table in
+    # `interest` streams *all* its keys.
+    key_interest*: Table[string, HashSet[string]]
     # Capability filter: the set of container type-ids this subscriber can
     # materialize (its registered `type_initializers`). The authority skips any
     # object whose `type_id` isn't here, so a peer never receives an object it
@@ -193,6 +233,23 @@ type
       last_sent_time*: float64
     else:
       discard
+
+  FetchState* = enum
+    ## Where a `fetch` stands. Resolves on a later tick (the request round-trip).
+    Pending   ## request sent; no answer yet
+    Found     ## the object (or, for a deep owner fetch, its closure) arrived
+    NotFound  ## the authority answered NOT_FOUND — it didn't exist *at fetch
+              ## time*. With `follow` (the default) it still arrives later if
+              ## something creates it; the handle stays NotFound either way.
+
+  Fetch* = ref object
+    ## Handle returned by `fetch`. Watch `state`; once `Found`, `obj` links the
+    ## container — except for a deep fetch of an *owner* id (a unit), which has
+    ## no container of its own: state resolves via its arriving closure and
+    ## `obj` stays nil.
+    id*: string
+    state*: FetchState
+    obj*: ref EdBase
 
   EdContext* = ref object
     ## Central coordination object managing `Ed` container lifecycle, subscriptions,
@@ -225,6 +282,23 @@ type
     # keys). A frame's worth of request() calls collapse into one REQUEST per
     # table, flushed on the next tick.
     pending_key_requests*: Table[string, seq[string]]
+    # Per-key releases buffered between ticks, mirroring pending_key_requests:
+    # one RELEASE per table per tick. Broadcast to all peers — upstream reads it
+    # as an interest retract, downstream as an eviction notice.
+    pending_key_releases*: Table[string, seq[string]]
+    # Contexts we subscribed *to* (our data sources). An eviction notice
+    # (RELEASE) is honored only when it arrives from upstream — we are a clone
+    # of that context, so a key it dropped is gone for us too. This is how
+    # partiality inherits down a clone chain (a full clone of a full source
+    # never receives one); the authority has no upstream and terminates.
+    upstream_ctx_ids*: HashSet[string]
+    # This context subscribed partial somewhere: it holds data on demand, not
+    # by contract. Gates hub shedding — a partial hub that retracts the last
+    # downstream interest in a key drops its own copy and chains the release
+    # upstream; a *full* clone never sheds (it wants everything).
+    partial_replica*: bool
+    # Objects we've already logged a dropped-op notice for (once per id).
+    warned_missing*: HashSet[string]
     changed_callback_eid: EID
     last_id: int
     close_procs: Table[EID, proc() {.gcsafe.}]
@@ -236,6 +310,17 @@ type
     # (`destroy_owned`) in *any* context — including one that didn't construct it
     # (e.g. the server cleaning up an MCP-created bot after the client drops).
     owned_by*: Table[string, HashSet[string]]
+    # In-flight fetches by id; resolved (Found/NotFound) as answers arrive, then
+    # removed. Re-fetching after a NotFound mints a fresh handle.
+    fetches*: Table[string, Fetch]
+    # Request chaining (hubs): wants we couldn't serve locally, forwarded
+    # upstream and remembered here. Served when the data arrives; NACK-relayed
+    # when the upstream answers NOT_FOUND. The authority never forwards — a
+    # miss there is a real NOT_FOUND.
+    pending_obj_wants*:
+      Table[string, seq[tuple[sub: Subscription, deep: bool, follow: bool]]]
+    # object_id -> key_bin -> waiting subscribers (per-key table requests).
+    pending_key_wants*: Table[string, Table[string, seq[Subscription]]]
     ref_pool: Table[string, CountedRef]
     subscribers*: seq[Subscription]
     chan: Chan[Message]
@@ -295,7 +380,10 @@ type
     ): Message {.gcsafe.}
 
     publish_create: proc(
-      sub = Subscription(), broadcast = false, op_ctx = OperationContext()
+      sub = Subscription(),
+      broadcast = false,
+      op_ctx = OperationContext(),
+      contents = true, # false = handle only (empty-body CREATE; LAZY push)
     ) {.gcsafe.}
 
     change_receiver:
@@ -304,11 +392,23 @@ type
     # Per-key fetch (partial EdTable). Given a serialized key, build the ADD op
     # carrying that key's current value, so a partial subscriber can pull one
     # entry without the whole table. `found = false` if the key isn't present.
-    # nil for non-table containers.
+    # `nested` lists Ed containers inside the value (a chunk's delta seq) — the
+    # server publishes those *before* the entry so the receiver links them
+    # (per-key deep, one round trip). nil for non-table containers.
     publish_key:
-      proc(self: ref EdBase, key_bin: string): tuple[found: bool, msg: Message] {.
-        gcsafe
-      .}
+      proc(
+        self: ref EdBase, key_bin: string
+      ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.}
+
+    # Per-key eviction (paging). Given a serialized key, drop the entry locally
+    # — fires REMOVED callbacks, no publish — and report whether it was present
+    # plus the ids of Ed containers nested in its value (so the caller can shed
+    # interest / relay them). The local half of `release` and the receiving half
+    # of a RELEASE eviction notice. nil for non-table containers.
+    evict_key:
+      proc(
+        self: ref EdBase, key_bin: string
+      ): tuple[found: bool, nested: seq[string]] {.gcsafe.}
 
     # Back-reference to the owning context. `{.cursor.}` (non-owning): the
     # context owns its objects via `objects*` (a strong OrderedTable), so this
@@ -488,6 +588,7 @@ proc to_flatty*(s: var string, msg: Message) =
   s.to_flatty msg.origin
   s.to_flatty msg.delta
   s.to_flatty msg.deep
+  s.to_flatty msg.follow
   when defined(ed_trace):
     s.to_flatty msg.trace
     s.to_flatty msg.id
@@ -511,6 +612,7 @@ proc from_flatty*(s: string, i: var int, msg: var Message) =
   s.from_flatty(i, msg.origin)
   s.from_flatty(i, msg.delta)
   s.from_flatty(i, msg.deep)
+  s.from_flatty(i, msg.follow)
   when defined(ed_trace):
     s.from_flatty(i, msg.trace)
     s.from_flatty(i, msg.id)

@@ -7,7 +7,6 @@ from std/times import init_duration
 proc run*() =
   type
     Unit = ref object of EdRef
-      id: string
 
     Build = ref object of Unit
       build_stuff: string

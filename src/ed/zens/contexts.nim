@@ -149,6 +149,13 @@ proc `[]`*[T, O](self: EdContext, src: Ed[T, O]): Ed[T, O] =
   result = Ed[T, O](self.objects[src.id])
 
 proc `[]`*(self: EdContext, id: string): ref EdBase =
+  ## Container lookup by id. Raises `KeyError` when absent — except inside a
+  ## `blocking` scope, where an unknown id is fetched from the authority and
+  ## waited for (bounded, silent pump); a NOT_FOUND NACK fails fast. Still
+  ## absent afterwards → `KeyError` as usual. A destroyed-but-unswept id keeps
+  ## its old behavior (returns nil) and doesn't trigger a fetch.
+  if self.blocking and self.materialize != nil and id notin self.objects:
+    self.materialize(self, id)
   result = self.objects[id]
 
 proc len*(self: Chan): int =

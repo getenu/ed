@@ -75,10 +75,39 @@ application-visible happens mid-read (clean reentrancy; deterministic single-thr
 tests). `parse_remote` is shared by `tick` and the pump, so the wire decode lives in
 one place (no `tick` receive/process split was needed).
 
+## Fetch handles, deep fetch, and per-key paging
+
+`EdContext.fetch` returns a `Fetch` handle that resolves on a later tick — `Found`
+(with `obj` linking the container) or `NotFound` (the authority NACKed; it didn't
+exist *at fetch time*, but with `follow` it still arrives if something creates it).
+A **deep** fetch also pulls everything the id *owns* (the synced-ownership closure,
+recursively), so an owner id — a unit, which has no container of its own — pulls
+its whole owned subtree in one request; for `OWNS_MEMBERS` collections the member
+closures are pushed *before* the collection so the receiver's parse links members
+to real containers instead of husks.
+
+**Per-key paging (LAZY tables).** A big table (voxel chunks) is marked `LAZY` and
+arrives as an empty handle; the replica pulls individual entries with `request(key)`
+and drops them with `release(key)` (`loaded(key)` reports per-key residency).
+Requests and releases are batched — a frame's worth collapses into one REQUEST /
+RELEASE per table. A requested key streams its future ops even if it was missing at
+request time (an empty-space chunk someone later builds in). Ed-valued entries (a
+chunk's delta seq) are sent *before* the entry and followed, so their ops stream too
+(per-key deep).
+
+**Request chaining (hubs).** A hub that can't serve a request forwards it upstream
+(becoming the requester there) and remembers who asked; the answer — data or
+NOT_FOUND — relays back hop by hop. Only misses forward, and only the first want per
+id/key does; the authority never forwards (its miss is the real NOT_FOUND), which
+also terminates any forwarding cycle. A hub never serves a request from its *own*
+upstream (its copy is a stale subset). A no-cache partial hub that loses the last
+downstream interest in a key sheds its own copy and chains the release upstream.
+
 ## Notes
 
-- Interest is **grows-only** here (roots + fetched ids accumulate); eviction —
-  which sheds it — is a later layer (it needs the per-key/eviction machinery, not a
+- Whole-object interest is **grows-only** (roots + fetched ids accumulate); per-key
+  interest is sheddable via `release`. Whole-object eviction is a later layer (it
+  needs the per-key/eviction machinery, not a
   durable log; the authority serves subsets from memory).
 - Builds on the relaxed validation (a replica already tolerates ops for objects it
   doesn't hold) and the per-object reconciliation frontier (delivery is already

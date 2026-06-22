@@ -12,6 +12,27 @@ var initialized = false
 proc ctx(): EdContext =
   Ed.thread_ctx
 
+proc relay_fill*[T, O](item: Ed[T, O], op_ctx: OperationContext) =
+  ## Re-broadcast a just-filled placeholder to our own subscribers: they hold
+  ## the same id as a placeholder (minted from the same inline ref), and the
+  ## relayed CREATE fills theirs and clears their flag — `loaded` then means
+  ## the same thing on every hop. Exported because the generated type
+  ## initializer expands at the `Ed.bootstrap` call site, where the private
+  ## `publish_create` field isn't reachable.
+  privileged
+  # The immediate fill runs inside the receive path's owner scope
+  # (`msg.owner_id.own:`), but the placeholder was minted ownerless and the
+  # post-materialize stamp hasn't run yet — stamp before relaying, or second
+  # hops receive the fill unowned (same window as the create-relay fix). The
+  # deferred (subscribe-time) fill runs after the stamp, so `owner_id` is
+  # already set there and `current_owner_id` is empty — both paths covered.
+  if current_owner_id.len > 0 and item.owner_id != current_owner_id:
+    item.owner_id = current_owner_id
+    item.ctx.owned_by.mgetOrPut(current_owner_id, initHashSet[string]()).incl(
+      item.id
+    )
+  item.publish_create(broadcast = true, op_ctx = op_ctx)
+
 proc create_initializer[T, O](self: Ed[T, O]) =
   const ed_type_id = self.type.tid
 
@@ -34,10 +55,13 @@ proc create_initializer[T, O](self: Ed[T, O]) =
             debug "restoring received object", id
             var value = bin.from_flatty(T, ctx)
             let item = Ed[T, O](ctx[id])
-            ctx.filling = item.placeholder # fill of a placeholder → tag Fill
+            let was_placeholder = item.placeholder
+            ctx.filling = was_placeholder # fill of a placeholder → tag Fill
             item.placeholder = false # fill: real state arrived
             `value=`(item, value, op_ctx = op_ctx)
             ctx.filling = false
+            if was_placeholder:
+              relay_fill(item, op_ctx)
           else:
             if id notin ctx:
               discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
@@ -47,17 +71,28 @@ proc create_initializer[T, O](self: Ed[T, O]) =
               {.gcsafe.}:
                 let value = bin.from_flatty(T, ctx)
               let item = Ed[T, O](ctx[id])
-              ctx.filling = item.placeholder # fill of a placeholder → tag Fill
+              let was_placeholder = item.placeholder
+              ctx.filling = was_placeholder # fill of a placeholder → tag Fill
               item.placeholder = false # fill: real state arrived
               `value=`(item, value, op_ctx = op_ctx)
               ctx.filling = false
+              if was_placeholder:
+                relay_fill(item, op_ctx)
             ctx.value_initializers.add(initializer)
         elif id notin ctx:
           discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
+          if LAZY in flags:
+            # A LAZY container's empty-body CREATE is a *handle*, not a fill:
+            # contents arrive per-key (request/release). Placeholder keeps
+            # `loaded` false; touch skips LAZY, so reads never materialize the
+            # whole table by accident.
+            Ed[T, O](ctx[id]).placeholder = true
         else:
           # Empty-body CREATE for an object we were holding as a placeholder:
-          # it exists for real now, just with no value yet.
-          Ed[T, O](ctx[id]).placeholder = false
+          # it exists for real now, just with no value yet. LAZY excepted — its
+          # empty-body CREATE is a handle push and says nothing about contents.
+          if LAZY notin flags:
+            Ed[T, O](ctx[id]).placeholder = false
 
 proc defaults[T, O](
     self: Ed[T, O],
@@ -100,13 +135,19 @@ proc defaults[T, O](
       ctx.owned_by.mgetOrPut(current_owner_id, initHashSet[string]()).incl(self.id)
 
   self.publish_create = proc(
-      sub: Subscription, broadcast: bool, op_ctx = OperationContext()
+      sub: Subscription,
+      broadcast: bool,
+      op_ctx = OperationContext(),
+      contents = true,
   ) =
     log_defaults "ed publishing"
     trace "publish_create", sub
 
     {.gcsafe.}:
-      let bin = self.tracked.to_flatty
+      # `contents = false` sends a handle: an empty-body CREATE (id + flags,
+      # no data). Used to push LAZY containers to partial subscribers — the
+      # receiver registers a placeholder and pulls entries per-key.
+      let bin = if contents: self.tracked.to_flatty else: ""
     let id = self.id
     let owner_id = self.owner_id
     let flags = self.flags
@@ -156,6 +197,11 @@ proc defaults[T, O](
     assert ADDED in change.changes or REMOVED in change.changes or
       TOUCHED in change.changes
     let change = Change[O](change)
+    when change.item is Pair:
+      # Sender-side per-key filter tag (LAZY tables / key interest) — blanked
+      # from the remote body, so it costs nothing on the wire.
+      {.gcsafe.}:
+        msg.key_bin = change.item.key.to_flatty
     when change.item is Ed:
       msg.change_object_id = change.item.id
     elif change.item is Pair[auto, Ed]:
@@ -267,9 +313,12 @@ proc defaults[T, O](
 
   self.publish_key = proc(
       self: ref EdBase, key_bin: string
-  ): tuple[found: bool, msg: Message] {.gcsafe.} =
+  ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.} =
     # Per-key fetch: build the ADD op for one entry so a partial subscriber can
-    # pull it without the whole table. Only meaningful for table containers.
+    # pull it without the whole table. `nested` carries the ids of Ed
+    # containers inside the value (a chunk's delta seq) so the caller can
+    # publish them ahead of the entry — per-key deep. Only meaningful for
+    # table containers.
     when O is Pair:
       let self = Ed[T, O](self)
       type K = generic_params(O.default.type).get(0)
@@ -277,8 +326,52 @@ proc defaults[T, O](
         let key = key_bin.from_flatty(K, self.ctx)
       if key in self.tracked:
         let pair = O(key: key, value: self.tracked[key])
+        var nested: seq[string]
+        when pair.value is Ed:
+          if ?pair.value:
+            nested.add pair.value.id
+        elif pair.value is ref:
+          if ?pair.value:
+            for _, field in pair.value[].field_pairs:
+              when field is Ed:
+                if ?field:
+                  nested.add field.id
         let change = Change[O](changes: {ADDED}, item: pair)
-        result = (found: true, msg: self.build_message(self, change, self.id, ""))
+        result = (
+          found: true,
+          msg: self.build_message(self, change, self.id, ""),
+          nested: nested,
+        )
+    else:
+      discard
+
+  self.evict_key = proc(
+      self: ref EdBase, key_bin: string
+  ): tuple[found: bool, nested: seq[string]] {.gcsafe.} =
+    # Per-key eviction: drop the entry locally (REMOVED callbacks fire so
+    # watchers un-render; nothing publishes — the authority keeps the data) and
+    # report nested Ed containers so the caller can shed them. The local half
+    # of `release` and the receiving half of an eviction notice.
+    when O is Pair:
+      let self = Ed[T, O](self)
+      type K = generic_params(O.default.type).get(0)
+      {.gcsafe.}:
+        let key = key_bin.from_flatty(K, self.ctx)
+      if key in self.tracked:
+        let pair = O(key: key, value: self.tracked[key])
+        var nested: seq[string]
+        when pair.value is Ed:
+          if ?pair.value:
+            nested.add pair.value.id
+        elif pair.value is ref:
+          if ?pair.value:
+            for _, field in pair.value[].field_pairs:
+              when field is Ed:
+                if ?field:
+                  nested.add field.id
+        self.tracked.del key
+        self.trigger_callbacks(@[Change[O](changes: {REMOVED}, item: pair)])
+        result = (found: true, nested: nested)
     else:
       discard
 
