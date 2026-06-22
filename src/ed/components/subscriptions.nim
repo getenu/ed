@@ -122,6 +122,9 @@ proc from_flatty*[T: ref RootObj](s: string, i: var int, value: var T) =
       var val: FlatRef
       flatty.from_flatty(s, i, val)
 
+      # Prune reclaimed instances before the dedup read so the cursor we reuse
+      # can't be dangling (see prune_dead_refs / RefHandle).
+      flatty_ctx.prune_dead_refs()
       if val.ref_id in flatty_ctx.ref_pool:
         value = value.type()(flatty_ctx.ref_pool[val.ref_id].obj)
       else:
@@ -144,6 +147,15 @@ proc to_flatty*(s: var string, x: proc) =
   discard
 
 proc from_flatty*(s: string, i: var int, p: proc) =
+  discard
+
+proc to_flatty*(s: var string, x: Lifetime) =
+  ## A Lifetime is thread-local handle state (a set of cleanup closures), never
+  ## part of the synced value. Skip it — flatty can't serialize `seq[proc]`, and
+  ## the receiver mints its own. Mirrors the `proc` override above.
+  discard
+
+proc from_flatty*(s: string, i: var int, x: var Lifetime) =
   discard
 
 proc to_flatty*(s: var string, p: ptr) =
@@ -182,6 +194,17 @@ proc flush_buffers*(self: EdContext) =
       for msg in buffer:
         sub.send_or_buffer(msg, true)
 
+template ed_compress(s: string): string =
+  ## Pass-through under `-d:ed_no_compress` — supersnappy's snappy fast-path
+  ## over-reads within an allocation, which trips AddressSanitizer (it's a benign
+  ## third-party over-read, not our bug). The sanitizer build defines the flag so
+  ## ASan can focus on Ed's own memory behaviour; in-process sync uses one build,
+  ## so both sides agree on the (un)compressed wire format.
+  when defined(ed_no_compress): s else: s.compress
+
+template ed_uncompress(s: string): string =
+  when defined(ed_no_compress): s else: s.uncompress
+
 proc remote_body(msg: Message, no_overwrite: bool): string =
   ## The shared, compressed wire body for a remote message — identical across
   ## subscribers (source / id_mappings travel per-subscriber, outside it), so a
@@ -191,7 +214,7 @@ proc remote_body(msg: Message, no_overwrite: bool): string =
   body_msg.id_mappings = @[]
   if no_overwrite:
     body_msg.obj = ""
-  result = body_msg.to_flatty.compress
+  result = body_msg.to_flatty.ed_compress
 
 proc send_remote(
     self: EdContext, sub: Subscription, source: HashSet[string], body: string
@@ -507,14 +530,19 @@ proc subscribe*(
     # Reverse direction (us → authority) stays full: we push our own writes.
     ctx.subscribe(self, bidirectional = false)
 
-proc fetch*(self: EdContext, object_id: string) =
+proc fetch*(self: EdContext, object_id: string, deep = false) =
   ## Ask the authority for `object_id`. It's materialized on a later tick
   ## (placeholder-then-fill); the authority adds it to our interest so future
   ## ops follow. No-op if we already hold it *loaded* — a placeholder (held but
   ## not materialized) still needs fetching.
-  if object_id in self and not self.objects[object_id].placeholder:
+  ##
+  ## `deep` also fetches everything the id *owns* (the synced-ownership closure,
+  ## recursively) — so an owner id (a unit, which isn't itself a container) pulls
+  ## its whole owned state in one request. The already-loaded short-circuit is
+  ## skipped for deep fetches: holding the root says nothing about the closure.
+  if not deep and object_id in self and not self.objects[object_id].placeholder:
     return
-  var msg = Message(kind: REQUEST, object_id: object_id)
+  var msg = Message(kind: REQUEST, object_id: object_id, deep: deep)
   for sub in self.subscribers:
     self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
   self.tick_reactor
@@ -567,7 +595,10 @@ proc subscribe*(
   # can materialize (capability filter; see ref-registration.md) plus its
   # partial-replica interest (partial flag + root ids). The authority applies all
   # three to the subscription it creates for us.
-  let handshake = (toSeq(type_initializers.keys), partial, roots).to_flatty
+  let type_ids = block:
+    {.gcsafe.}:
+      toSeq(type_initializers.keys)
+  let handshake = (type_ids, partial, roots).to_flatty
   self.send(
     Subscription(
       kind: REMOTE,
@@ -735,16 +766,37 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
 
     {.gcsafe.}:
       let fn = type_initializers[msg.type_id]
-      fn(
-        msg.obj,
-        self,
-        msg.object_id,
-        msg.flags,
-        OperationContext.init(
-          source = source, ctx = self, origin = msg.origin, op_id = msg.op_id
-        ),
-      )
+      # Synced ownership: materialize INSIDE the owner's scope, not after — the
+      # initializer (`defaults`) re-broadcasts the CREATE to our own subscribers
+      # while it runs (a relay: e.g. worker -> node ctx for an object an MCP
+      # client built), so owner_id must be stamped before that re-broadcast or
+      # second-hop contexts receive it unowned.
+      template materialize_it() =
+        fn(
+          msg.obj,
+          self,
+          msg.object_id,
+          msg.flags,
+          OperationContext.init(
+            source = source, ctx = self, origin = msg.origin, op_id = msg.op_id
+          ),
+        )
+
+      if msg.owner_id.len > 0:
+        msg.owner_id.own:
+          materialize_it()
+      else:
+        materialize_it()
       # :(
+    # Safety net for paths where the initializer fills an existing object (a
+    # placeholder) rather than running `defaults` — stamp + index after the fact.
+    # Keyed by owner id, so arrival order vs. the owner doesn't matter.
+    if msg.owner_id.len > 0 and msg.object_id in self.objects and
+        ?self.objects[msg.object_id]:
+      self.objects[msg.object_id].owner_id = msg.owner_id
+      self.owned_by.mgetOrPut(msg.owner_id, initHashSet[string]()).incl(
+        msg.object_id
+      )
     # The creator is interested in its own object: make sure its canonical ops
     # flow back. Matters for partial subscribers; a no-op for full ones.
     for s in self.subscribers:
@@ -760,15 +812,35 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     for s in self.subscribers:
       if s.ctx_id notin source:
         continue
-      if msg.object_id notin self:
-        continue
       if msg.obj.len > 0:
+        if msg.object_id notin self:
+          continue
         let obj = self.objects[msg.object_id]
         for key_bin in msg.obj.from_flatty(seq[string]):
           let reply = obj.publish_key(obj, key_bin)
           if reply.found:
             self.send(s, reply.msg, OperationContext(), DEFAULT_FLAGS)
+      elif msg.deep:
+        # Deep fetch: the id plus its ownership closure. BFS over `owned_by` —
+        # the requested id may be an *owner* (a unit/EdRef id with no container
+        # of its own), so it expands even when it isn't in `objects`. Each owned
+        # container is published and added to interest; if any of those are
+        # themselves owners someday, the walk follows them too.
+        var ids = @[msg.object_id]
+        var i = 0
+        while i < ids.len:
+          let id = ids[i]
+          inc i
+          if id in self:
+            s.interest.incl id
+            self.objects[id].publish_create(s)
+          if id in self.owned_by:
+            for owned_id in self.owned_by[id]:
+              if owned_id notin ids:
+                ids.add owned_id
       else:
+        if msg.object_id notin self:
+          continue
         s.interest.incl msg.object_id
         self.objects[msg.object_id].publish_create(s)
   elif msg.kind != BLANK:
@@ -805,6 +877,17 @@ proc untrack*[T, O](self: Ed[T, O], zid: EID) =
   else:
     error "no change callback for zid", zid = zid
 
+proc bind_lifetime*[T, O](self: Ed[T, O], lifetime: Lifetime, zid: EID) =
+  ## Bind an already-registered callback (`zid`) to `lifetime`, so it untracks
+  ## when the lifetime finishes. Lets sugar that mints its own zid (`changes`,
+  ## enu's `watch`) route teardown through an owner's Lifetime without exposing
+  ## the privileged untrack path. Guarded so a manual untrack first — or the
+  ## owner dying first — is safe and idempotent.
+  privileged
+  lifetime.add proc() {.gcsafe.} =
+    if not self.destroyed and zid in self.changed_callbacks:
+      self.untrack(zid)
+
 proc track*[T, O](
     self: Ed[T, O], callback: proc(changes: seq[Change[O]]) {.gcsafe.}
 ): EID {.discardable.} =
@@ -822,6 +905,14 @@ proc track*[T, O](
     self.untrack(zid)
   result = zid
 
+  # Inside an `own` scope, route this callback's untrack through the owner's
+  # lifetime too, so it's torn down when the owner is destroyed (the typical
+  # case: a subscription on something the owner doesn't itself own). No scope
+  # open → no-op. Idempotent if also bound explicitly.
+  {.gcsafe.}:
+    if not current_lifetime.is_nil:
+      self.bind_lifetime(current_lifetime, zid)
+
 proc track*[T, O](
     self: Ed[T, O], callback: proc(changes: seq[Change[O]], zid: EID) {.gcsafe.}
 ): EID {.discardable.} =
@@ -831,6 +922,18 @@ proc track*[T, O](
     callback(changes, zid)
 
   result = zid
+
+proc track*[T, O](
+    self: Ed[T, O],
+    lifetime: Lifetime,
+    callback: proc(changes: seq[Change[O]]) {.gcsafe.},
+): EID {.discardable.} =
+  ## Like `track`, but the callback's removal is owned by `lifetime`: when the
+  ## owner calls `lifetime.finish` the callback untracks automatically — no
+  ## manual `zid` bookkeeping. (Standalone Lifetime, per the lifecycle redesign;
+  ## becomes the proxy's cleanup set under the future proxy/body split.)
+  result = self.track(callback)
+  self.bind_lifetime(lifetime, result)
 
 proc untrack_on_destroy*(self: ref EdBase, zid: EID) =
   self.bound_eids.add(zid)
@@ -850,7 +953,7 @@ proc parse_remote(
     # mappings) followed by the shared, compressed body (see send_remote).
     let (enc_source, mappings, body) =
       raw_msg.data.from_flatty((seq[uint8], seq[IdMapping], string))
-    var msg = body.uncompress.from_flatty(Message, self)
+    var msg = body.ed_uncompress.from_flatty(Message, self)
     msg.source = enc_source
     msg.id_mappings = mappings
     return (true, msg)

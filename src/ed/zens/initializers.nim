@@ -90,6 +90,15 @@ proc defaults[T, O](
     ctx.pack_objects
   ctx.objects[self.id] = self
 
+  # If created inside an `own` scope, record the owner: bake its id into the
+  # container and index it, so the owner's `destroy_owned` can tear this down in
+  # any context (container teardown is ownership-driven; the lifetime carries
+  # callbacks). No scope open → unowned.
+  {.gcsafe.}:
+    if current_owner_id.len > 0:
+      self.owner_id = current_owner_id
+      ctx.owned_by.mgetOrPut(current_owner_id, initHashSet[string]()).incl(self.id)
+
   self.publish_create = proc(
       sub: Subscription, broadcast: bool, op_ctx = OperationContext()
   ) =
@@ -99,6 +108,7 @@ proc defaults[T, O](
     {.gcsafe.}:
       let bin = self.tracked.to_flatty
     let id = self.id
+    let owner_id = self.owner_id
     let flags = self.flags
 
     template send_msg(src_ctx, sub) =
@@ -113,6 +123,7 @@ proc defaults[T, O](
           flags: flags,
           type_id: ed_type_id,
           object_id: id,
+          owner_id: owner_id,  # synced ownership (see EdBase.owner_id)
           # source is set by send() based on subscription type
         )
 

@@ -79,8 +79,10 @@ proc init*(
 
   debug "EdContext initialized", id
 
+  inc next_ctx_uid
   result = EdContext(
     id: id,
+    uid: next_ctx_uid,
     blocking_recv: blocking_recv,
     max_recv_duration: max_recv_duration,
     min_recv_duration: min_recv_duration,

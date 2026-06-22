@@ -23,7 +23,7 @@ proc run*() =
   test "reference pool cleanup":
     var ctx = EdContext.init(id = "ref_ctx")
 
-    type RefObject = ref object of RootObj
+    type RefObject = ref object of EdRef
       id: string
       data: int
 
@@ -49,11 +49,11 @@ proc run*() =
     var ctx = EdContext.init(id = "circular_ctx")
 
     type
-      NodeA = ref object of RootObj
+      NodeA = ref object of EdRef
         id: string
         b_ref: EdValue[NodeB]
 
-      NodeB = ref object of RootObj
+      NodeB = ref object of EdRef
         id: string
         a_ref: EdValue[NodeA]
 
