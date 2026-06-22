@@ -669,16 +669,20 @@ proc drain_unsubscribed*(self: EdContext): seq[string] =
   result = self.unsubscribed
   self.unsubscribed = @[]
 
-proc unsubscribe*(self: EdContext, sub: Subscription) =
+proc unsubscribe*(self: EdContext, sub: Subscription, notify = true) =
+  ## Drop `sub` and let the peer know it's gone. REMOTE: disconnect (the peer
+  ## sees a dead connection). LOCAL: send an `UNSUBSCRIBE` through its channel so
+  ## the peer drops its reverse subscription and stops fanning ops into our inbox
+  ## — there's no keepalive timeout to do it for us. `notify = false` when *we're*
+  ## reacting to an incoming `UNSUBSCRIBE`, so the two sides don't ping-pong.
   # Snapshot the id before the delete below: `sub` is a borrowed param (ORC
   # doesn't refcount parameters), and the seq slot is the only owner, so the
   # delete frees it -- every later read must use this local, not `sub`.
   let ctx_id = sub.ctx_id
   if sub.kind == REMOTE:
     self.reactor.disconnect(sub.connection)
-  else:
-    # ???
-    discard
+  elif notify and sub.kind == LOCAL:
+    self.send(sub, Message(kind: UNSUBSCRIBE), OperationContext(), DEFAULT_FLAGS)
   self.subscribers.delete self.subscribers.find(sub)
   self.unsubscribed.add ctx_id
   # Purge the subscriber's chained wants so nothing is served to a dead sub.
@@ -1609,6 +1613,12 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
             )
           else:
             self.add_obj_want(s, msg)
+  elif msg.kind == UNSUBSCRIBE:
+    # A LOCAL peer is leaving. Drop our reverse subscription(s) to it (without
+    # echoing UNSUBSCRIBE back) and record it in `unsubscribed` so consumers
+    # reap what it owned (drain_unsubscribed).
+    for s in self.subscribers.filter_it(it.ctx_id in source):
+      self.unsubscribe(s, notify = false)
   elif msg.kind != BLANK:
     if msg.object_id notin self:
       # An op for an object we don't hold is dropped. Usually benign

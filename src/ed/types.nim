@@ -120,6 +120,10 @@ type
                # `demote` (true) downgrades object_id to cache tier (still
                # streamed, but no longer protects it from eviction); `demote`
                # false promotes it back to live. Lightweight — no data.
+    UNSUBSCRIBE # a LOCAL peer is going away (unsubscribe or context destroy):
+                # the receiver drops its reverse subscription and fires the
+                # unsubscribed event. REMOTE peers learn this from the dead
+                # connection; cross-thread channels have no such signal.
 
   BaseChange* = ref object of RootObj
     changes*: set[ChangeKind]
