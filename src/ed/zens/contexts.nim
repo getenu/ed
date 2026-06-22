@@ -61,7 +61,7 @@ proc init*(
 ): EdContext =
   ## Create a new `EdContext`. Set `listen_address` to enable network sync.
   ## Set `is_authority` to make this context the sequencer (leader) that assigns
-  ## global LSNs — see docs/phase-1-keystone-spike.md.
+  ## global LSNs — see docs/consistency.md.
   privileged
   log_scope:
     topics = "ed"

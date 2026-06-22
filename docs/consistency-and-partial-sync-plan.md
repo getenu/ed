@@ -529,7 +529,7 @@ The axes worth holding in mind, each with a now/later verdict:
 > still parked; Phases 2+ are future. Per-object `mode` (optimistic/confirmed)
 > and gap/replay buffering ended up **deferred** rather than landing in Phase 1 —
 > the implemented reconciliation is state-based forward correction with the
-> `op_id`-superseded rule (see `reconciliation-design.md`), not LWW-snap +
+> `op_id`-superseded rule (see `consistency.md`), not LWW-snap +
 > op-replay.
 
 - **Phase 0 — Plumbing (now, low risk).** Rebase onto main. Land forwarding

@@ -61,7 +61,7 @@ type
     source_set*: HashSet[string]  # Full source for internal use (Local) - not serialized
     id_mappings*: seq[IdMapping]  # New mappings for unknown IDs
     flags*: set[EdFlags]
-    # Phase 1: global ordering (see docs/phase-1-keystone-spike.md)
+    # Phase 1: global ordering (see docs/consistency.md)
     epoch*: int64   # authority epoch; bumped on host/leader change
     lsn*: int64     # global sequence number from the authority (0 = unordered)
     op_id*: int64   # originator-generated id for ack/commit correlation (0 = none)
@@ -128,7 +128,7 @@ type
     ## Central coordination object managing `Ed` container lifecycle, subscriptions,
     ## and message passing between threads/network.
     id*: string
-    # Phase 1: global LSN + appointed leader (docs/phase-1-keystone-spike.md)
+    # Phase 1: global LSN + appointed leader (docs/consistency.md)
     is_authority*: bool   # this context is the sequencer (leader) for its objects
     leader_id*: string    # ctx_id of the authority (own id when is_authority)
     lsn_counter*: int64   # authority-only: next global LSN to assign
