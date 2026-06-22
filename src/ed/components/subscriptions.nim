@@ -619,7 +619,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
   #    (op_id < our latest for this object) — that's what stops a moving entity
   #    snapping back to its own stale echoes. Our *latest* own write (op_id ==
   #    latest) is applied, so a contended register still converges to the
-  #    canonical value. (The op_id-superseded rule; see reconciliation-design.md.)
+  #    canonical value. (The op_id-superseded rule; see consistency.md.)
   if msg.origin == self.id:
     let superseded =
       msg.delta or
