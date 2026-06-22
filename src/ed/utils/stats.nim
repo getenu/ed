@@ -1,15 +1,8 @@
-import std/[monotimes, tables, macros]
-import std/times except seconds, now
-import logging
+import std/[tables, macros]
+import logging, timing
 
 var saved_stats {.threadvar.}: Table[string, (int, Duration)]
 var next_dump = Monotime.low
-
-template now*(): untyped =
-  get_mono_time()
-
-proc seconds*(s: float | int): Duration {.inline.} =
-  init_duration(milliseconds = int(s * 1000))
 
 proc maybe_dump_stats*() =
   if now() > next_dump:
@@ -26,10 +19,12 @@ proc stats_impl(enabled: bool, proc_def: NimNode): NimNode =
   if enabled:
     body = quote:
       const proc_name = `proc_name`
-      var start_time = now()
+      # get_mono_time, not now(): the quoted code resolves at the expansion
+      # site, where std/times' DateTime now() may also be in scope.
+      var start_time = get_mono_time()
 
       proc sample_stats(name: string) =
-        let finish_time = now()
+        let finish_time = get_mono_time()
         let duration = finish_time - start_time
         if name in saved_stats:
           saved_stats[name][0] += 1

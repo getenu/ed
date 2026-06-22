@@ -216,13 +216,21 @@ proc remote_body(msg: Message, no_overwrite: bool): string =
     body_msg.obj = ""
   result = body_msg.to_flatty.ed_compress
 
+const wire_header = "ED\x01"
+  ## Magic + wire-format version, prefixed to every remote packet. flatty is
+  ## positional: bytes from an older wire format can decode *cleanly* into
+  ## wrong-typed fields and blow up (or corrupt state) deep in processing — a
+  ## version-skewed peer once killed a server silently this way. The prefix
+  ## rejects foreign packets at the front door instead. Bump the version byte
+  ## whenever the wire format changes.
+
 proc send_remote(
     self: EdContext, sub: Subscription, source: HashSet[string], body: string
 ) =
-  ## One remote packet: a small per-subscriber header (source short-ids + any
-  ## new mappings) followed by the shared compressed body.
+  ## One remote packet: the wire header, then a small per-subscriber header
+  ## (source short-ids + any new mappings), then the shared compressed body.
   let (encoded_source, new_mappings) = sub.encode_source(source)
-  let packet = (encoded_source, new_mappings, body).to_flatty
+  let packet = wire_header & (encoded_source, new_mappings, body).to_flatty
   self.bytes_sent += packet.len
   self.reactor.send(sub.connection, packet)
   sub.last_sent_time = epoch_time()
@@ -302,8 +310,14 @@ proc fanout(
     source.incl self.id
   var body, body_no_overwrite: string
   for sub in targets:
-    if sub.partial and msg.object_id notin sub.interest:
-      continue  # partial subscriber: only ops for objects it's interested in
+    if sub.partial and msg.kind != DESTROY and msg.object_id notin sub.interest:
+      # Partial subscriber: only ops for objects it's interested in. DESTROY is
+      # exempt, mirroring the capability gate below: a partial replica can hold
+      # ids the authority never learned about (placeholders minted from inline
+      # refs during parse), and filtering their DESTROYs strands those bodies
+      # forever (the reload leak). A destroy for an id a peer doesn't hold is a
+      # cheap no-op.
+      continue
     if sub.capabilities.len > 0 and msg.type_id != 0 and
         msg.type_id notin sub.capabilities:
       # Peer can't materialize this type — never send its ops. type_id == 0
@@ -648,6 +662,13 @@ proc add_subscriber*(
       debug "not sending object because remote ctx already has it",
         from_ctx = self.id, to_ctx = sub.ctx_id, ed_id = id
 
+proc drain_unsubscribed*(self: EdContext): seq[string] =
+  ## The ctx ids of peers that unsubscribed (or died) since the last drain.
+  ## Accumulates until drained — consume with this, not by reading the field,
+  ## so no event is lost to tick timing.
+  result = self.unsubscribed
+  self.unsubscribed = @[]
+
 proc unsubscribe*(self: EdContext, sub: Subscription) =
   # Snapshot the id before the delete below: `sub` is a borrowed param (ORC
   # doesn't refcount parameters), and the seq slot is the only owner, so the
@@ -696,19 +717,21 @@ proc subscribe*(
     self: EdContext,
     ctx: EdContext,
     bidirectional = true,
-    partial = false,
+    mode = FULL,
     fetch: open_array[string] = [],
     deep = false,
     upstream = true,
 ) =
-  ## Subscribe to another local context for cross-thread sync. When `partial`,
-  ## we only receive the objects in `fetch` (and ids we `fetch` later) — the
-  ## authority→us direction is filtered; our own writes still flow to it. The
-  ## fetched ids land in the registry, so `ctx[id]` works for them afterwards.
-  ## `ctx` is recorded as our upstream (we're a clone of it — eviction notices
-  ## from it are honored); the internal reverse leg passes `upstream = false`
-  ## because receiving a client's own writes doesn't make it our data source.
+  ## Subscribe to another local context for cross-thread sync. When `mode` is
+  ## partial, we only receive the objects in `fetch` (and ids we `fetch` later)
+  ## — the authority→us direction is filtered; our own writes still flow to it.
+  ## The fetched ids land in the registry, so `ctx[id]` works for them
+  ## afterwards. `ctx` is recorded as our upstream (we're a clone of it —
+  ## eviction notices from it are honored); the internal reverse leg passes
+  ## `upstream = false` because receiving a client's own writes doesn't make
+  ## it our data source.
   privileged
+  let partial = mode != FULL
   debug "local subscribe", ctx = self.id
   self.materialize = materialize_impl # enable materialize-on-access
   if upstream:
@@ -1004,17 +1027,21 @@ proc subscribe*(
     self: EdContext,
     address: string,
     bidirectional = true,
-    partial = false,
+    mode = FULL,
     fetch: open_array[string] = [],
     deep = false,
     callback: proc() {.gcsafe.} = nil,
 ) =
   ## Subscribe to a remote context for network sync. Address format: "host" or
-  ## "host:port". When `partial`, the authority only sends the objects in `fetch`
-  ## (and ids fetched later); the reference graph + materialize-on-access pull the
-  ## rest. Mirrors the local `subscribe(partial = ..., fetch = ...)`.
+  ## "host:port". When `mode` is partial, the authority only sends the objects
+  ## in `fetch` (and ids fetched later); the reference graph + materialize-on-
+  ## access pull the rest. Mirrors the local `subscribe(mode = ..., fetch =
+  ## ...)`. Blocking semantics (PARTIAL vs PARTIAL_ASYNC) are a property of the
+  ## context (`self.blocking`), set by the caller — the handshake only carries
+  ## the partial filter.
   var address = address
   var port = 9632
+  let partial = mode != FULL
 
   debug "remote subscribe", address
   self.materialize = materialize_impl # enable materialize-on-access
@@ -1218,7 +1245,9 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         return
 
     {.gcsafe.}:
-      let fn = type_initializers[msg.type_id]
+      # Stored as a raw pointer (see initializers.register_initializer); cast
+      # back to the materializer proc type to call it.
+      let fn = cast[CreateInitializer](type_initializers[msg.type_id])
       # Synced ownership: materialize INSIDE the owner's scope, not after — the
       # initializer (`defaults`) re-broadcasts the CREATE to our own subscribers
       # while it runs (a relay: e.g. worker -> node ctx for an object an MCP
@@ -1585,8 +1614,10 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       # An op for an object we don't hold is dropped. Usually benign
       # (partial replica, version skew), but a drop on a paging path means a
       # requested entry silently never loads — surface the first one per
-      # object so a stalled chain is visible in the logs.
-      if msg.object_id notin self.warned_missing:
+      # object so a stalled chain is visible in the logs. DESTROY misses are
+      # fully expected (destroys broadcast past the interest filter so peers
+      # holding self-minted placeholders converge) — drop them silently.
+      if msg.kind != DESTROY and msg.object_id notin self.warned_missing:
         self.warned_missing.incl msg.object_id
         notice "dropping op for missing object",
           object_id = msg.object_id, kind = msg.kind
@@ -1737,11 +1768,22 @@ proc parse_remote(
   ## decode lives in exactly one place.
   if raw_msg.data == "PING":
     return (false, Message())
+  if not raw_msg.data.starts_with(wire_header):
+    # A peer speaking a different wire version (or a stray packet). Reject it
+    # here: flatty is positional, so foreign bytes can decode cleanly into
+    # wrong-typed fields and corrupt or crash processing. Warn once per peer —
+    # an old client reconnect-looping would otherwise flood the log.
+    let peer = $raw_msg.conn.address
+    if peer notin self.warned_missing:
+      self.warned_missing.incl peer
+      warn "dropping message from incompatible peer (wire version mismatch)",
+        peer, bytes = raw_msg.data.len
+    return (false, Message())
   try:
     # Wire format: a small per-subscriber header (source short-ids + new
     # mappings) followed by the shared, compressed body (see send_remote).
-    let (enc_source, mappings, body) =
-      raw_msg.data.from_flatty((seq[uint8], seq[IdMapping], string))
+    let (enc_source, mappings, body) = raw_msg.data[wire_header.len ..^ 1]
+      .from_flatty((seq[uint8], seq[IdMapping], string))
     var msg = body.ed_uncompress.from_flatty(Message, self)
     msg.source = enc_source
     msg.id_mappings = mappings
@@ -1786,7 +1828,11 @@ proc tick*(
   self.tick_keepalives()
 
   var msg: Message
-  self.unsubscribed = @[]
+  # `unsubscribed` is NOT cleared here: it accumulates until the consumer
+  # drains it (see drain_unsubscribed). Clearing it per-tick made the events
+  # tick-scoped transients — a consumer that polls between ticks loses any
+  # event when an extra tick sneaks in between produce and consume (the enu
+  # agent-bot reap missed disconnects that landed during a reload this way).
   var count = 0
   self.free_refs
   self.prune_dead_proxies # clear backrefs of proxies ORC reclaimed

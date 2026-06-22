@@ -1,5 +1,5 @@
 import test_util
-import std/[unittest, atomics, os, times]
+import std/[unittest, atomics, os, sets]
 import ed
 import ed/types {.all.}
 
@@ -53,12 +53,11 @@ proc run*() =
     let client = EdClient(
       id: "test-agent",
       address: test_address,
-      chan_size: 100,
       on_connect: on_connect,
     )
 
     check not client.connected
-    client.connect
+    client.reconnect
     check client.connected
     check setups == 1
 
@@ -80,13 +79,13 @@ proc run*() =
     check client.connected
     check setups == 1
 
-    # ensure_connected is a no-op while connected.
-    client.ensure_connected
+    # online is a no-op while connected.
+    client.online
     check setups == 1
 
     # An explicit reconnect rebuilds the context under the same id and
     # reruns on_connect; the server's stale-sub sweep accepts it.
-    client.connect
+    client.reconnect
     check client.connected
     check setups == 2
 
@@ -100,10 +99,9 @@ proc run*() =
     let client = EdClient(
       id: "test-agent-restart",
       address: test_address,
-      chan_size: 100,
       on_connect: on_connect,
     )
-    client.connect
+    client.reconnect
     check client.connected
     check setups == 1
 
@@ -133,3 +131,32 @@ proc run*() =
       sleep 20
     check recovered
     check setups >= 2
+
+  test "waiting helpers raise SessionLost when the live session goes away":
+    setups = 0
+    start_server()
+    let client = EdClient(id: "test-agent-sl", address: test_address)
+    client.reconnect
+    check client.connected
+
+    # The peer dies mid-wait. tick_until's ticking reaps the dead
+    # connection (and eventually reconnects, replacing the context); either
+    # way the session this wait captured handles from is gone.
+    stop_server()
+    var lost = false
+    try:
+      discard client.tick_until(30.seconds, false)
+    except SessionLost:
+      lost = true
+    check lost
+
+    # A wait that STARTS without a live session is a connect-wait: it must
+    # keep looping through reconnect attempts without raising.
+    start_server()
+    defer:
+      stop_server()
+    check client.tick_until(10.seconds, client.connected)
+
+when is_main_module:
+  Ed.bootstrap
+  run()

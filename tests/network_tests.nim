@@ -1,5 +1,5 @@
-import std/[tables, sugar, unittest, sequtils]
-import pkg/[flatty, chronicles, pretty]
+import std/[tables, sugar, unittest, sequtils, strutils]
+import pkg/[flatty, chronicles, pretty, netty]
 import ed
 import ed/types {.all.}
 import ed/zens/private {.all.}
@@ -229,6 +229,48 @@ proc run*() =
     check remote_subs[0].ctx_id == "mainA"
 
     publisher.close
+
+  test "a wire-version-mismatched peer is rejected, not fatal":
+    # A version-skewed client once killed a server silently: flatty is
+    # positional, so old-format bytes can decode cleanly into wrong-typed
+    # fields and blow up deep in processing. Every packet now carries a wire
+    # header; foreign packets drop at parse_remote with a warning, and the
+    # server keeps serving its real clients.
+    let host = free_addr()
+    let port = host.split(":")[1].parse_int
+    var server = EdContext.init(
+      id = "wire_srv",
+      listen_address = host,
+      min_recv_duration = recv_duration,
+      blocking_recv = true,
+    )
+    var sv = EdValue[string].init(id = "wire_v", ctx = server)
+    sv.value = "alive"
+
+    # A "client" speaking a different wire format: valid netty framing,
+    # old-format-shaped payloads (no wire header) — including one that
+    # resembles the pre-header packet layout.
+    var rogue = new_reactor()
+    let conn = rogue.connect("127.0.0.1", port)
+    let old_style = (@[1'u8, 2'u8], @[("a", "b")], "not compressed").to_flatty
+    for payload in ["garbage", old_style, "\x00\x01\x02\x03"]:
+      rogue.send(conn, payload)
+      rogue.tick()
+
+    # The server must survive parsing all of it...
+    for _ in 0 ..< 10:
+      server.tick(blocking = false)
+      rogue.tick()
+
+    # ...and still serve a real, matching client.
+    Ed.thread_ctx = EdContext.init(id = "wire_cli")
+    Ed.thread_ctx.subscribe host,
+      callback = proc() =
+        server.tick(blocking = false)
+    var cv = EdValue[string](Ed.thread_ctx["wire_v"])
+    check cv.value == "alive"
+
+    server.close
 
 when is_main_module:
   Ed.bootstrap

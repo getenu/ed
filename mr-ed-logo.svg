@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" width="800" height="800">
+  <defs>
+    <style>
+      .outline{fill:none;stroke:#1b1b1b;stroke-width:12;stroke-linecap:round;stroke-linejoin:round}
+    </style>
+    <filter id="paper" x="-10%" y="-10%" width="120%" height="120%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="1" seed="2" result="noise"/>
+      <feColorMatrix type="saturate" values="0"/>
+      <feComponentTransfer>
+        <feFuncA type="table" tableValues="0 0.06"/>
+      </feComponentTransfer>
+      <feBlend in="SourceGraphic" in2="noise" mode="multiply"/>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="800" height="800" fill="#f2e3c7"/>
+
+  <!-- spotlight circle -->
+  <circle cx="280" cy="340" r="220" fill="#f7d8a6"/>
+
+  <!-- microphone -->
+  <g transform="translate(470 380) rotate(-8)">
+    <rect x="0" y="0" width="150" height="120" rx="24" fill="#2d5b7a" stroke="#1b1b1b" stroke-width="10"/>
+    <rect x="16" y="16" width="118" height="88" rx="18" fill="#3f7aa1"/>
+    <line x1="30" y1="30" x2="30" y2="90" class="outline"/>
+    <line x1="60" y1="26" x2="60" y2="94" class="outline"/>
+    <line x1="90" y1="26" x2="90" y2="94" class="outline"/>
+    <line x1="120" y1="30" x2="120" y2="90" class="outline"/>
+    <rect x="58" y="120" width="34" height="90" rx="16" fill="#1b1b1b"/>
+    <rect x="20" y="200" width="110" height="22" rx="11" fill="#1b1b1b"/>
+  </g>
+
+  <!-- horse head -->
+  <g filter="url(#paper)">
+    <path d="M140 190
+             C110 240, 110 330, 150 380
+             C190 430, 240 470, 270 520
+             C300 570, 360 610, 440 600
+             C520 590, 570 530, 580 450
+             C590 380, 560 310, 520 270
+             C480 230, 430 210, 380 210
+             C330 210, 270 230, 220 220
+             C190 214, 165 200, 140 190 Z"
+          fill="#c87a4a" stroke="#1b1b1b" stroke-width="12" stroke-linejoin="round"/>
+
+    <!-- muzzle -->
+    <path d="M260 460 C270 520, 330 560, 400 560
+             C470 560, 520 520, 520 470
+             C520 420, 470 390, 400 390
+             C330 390, 260 420, 260 460 Z"
+          fill="#e6b08a" stroke="#1b1b1b" stroke-width="12"/>
+
+    <!-- nostrils -->
+    <ellipse cx="350" cy="505" rx="22" ry="14" fill="#1b1b1b"/>
+    <ellipse cx="450" cy="505" rx="22" ry="14" fill="#1b1b1b"/>
+
+    <!-- mouth line -->
+    <path d="M300 530 C350 560, 460 560, 500 520" class="outline"/>
+
+    <!-- teeth -->
+    <path d="M330 538 C350 560, 410 560, 430 538" fill="#f7f2e8" stroke="#1b1b1b" stroke-width="8"/>
+
+    <!-- eye -->
+    <ellipse cx="420" cy="320" rx="34" ry="28" fill="#f7f2e8" stroke="#1b1b1b" stroke-width="10"/>
+    <circle cx="430" cy="325" r="12" fill="#1b1b1b"/>
+    <circle cx="435" cy="320" r="4" fill="#f7f2e8"/>
+
+    <!-- eyebrow -->
+    <path d="M380 270 C420 250, 470 260, 500 280" class="outline"/>
+
+    <!-- ear -->
+    <path d="M330 160 C340 120, 390 110, 420 150
+             C390 160, 360 180, 330 160 Z"
+          fill="#c87a4a" stroke="#1b1b1b" stroke-width="12"/>
+    <path d="M350 160 C360 135, 390 130, 402 150"
+          fill="none" stroke="#1b1b1b" stroke-width="10"/>
+
+    <!-- mane -->
+    <path d="M200 210 C220 170, 260 140, 320 140
+             C360 140, 400 150, 430 170
+             C380 190, 330 210, 270 240
+             C240 250, 215 235, 200 210 Z"
+          fill="#1b1b1b"/>
+
+    <!-- neck -->
+    <path d="M210 420 C180 520, 190 630, 260 700
+             C340 740, 430 730, 490 690
+             C390 650, 320 590, 270 510
+             C240 465, 225 440, 210 420 Z"
+          fill="#c87a4a" stroke="#1b1b1b" stroke-width="12"/>
+
+    <!-- collar -->
+    <path d="M260 660 C320 690, 420 690, 480 660" fill="none" stroke="#1b1b1b" stroke-width="16"/>
+    <circle cx="300" cy="670" r="10" fill="#1b1b1b"/>
+    <circle cx="350" cy="680" r="10" fill="#1b1b1b"/>
+    <circle cx="400" cy="680" r="10" fill="#1b1b1b"/>
+    <circle cx="450" cy="670" r="10" fill="#1b1b1b"/>
+
+    <!-- animated singing lines -->
+    <path d="M520 300 C600 260, 680 280, 720 330" class="outline"/>
+    <path d="M520 340 C600 320, 680 340, 720 380" class="outline"/>
+  </g>
+</svg>

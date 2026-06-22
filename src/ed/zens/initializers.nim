@@ -1,13 +1,23 @@
-import std/[typetraits, macros, macrocache]
+import std/[typetraits, macros, macrocache, monotimes, times]
 import ed/[core, components/private/tracking]
 import ed/components/private/global_state
 import ed/types {.all.}, ed/zens/[validations, operations, contexts, private]
+import ed/utils/misc # ZenError
 
 export new_ident_node
 
+# Per-type registration statements collected at compile time (one per
+# instantiated `Ed[T,O]`), emitted by `Ed.bootstrap`. Each is a trivial call —
+# `register_initializer(tid, cast[pointer](materialize_received[T,O]))` — that
+# references a NAMED top-level proc, never an inline proc literal. That's what
+# lets `Ed.bootstrap` (hence `connect`) expand inside a `unittest test` block:
+# the old inline `quote do` materializer carried gensym'd params the C codegen
+# dropped when expanded inside a template.
 const INITIALIZERS = CacheSeq"INITIALIZERS"
-var type_initializers: Table[int, CreateInitializer]
-var initialized = false
+
+# Materializers keyed by `Ed[T,O].tid`, stored as raw code pointers (subscribe
+# casts back to CreateInitializer).
+var type_initializers: Table[int, pointer]
 
 proc ctx(): EdContext =
   Ed.thread_ctx
@@ -33,71 +43,97 @@ proc relay_fill*[T, O](item: Ed[T, O], op_ctx: OperationContext) =
     )
   item.publish_create(broadcast = true, op_ctx = op_ctx)
 
-proc create_initializer[T, O](self: Ed[T, O]) =
-  const ed_type_id = self.type.tid
+proc register_initializer*(ed_type_id: int, p: pointer) =
+  ## The single, non-generic home for the `type_initializers` global write.
+  ## `subscribe` reads the table from worker threads, so it's GC-shared; the
+  ## `{.cast(gcsafe).}` is the same guard `subscribe` uses.
+  {.cast(gcsafe).}:
+    type_initializers[ed_type_id] = p
 
+proc materialize_received*[T, O](
+    bin: string,
+    ctx: EdContext,
+    id: string,
+    flags: set[EdFlags],
+    op_ctx: OperationContext,
+) =
+  ## Materialize or restore a received object of this concrete type — the body
+  ## the old `Ed.bootstrap` macro generated, now a named generic proc. It is
+  ## (legitimately) not gcsafe — it reaches from_flatty/`value=`, which never
+  ## were — and that's fine: it only ever runs via `subscribe`, which guards
+  ## the call. `create_initializer` references it through `cast[pointer]`, which
+  ## launders the effect so the reference can't poison the gcsafe defaults/init
+  ## chain (see there).
+  mixin new_ident_node
+  if bin != "":
+    debug "creating received object", id
+    if not ctx.subscribing and id notin ctx:
+      var value = bin.from_flatty(T, ctx)
+      let item = Ed.init(value, ctx = ctx, id = id, flags = flags, op_ctx)
+      ctx.set_body_bytes(item.body, bin.len) # evictor accounting
+    elif not ctx.subscribing:
+      debug "restoring received object", id
+      var value = bin.from_flatty(T, ctx)
+      let item = Ed[T, O](ctx[id])
+      let was_placeholder = item.placeholder
+      let prev_filling = ctx.filling # save: `value=` may nest a fill
+      ctx.filling = was_placeholder # fill of a placeholder → tag Fill
+      item.placeholder = false # fill: real state arrived
+      `value=`(item, value, op_ctx = op_ctx)
+      ctx.filling = prev_filling # restore (not unconditionally false)
+      ctx.set_body_bytes(item.body, bin.len) # evictor accounting
+      if was_placeholder:
+        relay_fill(item, op_ctx)
+    else:
+      if id notin ctx:
+        discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
+
+      let initializer = proc() =
+        debug "deferred restore of received object value", id
+        {.gcsafe.}:
+          let value = bin.from_flatty(T, ctx)
+        let item = Ed[T, O](ctx[id])
+        let was_placeholder = item.placeholder
+        let prev_filling = ctx.filling # save: `value=` may nest a fill
+        ctx.filling = was_placeholder # fill of a placeholder → tag Fill
+        item.placeholder = false # fill: real state arrived
+        `value=`(item, value, op_ctx = op_ctx)
+        ctx.filling = prev_filling # restore (not unconditionally false)
+        ctx.set_body_bytes(item.body, bin.len) # evictor accounting
+        if was_placeholder:
+          relay_fill(item, op_ctx)
+      ctx.value_initializers.add(initializer)
+  elif id notin ctx:
+    discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
+    if LAZY in flags:
+      # A LAZY container's empty-body CREATE is a *handle*, not a fill:
+      # contents arrive per-key (request/release). Placeholder keeps
+      # `loaded` false; touch skips LAZY, so reads never materialize the
+      # whole table by accident.
+      Ed[T, O](ctx[id]).placeholder = true
+  else:
+    # Empty-body CREATE for an object we were holding as a placeholder:
+    # it exists for real now, just with no value yet. LAZY excepted — its
+    # empty-body CREATE is a handle push and says nothing about contents.
+    if LAZY notin flags:
+      Ed[T, O](ctx[id]).placeholder = false
+
+proc create_initializer[T, O](self: Ed[T, O]) =
+  ## Collect this concrete type's registration at COMPILE TIME (the `static`
+  ## block runs when `Ed[T, O]` is instantiated). The runtime body is empty, so
+  ## this proc — and its caller `defaults`/`init` — stay gcsafe. `Ed.bootstrap`
+  ## emits the collected statements at its call site.
+  ##
+  ## The collected statement references the named `materialize_received[T, O]`
+  ## via `cast[pointer]` (subscribe casts back). Storing a raw pointer keeps the
+  ## emitted code a trivial call — template-safe, unlike the old inline proc
+  ## literal whose gensym params broke codegen inside `unittest test` blocks.
+  const ed_type_id = self.type.tid
   static:
     INITIALIZERS.add quote do:
-      type_initializers[ed_type_id] = proc(
-          bin: string,
-          ctx: EdContext,
-          id: string,
-          flags: set[EdFlags],
-          op_ctx: OperationContext,
-      ) =
-        mixin new_ident_node
-        if bin != "":
-          debug "creating received object", id
-          if not ctx.subscribing and id notin ctx:
-            var value = bin.from_flatty(T, ctx)
-            let item = Ed.init(value, ctx = ctx, id = id, flags = flags, op_ctx)
-            ctx.set_body_bytes(item.body, bin.len) # evictor accounting
-          elif not ctx.subscribing:
-            debug "restoring received object", id
-            var value = bin.from_flatty(T, ctx)
-            let item = Ed[T, O](ctx[id])
-            let was_placeholder = item.placeholder
-            let prev_filling = ctx.filling # save: `value=` may nest a fill
-            ctx.filling = was_placeholder # fill of a placeholder → tag Fill
-            item.placeholder = false # fill: real state arrived
-            `value=`(item, value, op_ctx = op_ctx)
-            ctx.filling = prev_filling # restore (not unconditionally false)
-            ctx.set_body_bytes(item.body, bin.len) # evictor accounting
-            if was_placeholder:
-              relay_fill(item, op_ctx)
-          else:
-            if id notin ctx:
-              discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
-
-            let initializer = proc() =
-              debug "deferred restore of received object value", id
-              {.gcsafe.}:
-                let value = bin.from_flatty(T, ctx)
-              let item = Ed[T, O](ctx[id])
-              let was_placeholder = item.placeholder
-              let prev_filling = ctx.filling # save: `value=` may nest a fill
-              ctx.filling = was_placeholder # fill of a placeholder → tag Fill
-              item.placeholder = false # fill: real state arrived
-              `value=`(item, value, op_ctx = op_ctx)
-              ctx.filling = prev_filling # restore (not unconditionally false)
-              ctx.set_body_bytes(item.body, bin.len) # evictor accounting
-              if was_placeholder:
-                relay_fill(item, op_ctx)
-            ctx.value_initializers.add(initializer)
-        elif id notin ctx:
-          discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
-          if LAZY in flags:
-            # A LAZY container's empty-body CREATE is a *handle*, not a fill:
-            # contents arrive per-key (request/release). Placeholder keeps
-            # `loaded` false; touch skips LAZY, so reads never materialize the
-            # whole table by accident.
-            Ed[T, O](ctx[id]).placeholder = true
-        else:
-          # Empty-body CREATE for an object we were holding as a placeholder:
-          # it exists for real now, just with no value yet. LAZY excepted — its
-          # empty-body CREATE is a handle push and says nothing about contents.
-          if LAZY notin flags:
-            Ed[T, O](ctx[id]).placeholder = false
+      register_initializer(
+        ed_type_id, cast[pointer](materialize_received[T, O])
+      )
 
 proc defaults[T, O](
     self: Ed[T, O],
@@ -297,7 +333,11 @@ proc defaults[T, O](
     let self = Ed[T, O](body.ctx.resolve_proxy(body))
 
     if msg.kind == DESTROY:
-      self.destroy
+      # Forward the upstream op-source so the re-broadcast (relay) filters the
+      # contexts this DESTROY already visited — otherwise it echoes back to its
+      # origin and, out of order with the reload stream, can kill a same-id
+      # recreate.
+      self.destroy(op_ctx = op_ctx)
       return
 
     when O is Ed:
@@ -617,7 +657,11 @@ proc ed*[T](value: T): EdValue[T] =
   result = EdValue[T].init(value)
 
 macro bootstrap*(_: type Ed): untyped =
-  ## Initialize the `Ed` runtime. Call once at application startup before creating `Ed` containers.
+  ## Emit the per-type registrations collected at compile time. Expanded by
+  ## `connect`, so apps never name it. Each emitted statement is a trivial
+  ## `register_initializer(...)` call (see `create_initializer`), so this now
+  ## expands cleanly inside a `unittest test` block — the old inline-proc
+  ## materializers did not.
   result = new_stmt_list()
   for initializer in INITIALIZERS:
     result.add initializer

@@ -8,6 +8,17 @@ type
   EID* = uint16
     ## Callback identifier for tracking registered callbacks.
 
+  SyncMode* = enum
+    ## How a context replicates its authority. Replaces the old
+    ## `partial`/`blocking` pair so the nonsensical combination (a full
+    ## replica that blocks waiting to materialize — it never needs to, it
+    ## has everything) can't be expressed.
+    FULL          ## full replica; everything syncs, reads never block.
+    PARTIAL       ## partial replica, blocking: touching an unmaterialized
+                  ## id pumps I/O until it fills (synchronous semantics).
+    PARTIAL_ASYNC ## partial replica, non-blocking: a touch returns a
+                  ## placeholder that fills on a later tick (frame-paced).
+
   Lifetime* = ref object
     ## A set of teardown actions (typically untracking callbacks). An owner — a
     ## Unit or a scope — holds a Lifetime and `finish`es it on teardown, so
@@ -174,7 +185,11 @@ type
     id: string,
     flags: set[EdFlags],
     op_ctx: OperationContext,
-  )
+  ) {.nimcall.}
+    ## Materializer for a received object of one container type. Stored in
+    ## `type_initializers` as a raw `pointer` (so registration can launder the
+    ## proc reference past gcsafe inference) and cast back to this type at the
+    ## `subscribe` call site. `nimcall`, so the pointer round-trips cleanly.
 
   Change*[O] = ref object of BaseChange
     ## Represents a change to an `Ed` container, including the affected item.
@@ -199,6 +214,13 @@ type
     stringify*: proc(self: ref RootObj): string {.no_side_effect.}
     parse*:
       proc(ctx: EdContext, clone_from: string): ref RootObj {.no_side_effect.}
+    # Revive: converge a freshly-parsed `incoming` incarnation onto an EXISTING
+    # instance (a reincarnated id whose object a consumer still holds) — copy its
+    # synced scalars and (already-relinked) Ed fields, leaving main-side refs
+    # (e.g. a godot node) intact. Identity preserved → held references stay valid
+    # across destroy+recreate (eventual convergence).
+    revive*:
+      proc(existing: ref RootObj, incoming: ref RootObj) {.no_side_effect.}
 
   SubscriptionKind* = enum
     BLANK
@@ -751,12 +773,20 @@ proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
     return body.mint()
 
 proc release_closures*(body: ref EdBodyBase) =
-  ## Break the body's self-capturing closures (mint/untrack_zid/sweep_gen all
-  ## capture the body). Required at unregistration: ORC does not collect
-  ## closure cycles, so an unreleased body would leak with its environment.
+  ## Break the body's self-capturing closures. mint/untrack_zid/sweep_gen capture
+  ## the body; `publish_create` captures both the body *and* its context (it
+  ## reads `ctx.subscribers` / `ctx.send` / `ctx.tick_reactor`), so leaving it set
+  ## pins the whole context — the object<->context cycle the cursor backref was
+  ## meant to break, reintroduced through the closure environment. ORC does not
+  ## collect closure cycles, so an unreleased body leaks itself and its context.
+  ## (build_message/change_receiver/publish_key/evict_key take `body` as a
+  ## parameter and reach ctx via `body.ctx` — they capture nothing, so they need
+  ## no release.) Every caller removes the body from `objects` right after, so the
+  ## body is leaving the registry and these will not be invoked again.
   body.mint = nil
   body.untrack_zid = nil
   body.sweep_gen = nil
+  body.publish_create = nil
 
 const Unbounded* = high(int)
   ## `mem_limit = Unbounded` means never evict — an unlimited cache. The top of

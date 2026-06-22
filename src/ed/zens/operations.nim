@@ -31,43 +31,6 @@ proc untrack*(ctx: EdContext, zid: EID) =
   else:
     debug "No close index entry for zid", zid = zid
 
-proc contains*[T, O](self: Ed[T, O], child: O): bool =
-  privileged
-  assert self.valid
-  child in self.tracked
-
-proc contains*[K, V](self: EdTable[K, V], key: K): bool =
-  privileged
-  assert self.valid
-  key in self.tracked
-
-proc contains*[T, O](self: Ed[T, O], children: set[O] | seq[O]): bool =
-  assert self.valid
-  result = true
-  for child in children:
-    if child notin self:
-      return false
-
-proc clear*[T, O](self: Ed[T, O]) =
-  assert self.valid
-  mutate(OperationContext(source: [self.ctx.id].toHashSet)):
-    self.tracked = T.default
-
-proc `value=`*[T, O](self: Ed[T, O], value: T, op_ctx = OperationContext()) =
-  ## Set the container's value. Triggers change callbacks and sync.
-  privileged
-  assert self.valid
-  self.ctx.setup_op_ctx
-  if self.tracked != value:
-    mutate(op_ctx):
-      self.tracked = value
-
-proc loaded*(self: ref EdBase): bool =
-  ## False while this object is an unmaterialized placeholder (a partial replica
-  ## holds the reference but not the contents yet). Lets a caller distinguish
-  ## "exists but not loaded" from "exists and is genuinely empty".
-  not self.placeholder
-
 template touch_read(self: untyped) =
   ## Coarse eviction touch: mark the body as recently used and reset its churn
   ## counter. Every read accessor runs this (it precedes `touch_placeholder`),
@@ -87,6 +50,66 @@ template touch_placeholder(self: untyped) =
   self.touch_read
   if self.placeholder and LAZY notin self.flags and self.ctx.materialize != nil:
     self.ctx.materialize(self.ctx, self.id)
+
+proc contains*[T, O](self: Ed[T, O], child: O): bool =
+  privileged
+  assert self.valid
+  self.touch_placeholder
+  child in self.tracked
+
+proc contains*[K, V](self: EdTable[K, V], key: K): bool =
+  privileged
+  assert self.valid
+  self.touch_placeholder
+  key in self.tracked
+
+proc contains*[T, O](self: Ed[T, O], children: set[O] | seq[O]): bool =
+  assert self.valid
+  result = true
+  for child in children:
+    if child notin self:
+      return false
+
+template materialize_for_write(self: untyped) =
+  ## A local mutation of an unmaterialized placeholder materializes it first
+  ## (under `ctx.blocking`: pumps I/O until filled) so the in-flight fill
+  ## can't clobber the write — a placeholder's tracked state is about to be
+  ## replaced wholesale by its CREATE. Unlike `touch_placeholder` this skips
+  ## `touch_read`: a write must not reset the evictor's updates-since-read
+  ## churn counter.
+  privileged
+  if self.placeholder and LAZY notin self.flags and self.ctx.materialize != nil:
+    self.ctx.materialize(self.ctx, self.id)
+
+template materialize_for_write(self: untyped, op_ctx: untyped) =
+  ## Gated variant for accessors the receive path also calls (via
+  ## change_receiver): a received op carries a non-empty source and is
+  ## replicated state, not local intent — and materializing inside message
+  ## processing would re-enter the pump.
+  if op_ctx.source.len == 0:
+    self.materialize_for_write
+
+proc clear*[T, O](self: Ed[T, O]) =
+  assert self.valid
+  self.materialize_for_write
+  mutate(OperationContext(source: [self.ctx.id].toHashSet)):
+    self.tracked = T.default
+
+proc `value=`*[T, O](self: Ed[T, O], value: T, op_ctx = OperationContext()) =
+  ## Set the container's value. Triggers change callbacks and sync.
+  privileged
+  assert self.valid
+  self.materialize_for_write(op_ctx)
+  self.ctx.setup_op_ctx
+  if self.tracked != value:
+    mutate(op_ctx):
+      self.tracked = value
+
+proc loaded*(self: ref EdBase): bool =
+  ## False while this object is an unmaterialized placeholder (a partial replica
+  ## holds the reference but not the contents yet). Lets a caller distinguish
+  ## "exists but not loaded" from "exists and is genuinely empty".
+  not self.placeholder
 
 proc value*[T, O](self: Ed[T, O]): T =
   ## Get the container's current value.
@@ -153,12 +176,14 @@ proc `[]`*[T](self: EdSeq[T], index: SomeOrdinal | BackwardsIndex): T =
 proc `[]=`*[K, V](
     self: EdTable[K, V], key: K, value: V, op_ctx = OperationContext()
 ) =
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   self.put(key, value, touch = false, op_ctx)
 
 proc `[]=`*[T](
     self: EdSeq[T], index: SomeOrdinal, value: T, op_ctx = OperationContext()
 ) =
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   assert self.valid
   mutate(op_ctx):
@@ -167,6 +192,7 @@ proc `[]=`*[T](
 proc add*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
   ## Add an item to a sequence container.
   privileged
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   when O is Ed:
     assert self.valid(value)
@@ -183,6 +209,7 @@ proc add*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
 
 proc del*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
   privileged
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   assert self.valid
   if value in self.tracked:
@@ -190,6 +217,7 @@ proc del*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
 
 proc del*[K, V](self: EdTable[K, V], key: K, op_ctx = OperationContext()) =
   privileged
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   assert self.valid
   if key in self.tracked:
@@ -201,7 +229,7 @@ proc del*[T: seq, O](
     self: Ed[T, O], index: SomeOrdinal, op_ctx = OperationContext()
 ) =
   privileged
-
+  self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   assert self.valid
   if index < self.tracked.len:
@@ -209,6 +237,7 @@ proc del*[T: seq, O](
 
 proc delete*[T, O](self: Ed[T, O], value: O) =
   assert self.valid
+  self.materialize_for_write
   if value in self.tracked:
     remove(
       self,
@@ -220,6 +249,7 @@ proc delete*[T, O](self: Ed[T, O], value: O) =
 
 proc delete*[K, V](self: EdTable[K, V], key: K) =
   assert self.valid
+  self.materialize_for_write
   if key in self.tracked:
     remove(
       self,
@@ -231,6 +261,7 @@ proc delete*[K, V](self: EdTable[K, V], key: K) =
 
 proc delete*[T: seq, O](self: Ed[T, O], index: SomeOrdinal) =
   assert self.valid
+  self.materialize_for_write
   if index < self.tracked.len:
     remove(
       self, index, self.tracked[index], delete, op_ctx = OperationContext()
@@ -240,34 +271,41 @@ proc touch*[K, V](
     self: EdTable[K, V], pair: Pair[K, V], op_ctx: OperationContext
 ) =
   assert self.valid
+  self.materialize_for_write(op_ctx)
   self.put(pair.key, pair.value, touch = true, op_ctx = op_ctx)
 
 proc touch*[T, O](
     self: EdTable[T, O], key: T, value: O, op_ctx = OperationContext()
 ) =
   assert self.valid
+  self.materialize_for_write(op_ctx)
   self.put(key, value, touch = true, op_ctx = op_ctx)
 
 proc touch*[T: set, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
   assert self.valid
+  self.materialize_for_write(op_ctx)
   self.change_and_touch({value}, true, op_ctx = op_ctx)
 
 proc touch*[T: seq, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
   assert self.valid
+  self.materialize_for_write(op_ctx)
   self.change_and_touch(@[value], true, op_ctx = op_ctx)
 
 proc touch*[T, O](self: Ed[T, O], value: T, op_ctx = OperationContext()) =
   assert self.valid
+  self.materialize_for_write(op_ctx)
   self.change_and_touch(value, true, op_ctx = op_ctx)
 
 proc touch*[T](self: EdValue[T], value: T, op_ctx = OperationContext()) =
   assert self.valid
+  self.materialize_for_write(op_ctx)
   mutate_and_touch(touch = true, op_ctx):
     self.tracked = value
 
 proc len*(self: Ed): int =
   privileged
   assert self.valid
+  self.touch_placeholder
   self.tracked.len
 
 proc `+`*[O](self, other: EdSet[O]): set[O] =
@@ -276,10 +314,12 @@ proc `+`*[O](self, other: EdSet[O]): set[O] =
 
 proc `+=`*[T, O](self: Ed[T, O], value: T) =
   assert self.valid
+  self.materialize_for_write
   self.change(value, true, op_ctx = OperationContext())
 
 proc `+=`*[O](self: EdSet[O], value: O) =
   assert self.valid
+  self.materialize_for_write
   self.change({value}, true, op_ctx = OperationContext())
 
 proc `+=`*[T: seq, O](self: Ed[T, O], value: O) =
@@ -288,18 +328,22 @@ proc `+=`*[T: seq, O](self: Ed[T, O], value: O) =
 
 proc `+=`*[T, O](self: EdTable[T, O], other: Table[T, O]) =
   assert self.valid
+  self.materialize_for_write
   self.put_all(other, touch = false, op_ctx = OperationContext())
 
 proc `-=`*[T, O](self: Ed[T, O], value: T) =
   assert self.valid
+  self.materialize_for_write
   self.change(value, false, op_ctx = OperationContext())
 
 proc `-=`*[T: set, O](self: Ed[T, O], value: O) =
   assert self.valid
+  self.materialize_for_write
   self.change({value}, false, op_ctx = OperationContext())
 
 proc `-=`*[T: seq, O](self: Ed[T, O], value: O) =
   assert self.valid
+  self.materialize_for_write
   self.change(@[value], false, op_ctx = OperationContext())
 
 proc `&=`*[T, O](self: Ed[T, O], value: O) =
@@ -354,8 +398,12 @@ template pause*(self: Ed, body: untyped) =
   assert self.valid
   pause_impl(self, self.typed_body.changed_callbacks.keys, body)
 
-proc destroy*[T, O](self: Ed[T, O], publish = true) =
-  ## Destroy the container and remove it from its context.
+proc destroy*[T, O](self: Ed[T, O], publish = true, op_ctx = OperationContext()) =
+  ## Destroy the container and remove it from its context. `op_ctx` carries the
+  ## source of the op that triggered this — for a *received* DESTROY (re-broadcast
+  ## by `change_receiver` so it relays past this hop) it's the upstream source, so
+  ## the re-broadcast filters the contexts the op already visited and never echoes
+  ## back to its origin. Empty (a local destroy) ⇒ just this context's id.
   log_defaults
   debug "destroying", unit = self.id, stack = get_stack_trace()
   assert self.valid
@@ -375,10 +423,30 @@ proc destroy*[T, O](self: Ed[T, O], publish = true) =
     self.ctx.owned_by.del(self.id)
 
   if publish:
-    self.publish_destroy OperationContext(source: [self.ctx.id].toHashSet)
+    # incl, not `+`/union: HashSet union instantiates `items(HashSet)` here, where
+    # Ed's own `items` overloads shadow std/sets' and break the compile.
+    var source = op_ctx.source
+    source.incl self.ctx.id
+    self.publish_destroy OperationContext(source: source)
 
 method destroy*(self: EdRef) {.base, gcsafe.}
   # Forward declaration: destroy_owned cascades into owned members through it.
+
+proc set_owner*(ctx: EdContext, obj: EdRef, owner_id: string) =
+  ## Attribute a standalone EdRef to `owner_id`, so `destroy_owned(owner_id)`
+  ## tears it down (cascading through its own `destroy`). Unlike a container's
+  ## baked-in, synced `owner_id`, this ownership isn't sent as data — it's
+  ## re-derived locally on each context, exactly like OWNS_MEMBERS membership
+  ## (`type_registry`): call it wherever the ref is created/adopted, on every
+  ## context, and the index lands the same everywhere with no extra sync.
+  privileged
+  # Index by the ref_pool key ("tid:id" — `ref_id` in type_registry), matching
+  # the OWNS_MEMBERS member index: destroy_owned's member pass resolves owned
+  # ids through ctx.ref_pool, and a bare id never matches a pool key — the ref
+  # would silently escape the cascade (and leak everything *it* owns).
+  ctx.owned_by.mgetOrPut(owner_id, initHashSet[string]()).incl(
+    $obj.type_id & ":" & obj.id
+  )
 
 proc destroy_owned*(ctx: EdContext, owner_id: string) =
   ## Destroy everything owned by `owner_id` (per the `owned_by` index). Two

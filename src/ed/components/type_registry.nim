@@ -81,9 +81,37 @@ proc register_type(typ: type) =
               field = type(field)(ctx.resolve_proxy(ctx.objects[field.id]))
       result = self
 
+  let revive =
+    func (existing: ref RootObj, incoming: ref RootObj) =
+      # Converge a held instance to a freshly-parsed reincarnation without
+      # replacing it. `incoming`'s Ed fields are already resolved/relinked by
+      # `parse`; copy them and the synced scalars onto `existing`, but LEAVE
+      # main-side refs / `ed_ignore` state untouched (the consumer depends on
+      # them — e.g. a godot `node`). Mirrors `stringify`'s field handling.
+      let src = typ(incoming)
+      let dest = typ(existing)
+      for s, d in fields(src[], dest[]):
+        when s is Ed:
+          # Re-link only fields that actually changed identity (a reload gives an
+          # owned container a fresh id) or whose current target is stale. Leaving
+          # an unchanged, still-valid field alone avoids downgrading it to an
+          # incoming placeholder that hasn't materialized here yet.
+          if ?s and (not ?d or d.id != s.id):
+            d = s
+        elif s is ref:
+          discard # preserve the existing main-side reference (e.g. a node)
+        elif s is ptr:
+          discard
+        elif (s is proc):
+          discard
+        elif s.has_custom_pragma(ed_ignore):
+          discard # preserve existing local/never-synced state
+        else:
+          d = s # converge a synced scalar to the new incarnation's value
+
   with_lock:
     global_type_registry[][key] =
-      RegisteredType(stringify: stringify, parse: parse, tid: key)
+      RegisteredType(stringify: stringify, parse: parse, revive: revive, tid: key)
 
 proc is_zen(node: NimNode): bool =
   if node.kind == nnk_sym and node.str_val == "EdBase":
@@ -271,8 +299,34 @@ proc find_ref*[T](self: EdContext, value: var T): bool =
   if ?value:
     let id = value.ref_id
     if id in self.ref_pool:
-      value = T(self.ref_pool[id].obj)
-      result = true
+      let existing = self.ref_pool[id].obj
+      if existing.is_nil:
+        discard
+      elif not (existing of EdRef):
+        value = T(existing)
+        result = true
+      else:
+        # Dedup to the pooled instance, but REVIVE it: converge the freshly-parsed
+        # incarnation (`value`) onto it — re-linking owned fields a reload gave
+        # fresh ids — and clear any destroyed latch. This merges a same-id
+        # destroy+recreate into an in-place update: identity is preserved, so a
+        # consumer still holding the instance converges to the new state instead
+        # of being left on dead fields. (Replaces the old "refuse a destroyed
+        # instance and mint fresh", which dangled held references.)
+        var registered_type: RegisteredType
+        if lookup_type(existing, registered_type) and
+            registered_type.revive != nil:
+          registered_type.revive(existing, value)
+        if EdRef(existing).destroyed:
+          EdRef(existing).destroyed = false
+        # A revived ref must come back fully alive: its lifetime was finished by
+        # the destroy, and binding a new watcher to a finished lifetime untracks
+        # it immediately — every watch a consumer re-establishes on the revived
+        # object would silently die. Fresh lifetime = watchable again.
+        if EdRef(existing).lifetime != nil and EdRef(existing).lifetime.finished:
+          EdRef(existing).lifetime = new_lifetime()
+        value = T(existing)
+        result = true
 
 when defined(dump_ed_objects):
   import std/[os, algorithm]
@@ -287,7 +341,11 @@ proc free_refs*(self: EdContext) =
     let now = get_mono_time()
     if now > self.dump_at:
       self.pack_objects
-      write_file(self.id, self.objects.keys.to_seq.reversed.join("\n"))
+      var dump_lines: seq[string]
+      for oid, body in self.objects:
+        dump_lines.add oid & " owner=" & body.owner_id & " placeholder=" &
+          $body.placeholder & " bytes=" & $body.bytes
+      write_file(self.id, dump_lines.join("\n"))
       var counts = ""
       for kind in MessageKind:
         counts &= $kind & ": " & $self.counts[kind] & "\n"
