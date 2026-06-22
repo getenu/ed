@@ -219,25 +219,19 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
       if id notin self.ref_pool:
         debug "saving ref", id
         self.ref_pool[id] = CountedRef()
-      self.ref_pool[id].references.incl(ed_id)
       self.ref_pool[id].obj = change.item
       # Wire the per-instance cleanup handle the first time we see this instance.
-      # The pool's `obj` hold is non-owning (cursor); this handle is what keeps
-      # it from dangling — when ORC reclaims the instance its RefHandle.=destroy
-      # dels this exact context's `ref_pool` entry. The handle carries the
-      # instance's own ctx, the one thing a bare registered ref can't know under
-      # multiple contexts per thread.
+      # The pool's `obj` hold is non-owning (cursor); this handle keeps it from
+      # dangling — when ORC reclaims the instance its RefHandle.=destroy dels this
+      # context's `ref_pool` entry. The handle carries the instance's own ctx, the
+      # one thing a bare registered ref can't know under multiple contexts/thread.
       let handle_owner = EdRef(item)
       if handle_owner.ref_handle.is_nil:
         handle_owner.ref_handle = RefHandle(ctx_uid: self.uid, ref_id: id)
-    if REMOVED in change.changes:
-      # REMOVE only unlinks — it never frees. A body is freed by ORC when its
-      # last real reference drops (RefHandle then cleans `ref_pool`), or later by
-      # eviction; a container removal just updates the reachability hint. This is
-      # what gives move-identity for free: a removed-then-readded replica re-links
-      # the same instance for any gap, with no grace timer.
-      if id in self.ref_pool:
-        self.ref_pool[id].references.excl(ed_id)
+    # REMOVE only unlinks a container from the ref; it never frees. ORC reclaims
+    # the instance when its last real reference drops (RefHandle then cleans the
+    # pool), giving move-identity for free: a removed-then-readded replica
+    # re-links the same instance across any gap, with no grace timer.
 
 proc find_ref*[T](self: EdContext, value: var T): bool =
   privileged
@@ -254,60 +248,10 @@ proc find_ref*[T](self: EdContext, value: var T): bool =
 when defined(dump_ed_objects):
   import std/[os, algorithm]
 
-proc can_free*(
-    self: EdContext, value: ref RootObj, id: string
-): tuple[freeable: bool, references: seq[string], missing: bool] =
-  privileged
-
-  # "Freeable" now means: registered, and no container still holds it. (The old
-  # model gated on a 10s timer in `freeable_refs`; that grace is gone — see
-  # docs/step4-body-protocol-sketch.md.) Deregistering only drops the cursor
-  # index entry; ORC owns the memory and reclaims when the last holder releases.
-  if id notin self.ref_pool:
-    result.missing = true
-  elif self.ref_pool[id].references.card == 0:
-    result.freeable = true
-  else:
-    result.references = self.ref_pool[id].references.to_seq
-
-proc free_impl(self: EdContext, value: ref RootObj, id: string) =
-  privileged
-
-  debug "freeing ref", id
-  let query = self.can_free(value, id)
-  if not query.freeable:
-    let references = query.references.join(", ")
-    when defined(zen_lax_free):
-      error "Free error", id, references = query.references
-      self.ref_pool.del(id)
-      return
-
-    if not query.missing:
-      fail \"ref `{id}` has {query.references.len} references from " &
-        \"{references}. Can't free."
-    else:
-      fail \"unable to find ref_id `{id}` in ref_pool. Double free?"
-
-  # Deregister the index entry. Memory is ORC-owned, so this doesn't free the
-  # instance — it just forgets it. If the instance is still alive (e.g. an app
-  # handle held it), its later RefHandle.=destroy will `del` again, which is a
-  # harmless no-op on an absent key.
-  self.ref_pool.del(id)
-
-proc free*[T: ref RootObj](self: EdContext, value: T) =
-  self.free_impl(value, value.ref_id)
-
-proc queue_free*[T: ref RootObj](self: EdContext, value: T) =
-  let id = value.ref_id
-  let query = self.can_free(value, id)
-  if query.freeable:
-    # if it's missing we can't free it, but we try anyway so we don't have to 
-    # reproduce the error logic here
-    self.free(value)
-  elif not query.missing:
-    self.free_queue.add(id)
-
 proc free_refs*(self: EdContext) =
+  ## Per-tick ref-pool maintenance: prune entries for instances ORC has
+  ## reclaimed (RefHandle can't touch `ref_pool` itself — see prune_dead_refs).
+  ## Memory is ORC-owned; there is no manual free.
   privileged
 
   when defined(dump_ed_objects):
@@ -321,20 +265,7 @@ proc free_refs*(self: EdContext) =
       write_file(self.id & "-counts", counts)
       self.dump_at = now + init_duration(seconds = 10)
 
-  # Prune entries for instances ORC reclaimed since the last tick (RefHandle
-  # can't touch ref_pool itself — see prune_dead_refs).
   self.prune_dead_refs()
-
-  # Drain any explicitly queued frees. The old 10s-grace sweep over
-  # `freeable_refs` is gone: an unreferenced ref is no longer time-freed here —
-  # ORC reclaims it when its last holder drops, and RefHandle.=destroy records
-  # the index entry for pruning. (`free_queue` survives for the explicit
-  # `queue_free` path, which enu is retiring; once retired this loop is empty.)
-  let queue = self.free_queue
-  self.free_queue.set_len(0)
-  for id in queue:
-    if id in self.ref_pool:
-      self.free_impl(self.ref_pool[id].obj, id)
 
 when is_main_module:
   import ./subscriptions

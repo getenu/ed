@@ -728,7 +728,6 @@ proc run*() =
       ctx2.tick
       check dest.len == 0
       check id in ctx2.ref_pool
-      check ctx2.ref_pool[id].references.card == 0
 
       # Re-add across the gap re-links the very same instance — move-identity with
       # no grace window (strictly better than the 10s timer it replaces).
@@ -736,7 +735,6 @@ proc run*() =
       ctx2.tick
       check dest.len == 1
       check dest[0] == orig
-      check ctx2.ref_pool[id].references.card == 1
 
       # Drop every reference to the dest-side body: unlink it from the container
       # and release the local handle. ORC reclaims it and its RefHandle records

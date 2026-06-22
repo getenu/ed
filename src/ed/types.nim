@@ -154,18 +154,13 @@ type
     value*: V
 
   CountedRef = object
-    # Non-owning index entry: `obj` is a `{.cursor.}`, so `ref_pool` no longer
-    # keeps a registered ref alive (it once did — the old strong hold + 10s
-    # grace). Memory is ORC-owned; the real holders are the containers that
-    # `track` it (strong) plus the app/Godot node. When the last real reference
-    # drops, ORC reclaims the instance and its `RefHandle.=destroy` dels this
-    # entry — so the cursor can never dangle (ref_pool[id] non-nil ⟺ instance
+    # Non-owning index entry: `obj` is a `{.cursor.}`, so `ref_pool` doesn't keep
+    # a registered ref alive. Memory is ORC-owned; the real holders are the
+    # containers that `track` it plus the app/Godot node. When the last real
+    # reference drops, ORC reclaims the instance and its `RefHandle.=destroy` dels
+    # this entry — so the cursor can never dangle (ref_pool[id] non-nil ⟺ instance
     # alive). Requires every registered type to inherit `EdRef`.
     obj* {.cursor.}: ref RootObj
-    # Which Ed containers currently hold this ref. REFRAMED: a reachability hint
-    # only (used by the future evictor), NOT a free trigger — `card == 0` no
-    # longer schedules anything.
-    references*: HashSet[string]
 
   RegisteredType = object
     tid*: int
@@ -267,7 +262,6 @@ type
     dead_connections: seq[Connection]
     unsubscribed*: seq[string]
     metrics_label*: string
-    free_queue*: seq[string]
     last_keepalive_tick*: float64
     bytes_sent*: int
     bytes_received*: int

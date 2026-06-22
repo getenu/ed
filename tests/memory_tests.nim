@@ -41,7 +41,7 @@ proc run*() =
     check ref_container.len == 0
     
     # Force reference cleanup
-    ctx.free_refs()
+    ctx.prune_dead_refs()
     
     # Reference should eventually be cleaned up
 
