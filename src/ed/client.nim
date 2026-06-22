@@ -52,10 +52,10 @@ type EdClient* = ref object
     ## the caller's thread, so it may touch the caller's globals.
   ctx*: EdContext
   prev*: EdContext
-    ## The session before the current one (one generation only). Each
-    ## reconnect mints a fresh context, but the old replica's objects stay
-    ## readable — state that lived in it (a bot's last transform, say) can
-    ## be salvaged from here after the peer restarted and lost its copy.
+    ## The session before the current one (one generation only). Each reconnect
+    ## mints a fresh context, but the previous session's objects stay readable —
+    ## state that lived in it (a bot's last transform, say) can be salvaged from
+    ## here after the peer restarted and lost its copy.
   reconnect_interval*: Duration
     ## Minimum gap between re-subscribe attempts while down (default 1 s).
     ## Re-subscribing tears down the context, so doing it every tick would
@@ -73,11 +73,11 @@ proc reconnect*(self: EdClient): EdClient {.discardable.} =
   ## program startup (see `create_initializer`), so there's no bootstrap step.
   ## The reconnect paths (`tick`/`online`) drive this.
   ##
-  ## The context is NOT reused across reconnects (tried; doesn't work):
-  ## an existing object's CREATE never re-broadcasts, so a restarted peer
-  ## would never learn about this client's objects — they'd survive
-  ## locally as ghosts whose ops the peer skips. Same-session resync is
-  ## the body-persistence/revive work, not a client-side trick.
+  ## The context is NOT reused across reconnects: an existing object's CREATE
+  ## never re-broadcasts, so a restarted peer would never learn about this
+  ## client's objects — they'd survive locally as ghosts whose ops the peer
+  ## skips. Same-session resync is the body-persistence/revive work, not a
+  ## client-side trick.
   result = self
   # Mint a stable id on first use if the caller didn't supply one, so it
   # survives reconnects (the peer recognizes and supersedes the prior

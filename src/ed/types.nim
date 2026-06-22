@@ -9,10 +9,9 @@ type
     ## Callback identifier for tracking registered callbacks.
 
   SyncMode* = enum
-    ## How a context replicates its authority. Replaces the old
-    ## `partial`/`blocking` pair so the nonsensical combination (a full
-    ## replica that blocks waiting to materialize — it never needs to, it
-    ## has everything) can't be expressed.
+    ## How a context replicates its authority. A single enum (rather than separate
+    ## partial/blocking flags) so the nonsensical combination — a full replica that
+    ## blocks waiting to materialize, when it never needs to — can't be expressed.
     FULL          ## full replica; everything syncs, reads never block.
     PARTIAL       ## partial replica, blocking: touching an unmaterialized
                   ## id pumps I/O until it fills (synchronous semantics).
@@ -449,8 +448,8 @@ type
     # change fires. Default false = a normal, fully-loaded object.
     placeholder*: bool
     flags*: set[EdFlags]
-    # Eviction accounting (partial-replica evictor, docs/partial-replicas.md
-    # phase 4). All cheap to maintain; only the partial-replica sweep reads them.
+    # Eviction accounting (partial-replica evictor, docs/partial-replicas.md).
+    # All cheap to maintain; only the partial-replica sweep reads them.
     last_read*: MonoTime  # stamped on a read-touch (value/[]/items/pairs)
     bytes*: int           # wire-weight, stamped where we serialize (drift-ok)
     updates*: int         # arriving ops since the last read — the churn signal

@@ -311,8 +311,7 @@ proc find_ref*[T](self: EdContext, value: var T): bool =
         # fresh ids — and clear any destroyed latch. This merges a same-id
         # destroy+recreate into an in-place update: identity is preserved, so a
         # consumer still holding the instance converges to the new state instead
-        # of being left on dead fields. (Replaces the old "refuse a destroyed
-        # instance and mint fresh", which dangled held references.)
+        # of being left on dead fields.
         var registered_type: RegisteredType
         if lookup_type(existing, registered_type) and
             registered_type.revive != nil:

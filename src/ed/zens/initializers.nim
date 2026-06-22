@@ -10,9 +10,9 @@ export new_ident_node
 # instantiated `Ed[T,O]`), emitted by `Ed.bootstrap`. Each is a trivial call —
 # `register_initializer(tid, cast[pointer](materialize_received[T,O]))` — that
 # references a NAMED top-level proc, never an inline proc literal. That's what
-# lets `Ed.bootstrap` (hence `connect`) expand inside a `unittest test` block:
-# the old inline `quote do` materializer carried gensym'd params the C codegen
-# dropped when expanded inside a template.
+# lets `Ed.bootstrap` (hence `connect`) expand inside a `unittest test` block: an
+# inline `quote do` materializer carries gensym'd params the C codegen drops when
+# expanded inside a template.
 const INITIALIZERS = CacheSeq"INITIALIZERS"
 
 # Materializers keyed by `Ed[T,O].tid`, stored as raw code pointers (subscribe
@@ -57,13 +57,11 @@ proc materialize_received*[T, O](
     flags: set[EdFlags],
     op_ctx: OperationContext,
 ) =
-  ## Materialize or restore a received object of this concrete type — the body
-  ## the old `Ed.bootstrap` macro generated, now a named generic proc. It is
-  ## (legitimately) not gcsafe — it reaches from_flatty/`value=`, which never
-  ## were — and that's fine: it only ever runs via `subscribe`, which guards
-  ## the call. `create_initializer` references it through `cast[pointer]`, which
-  ## launders the effect so the reference can't poison the gcsafe defaults/init
-  ## chain (see there).
+  ## Materialize or restore a received object of this concrete type. It is
+  ## (legitimately) not gcsafe — it reaches from_flatty/`value=`, which aren't —
+  ## and that's fine: it only ever runs via `subscribe`, which guards the call.
+  ## `create_initializer` references it through `cast[pointer]`, which launders
+  ## the effect so the reference can't poison the gcsafe defaults/init chain.
   mixin new_ident_node
   if bin != "":
     debug "creating received object", id
@@ -126,8 +124,8 @@ proc create_initializer[T, O](self: Ed[T, O]) =
   ##
   ## The collected statement references the named `materialize_received[T, O]`
   ## via `cast[pointer]` (subscribe casts back). Storing a raw pointer keeps the
-  ## emitted code a trivial call — template-safe, unlike the old inline proc
-  ## literal whose gensym params broke codegen inside `unittest test` blocks.
+  ## emitted code a trivial call — template-safe, where an inline proc literal's
+  ## gensym params would break codegen inside `unittest test` blocks.
   const ed_type_id = self.type.tid
   static:
     INITIALIZERS.add quote do:
@@ -659,9 +657,8 @@ proc ed*[T](value: T): EdValue[T] =
 macro bootstrap*(_: type Ed): untyped =
   ## Emit the per-type registrations collected at compile time. Expanded by
   ## `connect`, so apps never name it. Each emitted statement is a trivial
-  ## `register_initializer(...)` call (see `create_initializer`), so this now
-  ## expands cleanly inside a `unittest test` block — the old inline-proc
-  ## materializers did not.
+  ## `register_initializer(...)` call (see `create_initializer`), so it expands
+  ## cleanly inside a `unittest test` block.
   result = new_stmt_list()
   for initializer in INITIALIZERS:
     result.add initializer
