@@ -1,4 +1,5 @@
 import std/[typetraits, macros, macrocache, tables]
+import pkg/flatty
 import ed/[core, components/private/tracking, types {.all.}]
 import ./[contexts, validations, private]
 
@@ -58,20 +59,72 @@ proc `value=`*[T, O](self: Ed[T, O], value: T, op_ctx = OperationContext()) =
     mutate(op_ctx):
       self.tracked = value
 
+proc loaded*(self: ref EdBase): bool =
+  ## False while this object is an unmaterialized placeholder (a partial replica
+  ## holds the reference but not the contents yet). Lets a caller distinguish
+  ## "exists but not loaded" from "exists and is genuinely empty".
+  not self.placeholder
+
+template touch_placeholder(self: untyped) =
+  ## Materialize-on-access: if `self` is an unmaterialized placeholder, ask its
+  ## context to materialize it (kick a fetch; block until filled when
+  ## `ctx.blocking`). No-op for a loaded object or a context without the hook.
+  if self.placeholder and self.ctx.materialize != nil:
+    self.ctx.materialize(self.ctx, self.id)
+
 proc value*[T, O](self: Ed[T, O]): T =
   ## Get the container's current value.
   privileged
   assert self.valid
+  self.touch_placeholder
   self.tracked
 
 proc `[]`*[K, V](self: Ed[Table[K, V], Pair[K, V]], index: K): V =
   privileged
   assert self.valid
+  self.touch_placeholder
   self.tracked[index]
+
+proc loaded*[K, V](self: EdTable[K, V], key: K): bool =
+  ## Whether this key's value is materialized locally. Distinct from
+  ## `key in self` (shape: whether the key exists at all, once shape sync lands).
+  privileged
+  assert self.valid
+  key in self.tracked
+
+proc request*[K, V](self: EdTable[K, V], key: K) =
+  ## Queue a per-key fetch from the authority. Batched and sent on the next
+  ## `tick` (a frame's worth of requests collapse into one message per table);
+  ## the value arrives as an ADDED change, so existing `track`/`watch` handlers
+  ## render it. No-op if the key is already loaded.
+  privileged
+  assert self.valid
+  if key notin self.tracked:
+    self.ctx.pending_key_requests.mgetOrPut(self.id, @[]).add key.to_flatty
+
+proc request*[K, V](self: EdTable[K, V], keys: openArray[K]) =
+  for key in keys:
+    self.request(key)
+
+proc release*[K, V](self: EdTable[K, V], key: K) =
+  ## Drop a locally-materialized entry to free memory (eviction). Local only —
+  ## fires a REMOVED change (so watches un-render) but does NOT delete on the
+  ## authority; `request(key)` re-fetches it. No-op if not loaded.
+  privileged
+  assert self.valid
+  if key in self.tracked:
+    let pair = Pair[K, V](key: key, value: self.tracked[key])
+    self.tracked.del key
+    self.trigger_callbacks(@[Change[Pair[K, V]](changes: {REMOVED}, item: pair)])
+
+proc release*[K, V](self: EdTable[K, V], keys: openArray[K]) =
+  for key in keys:
+    self.release(key)
 
 proc `[]`*[T](self: EdSeq[T], index: SomeOrdinal | BackwardsIndex): T =
   privileged
   assert self.valid
+  self.touch_placeholder
   self.tracked[index]
 
 proc `[]=`*[K, V](
@@ -293,17 +346,20 @@ proc destroy*[T, O](self: Ed[T, O], publish = true) =
 iterator items*[T](self: EdSet[T] | EdSeq[T]): T =
   privileged
   assert self.valid
+  self.touch_placeholder
   for item in self.tracked.items:
     yield item
 
 iterator items*[K, V](self: EdTable[K, V]): Pair[K, V] =
   privileged
   assert self.valid
+  self.touch_placeholder
   for key, value in self.tracked.pairs:
     yield Pair[K, V](key: key, value: value)
 
 iterator pairs*[K, V](self: EdTable[K, V]): (K, V) =
   privileged
   assert self.valid
+  self.touch_placeholder
   for pair in self.tracked.pairs:
     yield pair

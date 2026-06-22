@@ -109,6 +109,12 @@ proc from_flatty*[T: ref RootObj](s: string, i: var int, value: var T) =
       # :(
       if info.object_id in flatty_ctx:
         value = value.type()(flatty_ctx.objects[info.object_id])
+      else:
+        # A nested Ed reference we don't hold (a partial replica receiving a
+        # pre-populated parent, or a parent that arrived before its child).
+        # Stand it in with a placeholder rather than leaving the ref nil; reading
+        # it later materializes it (or its own CREATE fills it when it arrives).
+        value = value.type.init_placeholder(flatty_ctx, info.object_id)
   else:
     var is_registered: bool
     s.from_flatty(i, is_registered)
@@ -273,6 +279,14 @@ proc fanout(
     source.incl self.id
   var body, body_no_overwrite: string
   for sub in targets:
+    if sub.partial and msg.object_id notin sub.interest:
+      continue  # partial subscriber: only ops for objects it's interested in
+    if sub.capabilities.len > 0 and msg.type_id != 0 and
+        msg.type_id notin sub.capabilities:
+      # Peer can't materialize this type — never send its ops. type_id == 0
+      # (DESTROY / control) isn't type-gated; it's a no-op on a peer that never
+      # got the CREATE, and must reach a peer that did.
+      continue
     if sub.kind == LOCAL:
       self.send(sub, msg, op_ctx, flags)
     elif sub.kind == REMOTE and SYNC_REMOTE in flags:
@@ -424,6 +438,8 @@ proc add_subscriber*(
   debug "adding subscriber", sub
   self.subscribers.add sub
   for id in self.objects.keys.to_seq.reversed:
+    if sub.partial and id notin sub.interest:
+      continue  # partial subscriber: only push objects it's interested in
     if id notin remote_objects or push_all:
       debug "sending object on subscribe",
         from_ctx = self.id, to_ctx = sub.ctx_id, ed_id = id
@@ -443,23 +459,42 @@ proc unsubscribe*(self: EdContext, sub: Subscription) =
   self.subscribers.delete self.subscribers.find(sub)
   self.unsubscribed.add sub.ctx_id
 
+# Defined after `tick` (which it pumps); forward-declared so `subscribe` can wire
+# it onto each subscribing context.
+proc materialize_impl(self: EdContext, id: string) {.gcsafe.}
+
 proc process_value_initializers(self: EdContext) =
   debug "running deferred initializers", ctx = self.id
   for initializer in self.value_initializers:
     initializer()
   self.value_initializers = @[]
 
-proc subscribe*(self: EdContext, ctx: EdContext, bidirectional = true) =
-  ## Subscribe to another local context for cross-thread sync.
+proc subscribe*(
+    self: EdContext,
+    ctx: EdContext,
+    bidirectional = true,
+    partial = false,
+    roots: seq[string] = @[],
+) =
+  ## Subscribe to another local context for cross-thread sync. When `partial`,
+  ## we only receive objects in `roots` (and ids we later fetch) — the
+  ## authority→us direction is filtered; our own writes still flow to it.
   privileged
   debug "local subscribe", ctx = self.id
+  self.materialize = materialize_impl # enable materialize-on-access
   self.pack_objects
   var remote_objects: HashSet[string]
   for id in self.objects.keys:
     remote_objects.incl id
   self.subscribing = true
   ctx.add_subscriber(
-    Subscription(kind: LOCAL, chan: self.chan, ctx_id: self.id),
+    Subscription(
+      kind: LOCAL,
+      chan: self.chan,
+      ctx_id: self.id,
+      partial: partial,
+      interest: roots.toHashSet,
+    ),
     push_all = bidirectional,
     remote_objects,
   )
@@ -469,19 +504,52 @@ proc subscribe*(self: EdContext, ctx: EdContext, bidirectional = true) =
   self.process_value_initializers
 
   if bidirectional:
+    # Reverse direction (us → authority) stays full: we push our own writes.
     ctx.subscribe(self, bidirectional = false)
+
+proc fetch*(self: EdContext, object_id: string) =
+  ## Ask the authority for `object_id`. It's materialized on a later tick
+  ## (placeholder-then-fill); the authority adds it to our interest so future
+  ## ops follow. No-op if we already hold it *loaded* — a placeholder (held but
+  ## not materialized) still needs fetching.
+  if object_id in self and not self.objects[object_id].placeholder:
+    return
+  var msg = Message(kind: REQUEST, object_id: object_id)
+  for sub in self.subscribers:
+    self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
+  self.tick_reactor
+
+proc flush_key_requests(self: EdContext) =
+  ## Send the per-key fetches buffered since the last tick — one REQUEST per
+  ## table, carrying the batch of serialized keys in `obj`. The authority replies
+  ## with an ADD op per found key (see the REQUEST handler).
+  if self.pending_key_requests.len == 0:
+    return
+  let pending = self.pending_key_requests
+  self.pending_key_requests.clear
+  for object_id, keys in pending:
+    let msg = Message(kind: REQUEST, object_id: object_id, obj: keys.to_flatty)
+    for sub in self.subscribers:
+      self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
+  self.tick_reactor
 
 proc subscribe*(
     self: EdContext,
     address: string,
     bidirectional = true,
+    partial = false,
+    roots: seq[string] = @[],
     callback: proc() {.gcsafe.} = nil,
 ) =
-  ## Subscribe to a remote context for network sync. Address format: "host" or "host:port".
+  ## Subscribe to a remote context for network sync. Address format: "host" or
+  ## "host:port". When `partial`, the authority only sends objects in `roots`
+  ## (and ids fetched later); the reference graph + materialize-on-access pull the
+  ## rest. Mirrors the local `subscribe(partial = ..., roots = ...)`.
   var address = address
   var port = 9632
 
   debug "remote subscribe", address
+  self.materialize = materialize_impl # enable materialize-on-access
   if not ?self.reactor:
     self.reactor = new_reactor()
   self.subscribing = true
@@ -495,6 +563,11 @@ proc subscribe*(
     port = parts[1].parse_int
 
   let connection = self.reactor.connect(address, port)
+  # The SUBSCRIBE carries, in `obj`, the subscriber's handshake: the type-ids it
+  # can materialize (capability filter; see ref-registration.md) plus its
+  # partial-replica interest (partial flag + root ids). The authority applies all
+  # three to the subscription it creates for us.
+  let handshake = (toSeq(type_initializers.keys), partial, roots).to_flatty
   self.send(
     Subscription(
       kind: REMOTE,
@@ -502,7 +575,7 @@ proc subscribe*(
       connection: connection,
       last_sent_time: epoch_time(),
     ),
-    Message(kind: SUBSCRIBE),
+    Message(kind: SUBSCRIBE, obj: handshake),
   )
 
   var ctx_id = ""
@@ -672,6 +745,32 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         ),
       )
       # :(
+    # The creator is interested in its own object: make sure its canonical ops
+    # flow back. Matters for partial subscribers; a no-op for full ones.
+    for s in self.subscribers:
+      if s.ctx_id in source:
+        s.interest.incl msg.object_id
+  elif msg.kind == REQUEST:
+    # A partial subscriber wants data. Two forms:
+    #  - whole-object (`obj` empty): add the object to interest and publish_create
+    #    it (existing behavior — future ops then follow).
+    #  - per-key (`obj` = a batch of serialized table keys): reply with just those
+    #    entries (an ADD op each), without adding the whole table to interest.
+    # The requester is whoever the message came from — match by ctx id in `source`.
+    for s in self.subscribers:
+      if s.ctx_id notin source:
+        continue
+      if msg.object_id notin self:
+        continue
+      if msg.obj.len > 0:
+        let obj = self.objects[msg.object_id]
+        for key_bin in msg.obj.from_flatty(seq[string]):
+          let reply = obj.publish_key(obj, key_bin)
+          if reply.found:
+            self.send(s, reply.msg, OperationContext(), DEFAULT_FLAGS)
+      else:
+        s.interest.incl msg.object_id
+        self.objects[msg.object_id].publish_create(s)
   elif msg.kind != BLANK:
     if msg.object_id notin self:
       # :( this should throw an error
@@ -736,6 +835,30 @@ proc track*[T, O](
 proc untrack_on_destroy*(self: ref EdBase, zid: EID) =
   self.bound_eids.add(zid)
 
+proc parse_remote(
+    self: EdContext, raw_msg: netty.Message
+): tuple[ok: bool, msg: Message] {.gcsafe.} =
+  ## Decode one raw remote packet into a Message (source short-ids + mappings
+  ## attached, body uncompressed). ok = false for keepalive pings and unparseable
+  ## bytes — a version-skewed peer or stray packet on the same port is dropped,
+  ## not fatal. Shared by `tick` and the silent materialize pump so the wire
+  ## decode lives in exactly one place.
+  if raw_msg.data == "PING":
+    return (false, Message())
+  try:
+    # Wire format: a small per-subscriber header (source short-ids + new
+    # mappings) followed by the shared, compressed body (see send_remote).
+    let (enc_source, mappings, body) =
+      raw_msg.data.from_flatty((seq[uint8], seq[IdMapping], string))
+    var msg = body.uncompress.from_flatty(Message, self)
+    msg.source = enc_source
+    msg.id_mappings = mappings
+    return (true, msg)
+  except CatchableError, Defect:
+    warn "dropping unparseable remote message",
+      bytes = raw_msg.data.len, peer = $raw_msg.conn.address
+    return (false, Message())
+
 proc tick*(
     self: EdContext,
     messages = int.high,
@@ -786,6 +909,22 @@ proc tick*(
       get_mono_time() + min_duration
 
   self.flush_buffers
+  self.flush_key_requests # send this frame's batched per-key fetches
+
+  # Replay whatever a silent (blocking) materialize deferred — at this tick
+  # boundary, before new traffic: first the messages it buffered (apply + fire
+  # their callbacks), then the Fill callbacks for the object it materialized.
+  if self.pending_msgs.len > 0:
+    let deferred = self.pending_msgs
+    self.pending_msgs = @[]
+    for m in deferred:
+      self.process_message(m)
+  if self.pending_fills.len > 0:
+    let fills = self.pending_fills
+    self.pending_fills = @[]
+    for f in fills:
+      f()
+
   while true:
     if poll:
       # Drain the available batch, then coalesce superseded register updates:
@@ -829,27 +968,10 @@ proc tick*(
 
       for raw_msg in messages:
         inc count
-        # Handle keepalive pings - just ignore them (receiving updates lastActiveTime in netty)
-        if raw_msg.data == "PING":
+        let parsed = self.parse_remote(raw_msg)
+        if not parsed.ok: # keepalive ping or unparseable — already handled
           continue
-        # Parse boundary for untrusted bytes: a version-skewed peer or stray
-        # packet (e.g. another process on the same port) can't be parsed with
-        # our envelope. Drop it instead of crashing — don't let one bad packet
-        # take down the process. Scoped to (de)serialization so it doesn't mask
-        # logic bugs in process_message.
-        var msg: Message
-        try:
-          # Wire format: a small per-subscriber header (source short-ids + new
-          # mappings) followed by the shared, compressed body (see send_remote).
-          let (enc_source, mappings, body) =
-            raw_msg.data.from_flatty((seq[uint8], seq[IdMapping], string))
-          msg = body.uncompress.from_flatty(Message, self)
-          msg.source = enc_source
-          msg.id_mappings = mappings
-        except CatchableError, Defect:
-          warn "dropping unparseable remote message",
-            bytes = raw_msg.data.len, peer = $raw_msg.conn.address
-          continue
+        var msg = parsed.msg
         when defined(ed_debug_messages):
           inc self.messages_received
           self.obj_bytes_received += msg.obj.len
@@ -901,11 +1023,26 @@ proc tick*(
               old_ctx_id = sub.ctx_id, new_ctx_id = source_str
             self.unsubscribe(sub)
 
+          # Handshake (capabilities, partial, roots) rides in the SUBSCRIBE `obj`.
+          # Empty (older peer) = unfiltered, full replica.
+          var caps: HashSet[int]
+          var is_partial = false
+          var interest: HashSet[string]
+          if msg.obj.len > 0:
+            let (cap_ids, p, roots) =
+              msg.obj.from_flatty((seq[int], bool, seq[string]))
+            caps = cap_ids.to_hash_set
+            is_partial = p
+            interest = roots.to_hash_set
+
           var new_sub = Subscription(
             kind: REMOTE,
             connection: raw_msg.conn,
             ctx_id: source_str,
             last_sent_time: epoch_time(),
+            capabilities: caps,
+            partial: is_partial,
+            interest: interest,
           )
           # Register all mappings from the subscribe message
           new_sub.register_mappings(msg.id_mappings)
@@ -934,6 +1071,59 @@ proc tick*(
     if poll == false or
         ((count > 0 or not blocking) and get_mono_time() > recv_until):
       break
+
+proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
+  ## Wired onto a context at subscribe time and called by the read accessors when
+  ## they touch a placeholder (see operations.touch_placeholder). Kicks a fetch;
+  ## when in a `blocking` scope, pumps I/O and **silently** materializes just this
+  ## object — every other received message and even this object's own Fill
+  ## callback are deferred to the next explicit `tick`, so nothing
+  ## application-visible happens mid-read (clean reentrancy). Bounded by a deadline
+  ## so a gone authority can't hang the caller; it then falls back to the empty
+  ## placeholder, same as the non-blocking path. Drains both the local
+  ## (cross-thread) and remote (network) transports.
+  privileged
+  if id notin self or not self.objects[id].placeholder:
+    return
+  self.fetch(id)
+  if not self.blocking:
+    return
+
+  template triage(candidate: Message) =
+    # Apply only the target object's CREATE (silently — its callback is
+    # deferred); buffer everything else for the next tick. SUBSCRIBE can't be
+    # replayed sub-less, but a blocking *client* shouldn't receive one.
+    if candidate.object_id == id and candidate.kind == CREATE:
+      self.process_message(candidate)
+    elif candidate.kind != SUBSCRIBE:
+      self.pending_msgs.add candidate
+
+  let deadline = get_mono_time() + init_duration(seconds = 5)
+  self.silent = true
+  while id in self and self.objects[id].placeholder and
+      get_mono_time() < deadline:
+    # Local transport.
+    var m: Message
+    while self.chan.try_recv(m):
+      triage(m)
+    # Remote transport — reuse the same wire decode as tick, then resolve the
+    # source eagerly so a deferred message processes correctly sub-less later.
+    if ?self.reactor:
+      self.tick_reactor
+      let raws = self.remote_messages
+      self.remote_messages = @[]
+      for raw_msg in raws:
+        let parsed = self.parse_remote(raw_msg)
+        if not parsed.ok:
+          continue
+        var rmsg = parsed.msg
+        for s in self.subscribers:
+          if s.kind == REMOTE and s.connection == raw_msg.conn:
+            s.register_mappings(rmsg.id_mappings)
+            rmsg.source_set = s.decode_source(rmsg.source)
+            break
+        triage(rmsg)
+  self.silent = false
 
 proc find_bare_return(n: NimNode): NimNode =
   if n.kind == nnkReturnStmt:

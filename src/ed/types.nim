@@ -21,6 +21,13 @@ type
     TOUCHED   ## Object was touched without modification
     CLOSED    ## Object was destroyed
 
+  ChangeReason* = enum
+    ## Why a change fired, orthogonal to `ChangeKind`. (Unrelated to
+    ## `Change.triggered_by`, which is the upstream changes that caused this one.)
+    Normal    ## An ordinary mutation
+    Initial   ## Replay of existing contents at `track` time (reserved)
+    Fill      ## A placeholder materialized (partial-replica fetch landed)
+
   MessageKind* = enum
     BLANK
     CREATE
@@ -30,9 +37,11 @@ type
     TOUCH
     SUBSCRIBE
     PACKED
+    REQUEST  # partial replica asking the authority for an object by id
 
   BaseChange* = ref object of RootObj
     changes*: set[ChangeKind]
+    reason*: ChangeReason
     field_name*: string
     triggered_by*: seq[BaseChange]
     triggered_by_type*: string
@@ -106,6 +115,17 @@ type
 
   Subscription* = ref object
     ctx_id*: string
+    # Partial replicas: when `partial`, this subscriber only receives objects in
+    # `interest` (its roots + ids it has fetched). Default (not partial) gets
+    # everything — the existing full-replica behavior.
+    partial*: bool
+    interest*: HashSet[string]
+    # Capability filter: the set of container type-ids this subscriber can
+    # materialize (its registered `type_initializers`). The authority skips any
+    # object whose `type_id` isn't here, so a peer never receives an object it
+    # can't construct (which would crash/drop on deserialize). Empty = unfiltered
+    # (no handshake / same-build peer) — preserves the full-replica default.
+    capabilities*: HashSet[int]
     # Short ID mappings for this connection. Outgoing and incoming are
     # *separate* namespaces — each peer independently allocates short IDs
     # in messages it sends. Sharing the table would let our own outgoing
@@ -135,6 +155,20 @@ type
     applied_lsn*: int64   # highest global LSN applied (frontier)
     op_id_counter*: int64 # next op id to assign to a write we originate
     latest_op_id*: Table[string, int64]  # object_id -> our highest op id (own-op reconciliation)
+    # Materialize-on-access (partial replicas). `materialize` is wired up at
+    # subscribe time (it needs fetch/tick) and called by the read accessors when
+    # they touch a placeholder. When `blocking`, that call pumps I/O until the
+    # object fills; otherwise it kicks a fetch and returns the empty placeholder.
+    materialize*: proc(self: EdContext, id: string) {.gcsafe.}
+    blocking*: bool
+    filling*: bool        # set while a placeholder fill applies → tags Fill changes
+    silent*: bool         # silent (blocking) materialize: defer callbacks to next tick
+    pending_msgs*: seq[Message]            # received-but-deferred during a silent pump
+    pending_fills*: seq[proc() {.gcsafe.}] # Fill callbacks deferred to the next tick
+    # Per-key fetch requests buffered between ticks (table object_id -> serialized
+    # keys). A frame's worth of request() calls collapse into one REQUEST per
+    # table, flushed on the next tick.
+    pending_key_requests*: Table[string, seq[string]]
     changed_callback_eid: EID
     last_id: int
     close_procs: Table[EID, proc() {.gcsafe.}]
@@ -181,6 +215,11 @@ type
     ## Base type for all `Ed` containers. Not used directly.
     id*: string
     destroyed*: bool
+    # Partial replicas: a placeholder is a non-broadcasting stand-in for a
+    # not-yet-materialized object (its contents are empty until fetched). Reading
+    # it triggers a fetch; when the real state arrives the bit clears and a Fill
+    # change fires. Default false = a normal, fully-loaded object.
+    placeholder*: bool
     link_eid: EID
     paused_eids: set[EID]
     bound_eids: seq[EID]
@@ -195,6 +234,15 @@ type
 
     change_receiver:
       proc(self: ref EdBase, msg: Message, op_ctx: OperationContext) {.gcsafe.}
+
+    # Per-key fetch (partial EdTable). Given a serialized key, build the ADD op
+    # carrying that key's current value, so a partial subscriber can pull one
+    # entry without the whole table. `found = false` if the key isn't present.
+    # nil for non-table containers.
+    publish_key:
+      proc(self: ref EdBase, key_bin: string): tuple[found: bool, msg: Message] {.
+        gcsafe
+      .}
 
     ctx*: EdContext
 
