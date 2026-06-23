@@ -1,5 +1,6 @@
 import std/[unittest, sets, atomics, os, tables]
 import ed
+import ed/lifecycle
 import ed/zens/contexts
 import test_util
 

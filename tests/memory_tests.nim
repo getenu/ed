@@ -1,6 +1,7 @@
 import std/[unittest, sets, tables, strutils]
 import pkg/[chronicles]
 import ed
+import ed/lifecycle
 import ed/components/type_registry
 
 proc run*() =

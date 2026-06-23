@@ -1,5 +1,6 @@
 import std/[unittest, sets, tables]
 import ed
+import ed/lifecycle
 import ed/zens/contexts
 
 type OwnerTest = ref object of EdRef

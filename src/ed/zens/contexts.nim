@@ -12,6 +12,7 @@ import
   ]
 
 import ./private
+import ed/lifecycle
 
 export EdContext
 

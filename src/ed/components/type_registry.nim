@@ -2,6 +2,7 @@ import std/[locks, intsets, macros, typetraits, strutils]
 import std/macrocache except value
 import ed/core
 import ed/[types {.all.}, zens/contexts, zens/private]
+import ed/lifecycle
 import ./private/global_state
 
 template deref*(o: ref): untyped =

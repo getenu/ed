@@ -11,6 +11,7 @@ import
   ed/[core, types {.all.}], ed/zens/[contexts, private, initializers {.all.}]
 
 import ed/components/[private/global_state]
+import ed/lifecycle
 
 import ./type_registry
 

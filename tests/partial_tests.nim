@@ -1,5 +1,6 @@
 import std/[unittest, sets, tables, times, monotimes, strutils]
 import ed
+import ed/lifecycle
 import ed/zens/contexts
 
 type DeepOwner = ref object of EdRef

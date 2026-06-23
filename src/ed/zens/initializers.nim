@@ -2,6 +2,7 @@ import std/[typetraits, macros, macrocache, monotimes, times]
 import ed/[core, components/private/tracking]
 import ed/components/private/global_state
 import ed/types {.all.}, ed/zens/[operations, contexts, private]
+import ed/lifecycle
 import ed/utils/misc # ZenError
 
 # `quote do` (in create_initializer) expands to code referencing `new_ident_node`,

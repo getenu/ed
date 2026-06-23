@@ -695,19 +695,24 @@ var pending_dead_refs*: Table[int, seq[string]]
   ## Entries for a context that dies without draining just linger (bounded; freed
   ## at thread exit) and can't be misattributed, since the key is the uid.
 
-proc `=destroy`(h: var typeof(RefHandle()[])) =
-  ## Registry cleanup for a registered ref. Runs when ORC reclaims the handle
-  ## (its owning `EdRef`'s last reference dropped). It must not dereference the
-  ## context (see RefHandle), so it only *records* the dead instance for the
-  ## context to prune later. A custom `=destroy` replaces field destruction, so
-  ## `ref_id` is freed by hand (`ctx_uid` is a plain int, nothing to free). No-op
-  ## until the registry sets `ctx_uid`/`ref_id` on the instance's first ADD.
-  if h.ctx_uid != 0 and h.ref_id.len > 0:
+proc record_dead_ref(ctx_uid: int, ref_id: string) =
+  ## Queue a reclaimed registered ref for its context to prune. Touches no
+  ## `EdContext` (see RefHandle) -- only the globals above; the drain/cleanup is
+  ## `prune_dead_refs` (lifecycle.nim). No-op until the first `ref_pool` add set
+  ## these.
+  if ctx_uid != 0 and ref_id.len > 0:
     {.cast(gcsafe).}:
       dead_handles_lock.acquire()
-      pending_dead_refs.mget_or_put(h.ctx_uid, @[]).add(h.ref_id)
+      pending_dead_refs.mget_or_put(ctx_uid, @[]).add(ref_id)
       discard dead_ref_epoch.fetch_add(1) # wake the lock-free prune skip
       dead_handles_lock.release()
+
+proc `=destroy`(h: var typeof(RefHandle()[])) =
+  ## Runs when ORC reclaims the handle (its `EdRef`'s last reference dropped). Must
+  ## stay in this module (a custom `=destroy` is bound where the type lives and
+  ## must be in scope at every reclaim site). It only records the death; the
+  ## custom destructor replaces field destruction, so `ref_id` is freed by hand.
+  record_dead_ref(h.ctx_uid, h.ref_id)
   `=destroy`(h.ref_id)
 
 var pending_dead_proxies*: Table[int, seq[(string, int)]]
@@ -718,175 +723,22 @@ var pending_dead_proxies*: Table[int, seq[(string, int)]]
   ## minting proxies there -- and then live on another (the threading tests'
   ## worker handoff), so deaths must be visible to the pruning thread.
 
-proc `=destroy`(h: var typeof(ProxyHandle()[])) =
-  ## Records a dead proxy for its context to prune. Dereferences nothing -- the
-  ## body and even the context may be reclaimed in the same ORC batch. A custom
-  ## `=destroy` replaces field destruction, so `object_id` is freed by hand.
-  if h.ctx_uid != 0 and h.object_id.len > 0:
+proc record_dead_proxy(ctx_uid: int, object_id: string, gen: int) =
+  ## Queue a reclaimed container proxy for its context to prune. Touches nothing
+  ## but the globals; the drain/cleanup is `prune_dead_proxies` (lifecycle.nim).
+  if ctx_uid != 0 and object_id.len > 0:
     {.cast(gcsafe).}:
       dead_handles_lock.acquire()
-      pending_dead_proxies.mget_or_put(h.ctx_uid, @[]).add((h.object_id, h.gen))
+      pending_dead_proxies.mget_or_put(ctx_uid, @[]).add((object_id, gen))
       discard dead_proxy_epoch.fetch_add(1) # wake the lock-free prune skip
       dead_handles_lock.release()
+
+proc `=destroy`(h: var typeof(ProxyHandle()[])) =
+  ## Records a dead proxy for its context to prune. Dereferences nothing -- the
+  ## body and even the context may be reclaimed in the same ORC batch. Stays in
+  ## this module for the same reason as the RefHandle destructor above.
+  record_dead_proxy(h.ctx_uid, h.object_id, h.gen)
   `=destroy`(h.object_id)
-
-proc prune_dead_proxies*(self: EdContext) =
-  ## Clear body->proxy backrefs whose proxies ORC has reclaimed. Must run before
-  ## any backref read so a dangling cursor is never returned; `gen` ensures a
-  ## late prune can't clear a *newer* proxy minted after the death was recorded.
-  {.cast(gcsafe).}:
-    # Lock-free fast path: if no proxy has died anywhere since our last prune,
-    # there's nothing for us to drain -- skip the global lock entirely. (A death
-    # in another context can cost us one redundant lock; a tick with no deaths
-    # costs none.)
-    let epoch = dead_proxy_epoch.load
-    if epoch == self.last_proxy_prune_epoch:
-      return
-    var dead: seq[(string, int)]
-    dead_handles_lock.acquire()
-    if self.uid in pending_dead_proxies:
-      dead = pending_dead_proxies[self.uid]
-      pending_dead_proxies.del(self.uid)
-    dead_handles_lock.release()
-    self.last_proxy_prune_epoch = epoch
-    if dead.len > 0:
-      self.sweep_dirty = true # a liveness flip -> the next sweep must reconcile
-    for (object_id, gen) in dead:
-      if object_id in self.objects and self.objects[object_id] != nil and
-          self.objects[object_id].proxy_gen == gen:
-        let body = self.objects[object_id]
-        body.proxy = nil
-        # The dead proxy's callbacks die with it -- registered through it,
-        # cleaned when it goes (the sentinel model). Deterministic: next
-        # prune, not cycle-collector cadence.
-        if body.sweep_gen != nil:
-          for zid in body.sweep_gen(gen):
-            self.close_index.del(zid)
-
-proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
-  ## The identity map: the one live proxy for `body`, minting if none. Two
-  ## resolutions of the same id are reference-equal while anything holds the
-  ## proxy -- honest `ref` identity (docs/proxy-body.md).
-  if body == nil:
-    return nil
-  self.prune_dead_proxies
-  if body.proxy != nil:
-    return body.proxy
-  if body.mint != nil:
-    return body.mint()
-
-proc release_closures*(body: ref EdBodyBase) =
-  ## Break the body's self-capturing closures. mint/untrack_zid/sweep_gen capture
-  ## the body; `publish_create` captures both the body *and* its context (it
-  ## reads `ctx.subscribers` / `ctx.send` / `ctx.tick_reactor`), so leaving it set
-  ## pins the whole context -- the object<->context cycle the cursor backref was
-  ## meant to break, reintroduced through the closure environment. ORC does not
-  ## collect closure cycles, so an unreleased body leaks itself and its context.
-  ## (build_message/change_receiver/publish_key/evict_key take `body` as a
-  ## parameter and reach ctx via `body.ctx` -- they capture nothing, so they need
-  ## no release.) Every caller removes the body from `objects` right after, so the
-  ## body is leaving the registry and these will not be invoked again.
-  body.mint = nil
-  body.untrack_zid = nil
-  body.sweep_gen = nil
-  body.publish_create = nil
-
-const Unbounded* = high(int)
-  ## `mem_limit = Unbounded` means never evict -- an unlimited cache. The top of
-  ## the byte-budget range, so the value stays an honest, monotonic size.
-
-const DEFAULT_MEM_LIMIT* = 16 * 1024 * 1024
-  ## A context's default cache budget (16 MB). Moot on a full clone/authority
-  ## (they never evict); a small default cache for partial replicas.
-
-proc evicts*(self: EdContext): bool {.inline.} =
-  ## Reclaims memory under pressure: a partial replica with a finite limit. A
-  ## full clone / authority, and an `Unbounded` limit, never evict.
-  self.sync_mode != FULL and self.mem_limit < Unbounded
-
-proc has_budget*(self: EdContext): bool {.inline.} =
-  ## Tracks per-body bytes against a finite cap. No-cache (0) and `Unbounded`
-  ## skip the accounting -- there's nothing to compare a running total against.
-  self.evicts and self.mem_limit > 0
-
-proc set_body_bytes*(self: EdContext, body: ref EdBodyBase, n: int) =
-  ## Record a body's resident wire-size and keep `used_bytes` in step. Called
-  ## where we already have the serialized form (publish/fill); drift between
-  ## those points is harmless -- the total only gates *when* the limit trips,
-  ## and LRU ordering doesn't use bytes at all. Only the finite-budget mode
-  ## needs accounting; no-cache and Unbounded skip it.
-  if not self.has_budget:
-    return
-  self.used_bytes += n - body.bytes
-  body.bytes = n
-
-proc forget_body_bytes*(self: EdContext, body: ref EdBodyBase) =
-  ## Remove a body's bytes from the running total (on unregister/evict).
-  if not self.has_budget:
-    return
-  self.used_bytes -= body.bytes
-  body.bytes = 0
-
-proc set_key_bytes*(
-    self: EdContext, body: ref EdBodyBase, key_bin: string, n: int
-) =
-  ## Account a table entry's wire size, keyed so it can be subtracted exactly on
-  ## per-key evict. An update replaces the previous figure (no double-count).
-  if not self.has_budget or key_bin.len == 0:
-    return
-  let prev = body.key_bytes.get_or_default(key_bin, 0)
-  self.set_body_bytes(body, body.bytes + n - prev)
-  body.key_bytes[key_bin] = n
-
-proc forget_key_bytes*(self: EdContext, body: ref EdBodyBase, key_bin: string) =
-  ## Drop a per-key entry's accounting on evict/release: its recency and its
-  ## bytes. Called from `evict_key` (so every eviction site cleans both parallel
-  ## tables -- they can't drift) and on UNASSIGN. `del` of a missing key is a
-  ## no-op, so recency is cleared even if bytes were never accounted.
-  if not self.has_budget:
-    return
-  body.key_last_read.del key_bin
-  if key_bin notin body.key_bytes:
-    return
-  self.set_body_bytes(body, max(0, body.bytes - body.key_bytes[key_bin]))
-  body.key_bytes.del key_bin
-
-proc drop_nested_bodies*(self: EdContext, nested: seq[string]) =
-  ## Unregister the nested container bodies an evicted entry carried (a paged-
-  ## out chunk's delta seq): the registry releases its strong hold, so the
-  ## memory frees once any remaining holder drops, and the id resolves fresh
-  ## on re-page-in. Local only -- eviction never destroys upstream data.
-  for id in nested:
-    if id in self.objects:
-      let body = self.objects[id]
-      if body != nil:
-        if body.owner_id.len > 0 and body.owner_id in self.owned_by:
-          self.owned_by[body.owner_id].excl id
-        self.forget_body_bytes(body)
-        body.release_closures
-      self.objects.del id
-
-
-proc prune_dead_refs*(self: EdContext) =
-  ## Remove from `ref_pool` the entries whose instances ORC has reclaimed (see
-  ## `pending_dead_refs`). Must run before any `ref_pool` identity lookup so a
-  ## dangling cursor is never read, and on tick to keep the pool tidy. Idempotent;
-  ## cheap when nothing is pending.
-  {.cast(gcsafe).}:
-    let epoch = dead_ref_epoch.load # lock-free skip when nothing died (see proxies)
-    if epoch == self.last_ref_prune_epoch:
-      return
-    var dead: seq[string]
-    dead_handles_lock.acquire()
-    if self.uid in pending_dead_refs:
-      dead = pending_dead_refs[self.uid]
-      pending_dead_refs.del(self.uid)
-    dead_handles_lock.release()
-    self.last_ref_prune_epoch = epoch
-    if dead.len > 0:
-      self.sweep_dirty = true
-    for ref_id in dead:
-      self.ref_pool.del(ref_id)
 
 proc to_flatty*(s: var string, x: RefHandle) =
   ## Per-context-local state (uid + id), never synced -- its uid is meaningless in
@@ -907,75 +759,6 @@ proc to_flatty*(s: var string, x: EdContext) =
 
 proc from_flatty*(s: string, i: var int, x: var EdContext) =
   discard
-
-proc new_lifetime*(): Lifetime =
-  Lifetime()
-
-proc add*(self: Lifetime, cleanup: proc() {.gcsafe.}) =
-  ## Register a teardown action. If the Lifetime has already finished, the action
-  ## runs immediately (so binding to a dead Lifetime can't leak).
-  if self.finished:
-    cleanup()
-  else:
-    self.cleanups.add cleanup
-
-proc finish*(self: Lifetime) =
-  ## Run every registered teardown action, once. Idempotent.
-  if self.finished:
-    return
-  self.finished = true
-  let cleanups = self.cleanups
-  self.cleanups = @[]
-  for cleanup in cleanups:
-    cleanup()
-
-proc finished*(self: Lifetime): bool =
-  self.finished
-
-var current_lifetime* {.threadvar.}: Lifetime
-  ## The lifetime an open `own` scope binds *callbacks* to (thread-local; nil = no
-  ## scope). `track` consults it: a callback registered inside `self.own:` untracks
-  ## when `self.lifetime.finish` runs. nil outside a scope -> no auto-binding.
-
-var current_owner_id* {.threadvar.}: string
-  ## The id of the EdRef an open `own` scope attributes new *containers* to. A
-  ## container created inside the scope records it (`owner_id` + the `owned_by`
-  ## index); the owner's `destroy_owned` then tears those containers down. So
-  ## `lifetime` carries callbacks while container ownership is the baked-in
-  ## `owner_id`. "" outside a scope -> containers are unowned.
-
-template own*(owner_id: string, body: untyped) =
-  ## Like `self.own:`, but keyed by an owner *id* -- for construction, where you
-  ## have the id but the owner object doesn't exist yet. Every Ed container created
-  ## in the block (including by procs it calls -- the scope is dynamic) records
-  ## `owner_id`. No lifetime is set; callbacks bind via the `EdRef` form once the
-  ## owner exists.
-  let prev_owner_id = current_owner_id
-  current_owner_id = owner_id
-  try:
-    body
-  finally:
-    current_owner_id = prev_owner_id
-
-template own*[T: EdRef](self: T, body: untyped) =
-  ## Within this scope, every Ed container created records `self` as its owner
-  ## (so `self`'s teardown destroys them via `destroy_owned`), and every callback
-  ## tracked binds its untrack to `self.lifetime` (lazily created). Generic on the
-  ## concrete type so `self.id` resolves (EdRef has no `id` of its own). Scopes
-  ## nest by save/restore -- innermost wins, control returns to the enclosing owner
-  ## on exit. It's a *dynamic* scope: things constructed in procs called from the
-  ## body attribute here too, so keep blocks tight.
-  if self.lifetime.is_nil:
-    self.lifetime = new_lifetime()
-  let prev_lifetime = current_lifetime
-  let prev_owner_id = current_owner_id
-  current_lifetime = self.lifetime
-  current_owner_id = self.id
-  try:
-    body
-  finally:
-    current_lifetime = prev_lifetime
-    current_owner_id = prev_owner_id
 
 proc write_value*[T](w: var JsonWriter, self: set[T]) =
   write_value(w, self.to_seq)
