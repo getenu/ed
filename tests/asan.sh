@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Build + run the Ed test suite under AddressSanitizer — the validation gate for
+# Build + run the Ed test suite under AddressSanitizer -- the validation gate for
 # the lifecycle memory work (`{.cursor.}` back-refs, ref_pool -> ORC + =destroy).
 # Apple Silicon runs ASan natively (no VM needed).
 #
 # Catches: use-after-free, heap-buffer-overflow, double-free, stack-use-after-
-# scope. Does NOT catch leaks (macOS has no LeakSanitizer) — see the leak note
+# scope. Does NOT catch leaks (macOS has no LeakSanitizer) -- see the leak note
 # at the bottom for the Linux path.
 #
 # Flags:
 #   -d:useMalloc       ORC allocates via malloc so ASan tracks Ed's heap.
-#   -d:ed_no_compress  Skip supersnappy — its snappy fast-path over-reads within
+#   -d:ed_no_compress  Skip supersnappy -- its snappy fast-path over-reads within
 #                      an allocation, which trips ASan (benign third-party, not our
 #                      bug). In-process sync uses one build, so the wire format
 #                      stays consistent across both sides.
 #
-# Baseline (lifecycle-80 branch): CLEAN — 0 ASan errors, all tests pass. After a
+# Baseline (lifecycle-80 branch): CLEAN -- 0 ASan errors, all tests pass. After a
 # memory change, any NEW ASan error is a real regression to fix before landing.
 set -euo pipefail
 cd "$(dirname "$0")"

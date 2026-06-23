@@ -75,7 +75,7 @@ proc run*() =
       EdValue[int](fb["lsn_obj_e"]).value = 20
 
       # Authority orders them (FIFO: fa then fb) and fans the canonical values
-      # back to everyone — including the writers (return-to-source).
+      # back to everyone -- including the writers (return-to-source).
       leader.tick()
       fa.tick()
       fb.tick()
@@ -150,7 +150,7 @@ proc run*() =
       follower.tick()
       check "lsn_seq_f" in follower
 
-      # Applied optimistically, sent to the authority, ordered, returned —
+      # Applied optimistically, sent to the authority, ordered, returned --
       # must NOT be re-applied (no duplicate).
       EdSeq[int](follower["lsn_seq_f"]).add 42
       leader.tick()
@@ -196,7 +196,7 @@ proc run*() =
       check "lsn_obj_i" in fa
       check "lsn_obj_i" in fb
 
-      # fa updates the object; fb deletes it — concurrently.
+      # fa updates the object; fb deletes it -- concurrently.
       EdValue[int](fa["lsn_obj_i"]).value = 99
       EdValue[int](fb["lsn_obj_i"]).destroy()
 

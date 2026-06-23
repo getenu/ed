@@ -26,7 +26,7 @@ privileged
 
 proc get_or_assign_short_id(sub: Subscription, full_id: string): uint8 =
   ## Get existing short ID or assign a new one for our outgoing encoding.
-  ## Touches only the outgoing namespace — incoming shorts are tracked
+  ## Touches only the outgoing namespace -- incoming shorts are tracked
   ## separately in incoming_short_to_id.
   if full_id in sub.id_to_short:
     result = sub.id_to_short[full_id]
@@ -132,7 +132,7 @@ proc from_flatty*[T: ref RootObj](s: string, i: var int, value: var T) =
           value = value.type()(registered_type.parse(flatty_ctx, val.item))
         else:
           # Unknown ref type (version skew / type not compiled here). Leave the
-          # ref nil and carry on rather than aborting — forgiving on payload,
+          # ref nil and carry on rather than aborting -- forgiving on payload,
           # strict only on the envelope.
           debug "skipping ref for unknown type", ref_tid = val.tid
     else:
@@ -150,7 +150,7 @@ proc from_flatty*(s: string, i: var int, p: proc) =
 
 proc to_flatty*(s: var string, x: Lifetime) =
   ## A Lifetime is thread-local handle state (a set of cleanup closures), never
-  ## part of the synced value. Skip it — flatty can't serialize `seq[proc]`, and
+  ## part of the synced value. Skip it -- flatty can't serialize `seq[proc]`, and
   ## the receiver mints its own. Mirrors the `proc` override above.
   discard
 
@@ -194,7 +194,7 @@ proc flush_buffers*(self: EdContext) =
         sub.send_or_buffer(msg, true)
 
 template ed_compress(s: string): string =
-  ## Pass-through under `-d:ed_no_compress` — supersnappy's snappy fast-path
+  ## Pass-through under `-d:ed_no_compress` -- supersnappy's snappy fast-path
   ## over-reads within an allocation, which trips AddressSanitizer (it's a benign
   ## third-party over-read, not our bug). The sanitizer build defines the flag so
   ## ASan can focus on Ed's own memory behaviour; in-process sync uses one build,
@@ -205,7 +205,7 @@ template ed_uncompress(s: string): string =
   when defined(ed_no_compress): s else: s.uncompress
 
 proc remote_body(msg: Message, no_overwrite: bool): string =
-  ## The shared, compressed wire body for a remote message — identical across
+  ## The shared, compressed wire body for a remote message -- identical across
   ## subscribers (source / id_mappings travel per-subscriber, outside it), so a
   ## fanout serializes + compresses it once.
   var body_msg = msg
@@ -218,7 +218,7 @@ proc remote_body(msg: Message, no_overwrite: bool): string =
 const wire_header = "ED\x01"
   ## Magic + wire-format version, prefixed to every remote packet. flatty is
   ## positional: bytes from an older wire format can decode *cleanly* into
-  ## wrong-typed fields and blow up (or corrupt state) deep in processing — a
+  ## wrong-typed fields and blow up (or corrupt state) deep in processing -- a
   ## version-skewed peer once killed a server silently this way. The prefix
   ## rejects foreign packets at the front door instead. Bump the version byte
   ## whenever the wire format changes.
@@ -318,7 +318,7 @@ proc fanout(
       # cheap no-op.
       continue
     if sub.capabilities.len > 0 and msg.type_id notin sub.capabilities:
-      # Peer can't materialize this type — never send its ops (incl. DESTROY: it
+      # Peer can't materialize this type -- never send its ops (incl. DESTROY: it
       # never built the type, so it never held the object).
       continue
     if sub.kind == LOCAL:
@@ -339,9 +339,9 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
   trace "publishing destroy", ed_id = self.id
   # Build the DESTROY once and stamp it with the global LSN (authority only),
   # so every subscriber receives the same ordered op. DESTROY is ordered like
-  # ASSIGN — delete-vs-update is a real conflict (see spike doc).
+  # ASSIGN -- delete-vs-update is a real conflict (see spike doc).
   # type_id rides along for the capability filter (which types a peer can hold),
-  # not for construction — DESTROY tears down by id.
+  # not for construction -- DESTROY tears down by id.
   var msg = Message(kind: DESTROY, object_id: self.id, type_id: Ed[T, O].tid)
   msg.origin =
     if op_ctx.origin != "":
@@ -365,7 +365,7 @@ proc publish_closure(
   ## Serve an ownership closure to `s`: BFS from `root_id` over `owned_by`,
   ## publishing every container and following member keys (tid:id) into the
   ## members' own owned sets. Used to serve deep fetches, and to push an
-  ## OWNS_MEMBERS collection's member closures *before* the collection itself —
+  ## OWNS_MEMBERS collection's member closures *before* the collection itself --
   ## so a partial subscriber's parse links member fields to real containers
   ## instead of minting unregistered husks. Returns whether anything was found.
   ## Everything published (except LAZY handles) joins `s.interest` so future ops
@@ -391,8 +391,8 @@ proc publish_closure(
       if plain notin ids:
         ids.add plain
   # Publish deepest-first (reverse BFS): a subscribing context defers value
-  # restoration and replays it in arrival order, so a collection's restore —
-  # which fires the app's ADDED watchers — must come *after* its members'
+  # restoration and replays it in arrival order, so a collection's restore --
+  # which fires the app's ADDED watchers -- must come *after* its members'
   # containers have their values, or the watchers read empty state. Mirrors
   # add_subscriber's newest-first iteration, which is what full replicas rely
   # on for the same reason.
@@ -400,7 +400,7 @@ proc publish_closure(
     let id = to_publish[j]
     let zen = self.objects[id]
     if LAZY in zen.flags:
-      # Pull-only: send a *handle* (empty-body CREATE — id, type, flags) and
+      # Pull-only: send a *handle* (empty-body CREATE -- id, type, flags) and
       # don't follow it. The receiver registers a placeholder and pages
       # entries with request/release; a whole-table push would defeat LAZY.
       zen.publish_create(s, contents = false)
@@ -409,7 +409,7 @@ proc publish_closure(
       zen.publish_create(s)
 
 proc serve_key_wants(self: EdContext, object_id: string) =
-  ## Serve chained per-key wants that can now be answered — entries for
+  ## Serve chained per-key wants that can now be answered -- entries for
   ## `object_id` may have just arrived (see forward_request).
   privileged
   if object_id notin self.pending_key_wants or object_id notin self:
@@ -425,7 +425,7 @@ proc serve_key_wants(self: EdContext, object_id: string) =
         if not obj.placeholder:
           obj.publish_create(waiter, contents = false)
         # Per-key deep: nested containers (a chunk's delta seq) go first so
-        # the receiver's parse links them — and they're followed, so their
+        # the receiver's parse links them -- and they're followed, so their
         # future ops stream.
         for nested_id in reply.nested:
           if nested_id in self and not self.objects[nested_id].placeholder:
@@ -440,12 +440,12 @@ proc serve_key_wants(self: EdContext, object_id: string) =
 
 proc request_targets(self: EdContext): seq[Subscription] =
   ## Who to send a REQUEST to: our upstreams (the contexts we page from).
-  ## Never downstream — a clone's copy of us is stale-by-definition, and
+  ## Never downstream -- a clone's copy of us is stale-by-definition, and
   ## letting it answer can overwrite fresher local state with its echo. Only a
   ## non-authority forwards, and a non-authority pages from a recorded upstream,
   ## so this is non-empty in practice. An empty result means a degenerate
   ## topology (a non-authority with no upstream); rather than fall back to all
-  ## subscribers — which could route the request downstream — treat it as a bug
+  ## subscribers -- which could route the request downstream -- treat it as a bug
   ## (assert in debug, log in release) and forward nowhere.
   for sub in self.subscribers:
     if sub.ctx_id in self.upstream_ctx_ids:
@@ -532,7 +532,7 @@ proc publish_changes*[T, O](
       # OWNS_MEMBERS + partial: a newly added member must arrive *after* its
       # ownership closure, or the subscriber's parse mints husks for the
       # member's container fields. Push the closure to each interested partial
-      # target now — these CREATEs are sent immediately, ahead of the ADD ops
+      # target now -- these CREATEs are sent immediately, ahead of the ADD ops
       # fanned out below.
       when O is ref:
         if OWNS_MEMBERS in self.flags:
@@ -577,11 +577,11 @@ proc publish_changes*[T, O](
         if originating: self.ctx.next_op_id else: op_ctx.op_id
 
       # Per-key interest (LAZY tables): a partial subscriber without
-      # whole-object interest still receives ops for keys it has requested —
+      # whole-object interest still receives ops for keys it has requested --
       # including a key that was missing at request time (an empty-space chunk
       # someone later builds in). Filtered per-sub on the pre-pack messages
       # (each sub's key set differs) and sent unordered (lsn 0), matching
-      # per-key pulls. The canonical fanout below skips these subs — the
+      # per-key pulls. The canonical fanout below skips these subs -- the
       # object isn't in their `interest`.
       for sub in self.ctx.subscribers:
         if sub.partial and id notin sub.interest and
@@ -616,8 +616,8 @@ proc publish_changes*[T, O](
 
       if self.ctx.is_authority:
         # Canonical ops originate from the authority. Re-origin the source to us
-        # and deliver to ALL subscribers — including the original writer
-        # (return-to-source) — so writers learn the canonical order/value and
+        # and deliver to ALL subscribers -- including the original writer
+        # (return-to-source) -- so writers learn the canonical order/value and
         # converge. LSN dedup in process_message keeps this idempotent and
         # loop-free (receivers won't echo back to us: we're in their source).
         let canon_ctx = OperationContext.init(source = [self.ctx.id].toHashSet)
@@ -651,7 +651,7 @@ proc add_subscriber*(
       if sub.partial and sub.deep and OWNS_MEMBERS in zen.flags:
         # Push the members' closures before the collection itself, so the
         # subscriber's parse links member fields to real containers (no husks).
-        # Members are indexed under the collection's owner — or under the
+        # Members are indexed under the collection's owner -- or under the
         # collection's own id when it's ownerless (the root units list).
         let member_owner = if zen.owner_id.len > 0: zen.owner_id else: id
         self.publish_closure(sub, member_owner)
@@ -662,7 +662,7 @@ proc add_subscriber*(
 
 proc drain_unsubscribed*(self: EdContext): seq[string] =
   ## The ctx ids of peers that unsubscribed (or died) since the last drain.
-  ## Accumulates until drained — consume with this, not by reading the field,
+  ## Accumulates until drained -- consume with this, not by reading the field,
   ## so no event is lost to tick timing.
   result = self.unsubscribed
   self.unsubscribed = @[]
@@ -671,7 +671,7 @@ proc unsubscribe*(self: EdContext, sub: Subscription, notify = true) =
   ## Drop `sub` and let the peer know it's gone. REMOTE: disconnect (the peer
   ## sees a dead connection). LOCAL: send an `UNSUBSCRIBE` through its channel so
   ## the peer drops its reverse subscription and stops fanning ops into our inbox
-  ## — there's no keepalive timeout to do it for us. `notify = false` when *we're*
+  ## -- there's no keepalive timeout to do it for us. `notify = false` when *we're*
   ## reacting to an incoming `UNSUBSCRIBE`, so the two sides don't ping-pong.
   # Snapshot the id before the delete below: `sub` is a borrowed param (ORC
   # doesn't refcount parameters), and the seq slot is the only owner, so the
@@ -726,9 +726,9 @@ proc subscribe*(
 ) =
   ## Subscribe to another local context for cross-thread sync. When `mode` is
   ## partial, we only receive the objects in `fetch` (and ids we `fetch` later)
-  ## — the authority→us direction is filtered; our own writes still flow to it.
+  ## -- the authority->us direction is filtered; our own writes still flow to it.
   ## The fetched ids land in the registry, so `ctx[id]` works for them
-  ## afterwards. `ctx` is recorded as our upstream (we're a clone of it —
+  ## afterwards. `ctx` is recorded as our upstream (we're a clone of it --
   ## eviction notices from it are honored); the internal reverse leg passes
   ## `upstream = false` because receiving a client's own writes doesn't make
   ## it our data source.
@@ -763,11 +763,11 @@ proc subscribe*(
   self.process_value_initializers
 
   if bidirectional:
-    # Reverse direction (us → authority) stays full: we push our own writes.
+    # Reverse direction (us -> authority) stays full: we push our own writes.
     ctx.subscribe(self, bidirectional = false, upstream = false)
 
 proc any_interest*(self: EdContext, object_id: string): bool =
-  ## Does any subscriber below us still hold *live* interest in this object —
+  ## Does any subscriber below us still hold *live* interest in this object --
   ## directly or via a key? Cache-tier interest (`interest_cache`) does NOT
   ## count: the subscriber only has it cached, so we may evict it and
   ## invalidate them (Option 2). Interest auto-propagates downward, so "no live
@@ -782,7 +782,7 @@ proc any_interest*(self: EdContext, object_id: string): bool =
   result = false
 
 proc cache_holders(self: EdContext, object_id: string): seq[Subscription] =
-  ## Subscribers holding `object_id` at cache tier — they need an invalidation
+  ## Subscribers holding `object_id` at cache tier -- they need an invalidation
   ## when we evict it, so they drop their now-orphaned cache.
   for s in self.subscribers:
     if s.ctx_id in self.upstream_ctx_ids:
@@ -793,7 +793,7 @@ proc cache_holders(self: EdContext, object_id: string): seq[Subscription] =
 proc evict_body*(self: EdContext, object_id: string) =
   ## Reclaim a dormant, unclaimed body: drop it locally and retract our
   ## interest upstream so its ops stop flowing (otherwise the next op would
-  ## just re-materialize it). No downstream relay — by the candidate gate
+  ## just re-materialize it). No downstream relay -- by the candidate gate
   ## nobody below us wants it. The data is safe on the authority; a later
   ## access re-fetches. Partial replicas only.
   if object_id notin self.objects or self.objects[object_id] == nil:
@@ -821,7 +821,7 @@ proc evict_body*(self: EdContext, object_id: string) =
   self.tick_reactor
 
 proc is_live_here(self: EdContext, body: ref EdBodyBase): bool =
-  ## Is this object live at our node — actively used, not merely cached?
+  ## Is this object live at our node -- actively used, not merely cached?
   ## True when we hold a live proxy, it's a piece of a live owner, or some
   ## downstream holds *live* interest. Drives the interest tier we report
   ## upstream (live vs cache) and the eviction gate.
@@ -879,7 +879,7 @@ proc evict_sweep*(self: EdContext) =
   ## `evict_candidate`.
   ##
   ## ONLY partial replicas evict (`evicts`). A full clone (partial_replica =
-  ## false) mirrors everything its upstream has — there's no safe "residue" to
+  ## false) mirrors everything its upstream has -- there's no safe "residue" to
   ## drop, because anything it holds is synced state something may read back.
   ## Evicting on a full clone breaks live round-trips, so `mem_limit` is ignored
   ## there.
@@ -887,7 +887,7 @@ proc evict_sweep*(self: EdContext) =
     return
   self.prune_dead_proxies
   # Idle fast path: nothing an eviction would act on has changed since the last
-  # sweep, and we're within budget — so there's nothing to reconcile, churn, or
+  # sweep, and we're within budget -- so there's nothing to reconcile, churn, or
   # shed. Skip the O(objects) scans entirely (a calm context pays ~nothing per
   # tick). prune_dead_proxies above may have set sweep_dirty (a liveness flip).
   if not self.sweep_dirty and self.used_bytes <= self.mem_limit:
@@ -918,7 +918,7 @@ proc evict_sweep*(self: EdContext) =
   for id in churned:
     debug "evicting (churn)", object_id = id, updates = self.objects[id].updates
     self.evict_body(id)
-  # Pressure pass — only when over budget. LRU: oldest read goes first. A heap
+  # Pressure pass -- only when over budget. LRU: oldest read goes first. A heap
   # (O(n) build, O(k log n) to pop the k we actually evict) avoids sorting the
   # whole candidate set just to drop a few off the cold end.
   if self.used_bytes <= self.mem_limit:
@@ -933,7 +933,7 @@ proc evict_sweep*(self: EdContext) =
     debug "evicting (pressure)",
       object_id = id, used = self.used_bytes, limit = self.mem_limit
     self.evict_body(id)
-  # Per-key cache pass — the bulk of a paging client's memory is in LAZY tables
+  # Per-key cache pass -- the bulk of a paging client's memory is in LAZY tables
   # (voxel chunks), which the whole-object passes skip. If still over budget,
   # shed cache-tier keys (no live downstream interest) least-recently-served
   # first, retracting each upstream so its stream stops too.
@@ -959,7 +959,7 @@ proc evict_sweep*(self: EdContext) =
     debug "evicting key (pressure)", object_id = id
     let obj = self.objects[id]
     if obj != nil and obj.evict_key != nil:
-      let evicted = obj.evict_key(obj, key_bin) # evict_key → forget_key_bytes
+      let evicted = obj.evict_key(obj, key_bin) # evict_key -> forget_key_bytes
       self.drop_nested_bodies(evicted.nested)    # ...clears key_last_read too
     self.pending_key_releases.mgetOrPut(id, @[]).add key_bin # retract upstream
 
@@ -971,14 +971,14 @@ proc fetch*(
   ## `NotFound` if the authority NACKs. Already holding it loaded resolves
   ## immediately; fetching an id already in flight returns the same handle.
   ##
-  ## Always registers interest, so future ops follow — and a *missing* id is
+  ## Always registers interest, so future ops follow -- and a *missing* id is
   ## delivered whenever something creates it (the handle still resolves NotFound
   ## for "not there right now"). To stop following, drop your reference: with no
   ## live proxy the object becomes an eviction candidate and its interest is
   ## retracted upstream when it's reclaimed (see the evictor / `mem_limit`).
   ##
   ## `deep` also fetches everything the id *owns* (the synced-ownership closure,
-  ## recursively) — so an owner id (a unit, which isn't itself a container) pulls
+  ## recursively) -- so an owner id (a unit, which isn't itself a container) pulls
   ## its whole owned state in one request. The already-loaded short-circuit is
   ## skipped for deep fetches: holding the root says nothing about the closure.
   if not deep and object_id in self and not self.objects[object_id].placeholder:
@@ -997,7 +997,7 @@ proc fetch*(
   self.tick_reactor
 
 proc flush_key_requests(self: EdContext) =
-  ## Send the per-key fetches buffered since the last tick — one REQUEST per
+  ## Send the per-key fetches buffered since the last tick -- one REQUEST per
   ## table, carrying the batch of serialized keys in `obj`. The authority replies
   ## with an ADD op per found key (see the REQUEST handler).
   if self.pending_key_requests.len == 0:
@@ -1011,7 +1011,7 @@ proc flush_key_requests(self: EdContext) =
   self.tick_reactor
 
 proc flush_key_releases(self: EdContext) =
-  ## Send the per-key releases buffered since the last tick — one RELEASE per
+  ## Send the per-key releases buffered since the last tick -- one RELEASE per
   ## table, broadcast to every peer. Upstream reads it as an interest retract
   ## (ops for those keys stop flowing); downstream clones read it as an
   ## eviction notice and drop the keys too (see the RELEASE handler).
@@ -1039,7 +1039,7 @@ proc subscribe*(
   ## in `fetch` (and ids fetched later); the reference graph + materialize-on-
   ## access pull the rest. Mirrors the local `subscribe(mode = ..., fetch =
   ## ...)`. Blocking semantics (PARTIAL vs PARTIAL_ASYNC) are a property of the
-  ## context (`self.blocking`), set by the caller — the handshake only carries
+  ## context (`self.blocking`), set by the caller -- the handshake only carries
   ## the partial filter.
   var address = address
   var port = 9632
@@ -1113,7 +1113,7 @@ proc subscribe*(
     # reactor.tick is non-blocking, so an unyielding loop pegs a core for the
     # whole connect-timeout window when the peer is down. Spin hot at first so a
     # healthy handshake (sub-ms on localhost) is timing-identical to before, then
-    # yield once we've gone a while with no traffic — the peer is gone and we're
+    # yield once we've gone a while with no traffic -- the peer is gone and we're
     # just waiting out the timeout.
     elif epoch_time() - last_progress > 0.2:
       sleep 1
@@ -1164,7 +1164,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       fallback
 
   if self.id in source:
-    # Our own id in the source set means a message looped back to us — the
+    # Our own id in the source set means a message looped back to us -- the
     # publish-side source filter should prevent it. Skip rather than risk
     # double-applying it, and warn so a routing regression stays visible.
     warn "dropping message that looped back to its source",
@@ -1175,7 +1175,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
   debug "receiving", msg, topics = "networking"
 
   # Ordered-op idempotency: a stamped op at or below our frontier was already
-  # applied or superseded — drop it. lsn == 0 (CREATE / unordered) always
+  # applied or superseded -- drop it. lsn == 0 (CREATE / unordered) always
   # proceeds. Gap/reorder buffering (lsn > frontier + 1) is deferred to the
   # network phase; cross-thread delivery is FIFO from a single sequencer.
   if msg.lsn > 0 and msg.lsn <= self.applied_lsn:
@@ -1184,10 +1184,10 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     return
 
   # Own-op reconciliation: an op we originated, echoed back canonically.
-  #  - Collections (delta): already applied optimistically — skip to avoid
+  #  - Collections (delta): already applied optimistically -- skip to avoid
   #    double-applying (a seq.add would duplicate).
   #  - Registers: skip only if a *later* write of ours supersedes this echo
-  #    (op_id < our latest for this object) — that's what stops a moving entity
+  #    (op_id < our latest for this object) -- that's what stops a moving entity
   #    snapping back to its own stale echoes. Our *latest* own write (op_id ==
   #    latest) is applied, so a contended register still converges to the
   #    canonical value. (The op_id-superseded rule; see consistency.md.)
@@ -1199,7 +1199,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       if msg.lsn > self.applied_lsn:
         self.applied_lsn = msg.lsn
       return
-    # else: our latest own write — fall through and apply it.
+    # else: our latest own write -- fall through and apply it.
 
   if msg.kind == PACKED:
     let ops = msg.obj.from_flatty(seq[PackedMessageOperation])
@@ -1226,7 +1226,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     {.gcsafe.}:
       if msg.type_id notin type_initializers:
         # Unknown type: a version-skewed peer or a type this context wasn't
-        # compiled with. Skip it rather than aborting — the consistency layer no
+        # compiled with. Skip it rather than aborting -- the consistency layer no
         # longer needs every object present to trust the rest. (Relaying unknown
         # types through the authority is a separate, future step.)
         debug "skipping create for unknown type",
@@ -1237,7 +1237,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       # Stored as a raw pointer (see initializers.register_initializer); cast
       # back to the materializer proc type to call it.
       let fn = cast[CreateInitializer](type_initializers[msg.type_id])
-      # Synced ownership: materialize INSIDE the owner's scope, not after — the
+      # Synced ownership: materialize INSIDE the owner's scope, not after -- the
       # initializer (`defaults`) re-broadcasts the CREATE to our own subscribers
       # while it runs (a relay: e.g. worker -> node ctx for an object an MCP
       # client built), so owner_id must be stamped before that re-broadcast or
@@ -1259,7 +1259,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       else:
         materialize_it()
     # Safety net for paths where the initializer fills an existing object (a
-    # placeholder) rather than running `defaults` — stamp + index after the fact.
+    # placeholder) rather than running `defaults` -- stamp + index after the fact.
     # Keyed by owner id, so arrival order vs. the owner doesn't matter.
     if msg.owner_id.len > 0 and msg.object_id in self.objects and
         ?self.objects[msg.object_id]:
@@ -1268,14 +1268,14 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         msg.object_id
       )
     # Interest tiering (Option 2): a body materialized from an upstream CREATE
-    # is one we follow — mark it live-up so the sweep reconciles its tier as it
+    # is one we follow -- mark it live-up so the sweep reconciles its tier as it
     # goes live/cache here. Only on an evicting partial replica with an upstream.
     if self.evicts and self.upstream_ctx_ids.len > 0 and
         msg.object_id in self.objects and self.objects[msg.object_id] != nil:
       if self.objects[msg.object_id].up_tier == 0:
         self.objects[msg.object_id].up_tier = up_live
-    # Resolve fetch handles: the object itself and — for a deep fetch of an
-    # *owner* id — the owner its containers point back to (the owner has no
+    # Resolve fetch handles: the object itself and -- for a deep fetch of an
+    # *owner* id -- the owner its containers point back to (the owner has no
     # container of its own, so its handle resolves via the arriving closure).
     if msg.object_id in self.fetches:
       let pending_fetch = self.fetches[msg.object_id]
@@ -1287,7 +1287,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       self.fetches[msg.owner_id].state = Found
       self.fetches.del(msg.owner_id)
     # Serve chained wants (see forward_request): whoever asked while we didn't
-    # have it. Deep wants serve the closure — its CREATEs precede this one
+    # have it. Deep wants serve the closure -- its CREATEs precede this one
     # (deepest-first publish); owner-only ids resolve via msg.owner_id.
     template serve_obj_wants(id: string) =
       if id in self.pending_obj_wants:
@@ -1349,8 +1349,8 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         self.pending_obj_wants.del msg.object_id
   elif msg.kind == RELEASE and msg.obj.len == 0:
     # Whole-object release (evictor): a peer dropped object_id entirely.
-    #  - From a subscriber: an interest retract — stop streaming it to them.
-    #  - From upstream: an eviction notice — but a received drop is NEVER
+    #  - From a subscriber: an interest retract -- stop streaming it to them.
+    #  - From upstream: an eviction notice -- but a received drop is NEVER
     #    authoritative over a live local hold (Scott's rule). Evict only if we
     #    aren't using it ourselves and nobody below us wants it; otherwise keep
     #    using it and let our own evictor reclaim it when it goes dormant.
@@ -1371,7 +1371,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       self.evict_body(msg.object_id)
   elif msg.kind == INTEREST:
     # Live/cache tier change from a downstream subscriber (Option 2). Demote
-    # moves the object to that subscriber's cache tier — it still streams, but
+    # moves the object to that subscriber's cache tier -- it still streams, but
     # no longer protects the object from our eviction; promote moves it back.
     # Our own up-tier to the authority then reconciles on the next sweep (our
     # aggregate downstream liveness changed).
@@ -1386,10 +1386,10 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         s.interest_cache.excl msg.object_id
   elif msg.kind == RELEASE:
     # Per-key paging notice (see `release`). Role decides the meaning:
-    #  - From a subscriber that pages from us: an interest retract — stop
+    #  - From a subscriber that pages from us: an interest retract -- stop
     #    streaming those keys (and the nested containers that rode in with
     #    them). Our copy is untouched; we may serve others.
-    #  - From *upstream*: an eviction notice — our data source dropped the
+    #  - From *upstream*: an eviction notice -- our data source dropped the
     #    keys, and we're a clone of it, so they're gone for us too. Evict
     #    locally (REMOVED fires, watches un-render) and relay downstream.
     # A full clone of a full source never receives one (full sources don't
@@ -1427,7 +1427,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
       # No-cache hub: shed immediately (the symmetric counterpart of request
       # chaining). When the last interest in a key retracts, drop our copy and
       # chain the release upstream. A caching hub (mem_limit > 0) instead KEEPS
-      # the key — it becomes cache-tier (no live downstream wants it), stays
+      # the key -- it becomes cache-tier (no live downstream wants it), stays
       # current via the stream, and the per-key cache LRU sheds it under our
       # own pressure (so a downstream's release doesn't force us to refetch on
       # its return).
@@ -1471,14 +1471,14 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
   elif msg.kind == REQUEST:
     # A partial subscriber wants data. Two forms:
     #  - whole-object (`obj` empty): add the object to interest and publish_create
-    #    it (existing behavior — future ops then follow).
+    #    it (existing behavior -- future ops then follow).
     #  - per-key (`obj` = a batch of serialized table keys): reply with just those
     #    entries (an ADD op each), without adding the whole table to interest.
-    # The requester is whoever the message came from — match by ctx id in `source`.
+    # The requester is whoever the message came from -- match by ctx id in `source`.
     #
     # Request chaining: a hub that can't serve a request forwards it to its
     # upstream(s) (becoming the requester there) and remembers who asked; the
-    # answer — data or NOT_FOUND — relays back down hop by hop. Only misses
+    # answer -- data or NOT_FOUND -- relays back down hop by hop. Only misses
     # forward, and only the first want for an id/key does; the authority never
     # forwards (its miss is the real NOT_FOUND).
     #
@@ -1499,7 +1499,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         continue
       if msg.obj.len > 0:
         # Per-key: serve what we have, chain or NACK the rest. Every requested
-        # key joins the subscriber's key interest — found or missing — so its
+        # key joins the subscriber's key interest -- found or missing -- so its
         # future ops stream (a missing chunk pops in when someone builds
         # there). RELEASE retracts.
         for key_bin in msg.obj.from_flatty(seq[string]):
@@ -1510,7 +1510,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         if msg.object_id in self:
           let obj = self.objects[msg.object_id]
           # Handle-first: the requester (or a hub between us) may not hold the
-          # container yet — a chained request can outrun the closure push that
+          # container yet -- a chained request can outrun the closure push that
           # carries it. An ADD for an unknown object is dropped on arrival and
           # the want dangles (only the first want per key forwards), so the
           # entry would never load. The empty-body CREATE is idempotent and
@@ -1521,9 +1521,9 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
             let reply = obj.publish_key(obj, key_bin)
             if reply.found:
               if self.has_budget: # recency only feeds the cache LRU
-                obj.key_last_read[key_bin] = get_mono_time() # served → in-view
+                obj.key_last_read[key_bin] = get_mono_time() # served -> in-view
               # Per-key deep: nested containers (a chunk's delta seq) go
-              # first so the receiver's parse links them — and they're
+              # first so the receiver's parse links them -- and they're
               # followed, so their future ops (delta appends) stream.
               for nested_id in reply.nested:
                 if nested_id in self and not self.objects[nested_id].placeholder:
@@ -1562,7 +1562,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
               fwd.obj = to_forward.to_flatty
               self.forward_request(s, fwd)
       elif msg.deep:
-        # Deep fetch: the id plus its ownership closure (see publish_closure —
+        # Deep fetch: the id plus its ownership closure (see publish_closure --
         # the requested id may be an *owner*, a unit id with no container of its
         # own, and the walk recurses through owned members into their subtrees).
         let found = self.publish_closure(s, msg.object_id)
@@ -1584,7 +1584,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
           s.interest.incl msg.object_id
           self.objects[msg.object_id].publish_create(s)
         else:
-          # Missing — or held only as an unloaded placeholder, which would
+          # Missing -- or held only as an unloaded placeholder, which would
           # serve empty state; chain instead so the real data comes back. Keep
           # the interest so a later CREATE under this id is delivered.
           s.interest.incl msg.object_id
@@ -1607,10 +1607,10 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     if msg.object_id notin self:
       # An op for an object we don't hold is dropped. Usually benign
       # (partial replica, version skew), but a drop on a paging path means a
-      # requested entry silently never loads — surface the first one per
+      # requested entry silently never loads -- surface the first one per
       # object so a stalled chain is visible in the logs. DESTROY misses are
       # fully expected (destroys broadcast past the interest filter so peers
-      # holding self-minted placeholders converge) — drop them silently.
+      # holding self-minted placeholders converge) -- drop them silently.
       if msg.kind != DESTROY and msg.object_id notin self.warned_missing:
         self.warned_missing.incl msg.object_id
         notice "dropping op for missing object",
@@ -1626,7 +1626,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         # Table entry: account per-key so per-key evict can subtract exactly.
         if msg.kind == ASSIGN:
           self.set_key_bytes(obj, msg.key_bin, msg.obj.len)
-          obj.key_last_read[msg.key_bin] = get_mono_time() # updated → recent
+          obj.key_last_read[msg.key_bin] = get_mono_time() # updated -> recent
         elif msg.kind == UNASSIGN:
           self.forget_key_bytes(obj, msg.key_bin)
       elif msg.delta and msg.kind == ASSIGN:
@@ -1665,8 +1665,8 @@ proc bind_lifetime*[T, O](self: Ed[T, O], lifetime: Lifetime, zid: EID) =
   ## Bind an already-registered callback (`zid`) to `lifetime`, so it untracks
   ## when the lifetime finishes. Lets sugar that mints its own zid (`changes`,
   ## enu's `watch`) route teardown through an owner's Lifetime without exposing
-  ## the privileged untrack path. Guarded so a manual untrack first — or the
-  ## owner dying first — is safe and idempotent.
+  ## the privileged untrack path. Guarded so a manual untrack first -- or the
+  ## owner dying first -- is safe and idempotent.
   privileged
   lifetime.add proc() {.gcsafe.} =
     if not self.destroyed and zid in self.typed_body.changed_callbacks:
@@ -1697,7 +1697,7 @@ proc track*[T, O](
   # Inside an `own` scope, route this callback's untrack through the owner's
   # lifetime too, so it's torn down when the owner is destroyed (the typical
   # case: a subscription on something the owner doesn't itself own). No scope
-  # open → no-op. Idempotent if also bound explicitly.
+  # open -> no-op. Idempotent if also bound explicitly.
   {.gcsafe.}:
     if not current_lifetime.is_nil:
       self.bind_lifetime(current_lifetime, zid)
@@ -1718,7 +1718,7 @@ proc track*[T, O](
       proc(changes: seq[Change[O]], zid: EID, it: Ed[T, O]) {.gcsafe.},
 ): EID {.discardable.} =
   ## The non-capturing form: the live proxy arrives as `it` each fire, so the
-  ## callback needs no reference to the watched object at all — a proxy
+  ## callback needs no reference to the watched object at all -- a proxy
   ## tracked this way still dies promptly when the app drops it. The sugar
   ## (`changes`/`watch`) builds on this.
   privileged
@@ -1743,7 +1743,7 @@ proc track*[T, O](
     callback: proc(changes: seq[Change[O]]) {.gcsafe.},
 ): EID {.discardable.} =
   ## Like `track`, but the callback's removal is owned by `lifetime`: when the
-  ## owner calls `lifetime.finish` the callback untracks automatically — no
+  ## owner calls `lifetime.finish` the callback untracks automatically -- no
   ## manual `zid` bookkeeping.
   result = self.track(callback)
   self.bind_lifetime(lifetime, result)
@@ -1756,7 +1756,7 @@ proc parse_remote(
 ): tuple[ok: bool, msg: Message] {.gcsafe.} =
   ## Decode one raw remote packet into a Message (source short-ids + mappings
   ## attached, body uncompressed). ok = false for keepalive pings and unparseable
-  ## bytes — a version-skewed peer or stray packet on the same port is dropped,
+  ## bytes -- a version-skewed peer or stray packet on the same port is dropped,
   ## not fatal. Shared by `tick` and the silent materialize pump so the wire
   ## decode lives in exactly one place.
   if raw_msg.data == "PING":
@@ -1764,7 +1764,7 @@ proc parse_remote(
   if not raw_msg.data.starts_with(wire_header):
     # A peer speaking a different wire version (or a stray packet). Reject it
     # here: flatty is positional, so foreign bytes can decode cleanly into
-    # wrong-typed fields and corrupt or crash processing. Warn once per peer —
+    # wrong-typed fields and corrupt or crash processing. Warn once per peer --
     # an old client reconnect-looping would otherwise flood the log.
     let peer = $raw_msg.conn.address
     if peer notin self.warned_missing:
@@ -1823,7 +1823,7 @@ proc tick*(
   var msg: Message
   # `unsubscribed` is NOT cleared here: it accumulates until the consumer
   # drains it (see drain_unsubscribed). Clearing it per-tick made the events
-  # tick-scoped transients — a consumer that polls between ticks loses any
+  # tick-scoped transients -- a consumer that polls between ticks loses any
   # event when an extra tick sneaks in between produce and consume (the enu
   # agent-bot reap missed disconnects that landed during a reload this way).
   var count = 0
@@ -1845,7 +1845,7 @@ proc tick*(
   self.flush_key_releases # ...and its batched per-key releases (paging out)
   self.evict_sweep        # reclaim dormant/over-budget bodies (partial replicas)
 
-  # Replay whatever a silent (blocking) materialize deferred — at this tick
+  # Replay whatever a silent (blocking) materialize deferred -- at this tick
   # boundary, before new traffic: first the messages it buffered (apply + fire
   # their callbacks), then the Fill callbacks for the object it materialized.
   if self.pending_msgs.len > 0:
@@ -1866,7 +1866,7 @@ proc tick*(
       # batch overwrites is frontier-advanced but its effect is skipped, so a
       # losing optimistic writer converges to the latest value without applying
       # (or showing) the intermediate one. Deltas (collections) are never
-      # coalesced — every add matters.
+      # coalesced -- every add matters.
       var batch: seq[Message]
       while get_mono_time() < timeout and self.chan.try_recv(msg):
         batch.add msg
@@ -1903,7 +1903,7 @@ proc tick*(
       for raw_msg in messages:
         inc count
         let parsed = self.parse_remote(raw_msg)
-        if not parsed.ok: # keepalive ping or unparseable — already handled
+        if not parsed.ok: # keepalive ping or unparseable -- already handled
           continue
         var msg = parsed.msg
         when defined(ed_debug_messages):
@@ -1933,13 +1933,13 @@ proc tick*(
 
           # Drop any subscription that this SUBSCRIBE supersedes. Two
           # conditions both warrant a sweep:
-          #   1. Same ctx_id — the client reused its stable id (same
+          #   1. Same ctx_id -- the client reused its stable id (same
           #      process reconnect, or a deterministically-assigned id).
           #      Without this the old subscription persists until netty's
           #      ~10s keepalive timeout, during which the publisher can
           #      route messages back to the reconnected peer via the
           #      stale route.
-          #   2. Same remote endpoint — a previous client at that
+          #   2. Same remote endpoint -- a previous client at that
           #      address/port has been replaced by a new process that
           #      happened to get the same UDP source port. Different
           #      ctx_ids, but routing to the old sub's endpoint would now
@@ -2013,7 +2013,7 @@ proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
   ## Wired onto a context at subscribe time and called by the read accessors when
   ## they touch a placeholder (see operations.touch_placeholder). Kicks a fetch;
   ## when in a `blocking` scope, pumps I/O and **silently** materializes just this
-  ## object — every other received message and even this object's own Fill
+  ## object -- every other received message and even this object's own Fill
   ## callback are deferred to the next explicit `tick`, so nothing
   ## application-visible happens mid-read (clean reentrancy). Bounded by a deadline
   ## so a gone authority can't hang the caller; it then falls back to the empty
@@ -2027,8 +2027,8 @@ proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
     return
 
   template triage(candidate: Message) =
-    # Apply only the target object's CREATE — or its NOT_FOUND NACK, which
-    # resolves the fetch so we stop waiting — silently (callbacks deferred);
+    # Apply only the target object's CREATE -- or its NOT_FOUND NACK, which
+    # resolves the fetch so we stop waiting -- silently (callbacks deferred);
     # buffer everything else for the next tick. SUBSCRIBE can't be replayed
     # sub-less, but a blocking *client* shouldn't receive one.
     if candidate.object_id == id and candidate.kind in {CREATE, NOT_FOUND}:
@@ -2043,7 +2043,7 @@ proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
     var m: Message
     while self.chan.try_recv(m):
       triage(m)
-    # Remote transport — reuse the same wire decode as tick, then resolve the
+    # Remote transport -- reuse the same wire decode as tick, then resolve the
     # source eagerly so a deferred message processes correctly sub-less later.
     if ?self.reactor:
       self.tick_reactor
@@ -2074,7 +2074,7 @@ proc find_bare_return(n: NimNode): NimNode =
 
 macro check_no_return*(body: untyped): untyped =
   ## Passthrough macro: emits a compile error if body contains a bare return.
-  ## Use inside changes bodies — return exits the callback proc, not the
+  ## Use inside changes bodies -- return exits the callback proc, not the
   ## enclosing proc, and skips remaining changes in the seq.
   let ret = find_bare_return(body)
   if ret != nil:
@@ -2089,8 +2089,8 @@ macro warn_self_capture(watched: untyped, body: untyped): untyped =
   ## Bare-identifier self-capture detection for the `changes`/`watch` sugar:
   ## a callback body that references the watched *variable* captures it,
   ## pinning the object until untracked (closure cycles are not collected).
-  ## Deliberately narrow — only a bare identifier, only outside dot-RHS
-  ## positions — so it stays near-zero false positives (enu fires none).
+  ## Deliberately narrow -- only a bare identifier, only outside dot-RHS
+  ## positions -- so it stays near-zero false positives (enu fires none).
   result = new_empty_node()
   if watched.kind in {nnk_ident, nnk_sym}:
     let name = watched.str_val
@@ -2099,13 +2099,13 @@ macro warn_self_capture(watched: untyped, body: untyped): untyped =
         return true
       for i in 0 ..< n.len:
         if n.kind == nnk_dot_expr and i == 1:
-          continue # `x.foo` — foo is a field, not a capture
+          continue # `x.foo` -- foo is a field, not a capture
         if references(n[i]):
           return true
     if references(body):
       warning(
         "callback closes over '" & name &
-          "', pinning it until untracked — use `it` (the injected live " &
+          "', pinning it until untracked -- use `it` (the injected live " &
           "proxy) or bind a Lifetime",
         watched,
       )
@@ -2117,7 +2117,7 @@ template changes*[T, O](self: Ed[T, O], pause_me, body) =
       track self, proc(
           changes: seq[Change[O]], zid {.inject.}: EID, it {.inject.}: Ed[T, O]
       ) {.gcsafe.} =
-        # `it` is the live proxy, delivered as a parameter — referencing it
+        # `it` is the live proxy, delivered as a parameter -- referencing it
         # captures nothing, so sugar watchers never pin their object.
         let pause_zid = if pause_me: zid else: 0
         it.pause(pause_zid):

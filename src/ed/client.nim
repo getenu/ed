@@ -3,7 +3,7 @@
 ## A context only stays healthy if it is `tick`ed regularly: ticking drives
 ## netty's keepalives and reaps dead connections. Tick on a timer and
 ## `connected` (subscribers present) becomes an authoritative liveness
-## signal — no application-level ping needed.
+## signal -- no application-level ping needed.
 
 import std/os
 
@@ -48,12 +48,12 @@ type EdClient* = ref object
     ## wants units render-ready; a narrow utility fetches what it touches).
   on_connect*: proc()
     ## (Re)create this client's objects after each (re)connect. Runs with
-    ## `Ed.thread_ctx` set to the fresh context. Single-threaded — runs on
+    ## `Ed.thread_ctx` set to the fresh context. Single-threaded -- runs on
     ## the caller's thread, so it may touch the caller's globals.
   ctx*: EdContext
   prev*: EdContext
     ## The session before the current one (one generation only). Each reconnect
-    ## mints a fresh context, but the previous session's objects stay readable —
+    ## mints a fresh context, but the previous session's objects stay readable --
     ## state that lived in it (a bot's last transform, say) can be salvaged from
     ## here after the peer restarted and lost its copy.
   reconnect_interval*: Duration
@@ -75,7 +75,7 @@ proc reconnect*(self: EdClient): EdClient {.discardable.} =
   ##
   ## The context is NOT reused across reconnects: an existing object's CREATE
   ## never re-broadcasts, so a restarted peer would never learn about this
-  ## client's objects — they'd survive locally as ghosts whose ops the peer
+  ## client's objects -- they'd survive locally as ghosts whose ops the peer
   ## skips. Same-session resync is the body-persistence/revive work, not a
   ## client-side trick.
   result = self
@@ -102,7 +102,7 @@ proc reconnect*(self: EdClient): EdClient {.discardable.} =
       address = self.address, msg = e.msg
 
 template connect*(self: EdClient) =
-  ## Bootstrap the Ed runtime, then connect — `Ed.bootstrap` + `reconnect` in
+  ## Bootstrap the Ed runtime, then connect -- `Ed.bootstrap` + `reconnect` in
   ## one step, so apps never name `bootstrap`. Returns the client, chainable:
   ## `let c = EdClient(...).connect`.
   ##
@@ -110,7 +110,7 @@ template connect*(self: EdClient) =
   ## program has instantiated; `connect` is a template so it expands at YOUR
   ## call site, picking up everything instantiated by then (so call it after
   ## your imports). The registrations are trivial calls referencing named
-  ## procs, so — unlike before — this expands cleanly inside a `unittest test`
+  ## procs, so -- unlike before -- this expands cleanly inside a `unittest test`
   ## block. `tick`/`online` reconnect through the bootstrap-free `reconnect`.
   ##
   ## `-d:ed_disable_auto_bootstrap` makes this skip `Ed.bootstrap`; call
@@ -131,7 +131,7 @@ proc tick*(self: EdClient) =
   ## Tick the context, reconnecting if it has dropped. Call on a timer to
   ## keep an otherwise-idle connection alive. While down, keep ticking the
   ## existing context so an in-flight handshake can complete, and only
-  ## re-subscribe once per `reconnect_interval` — re-subscribing every tick
+  ## re-subscribe once per `reconnect_interval` -- re-subscribing every tick
   ## would restart the handshake before it finishes and spin the CPU.
   if self.ctx.is_nil:
     self.reconnect
@@ -165,7 +165,7 @@ template online*(self: EdClient, body: untyped): untyped =
 type SessionLost* = object of CatchableError
   ## Raised by EdClient's waiting helpers (`every` / `animate` /
   ## `tick_until`) when the live session they started with goes away
-  ## mid-wait: the link dropped, or a reconnect replaced the context —
+  ## mid-wait: the link dropped, or a reconnect replaced the context --
   ## stranding any handles the caller's loop body captured (each reconnect
   ## mints a fresh context). A loop that starts *without* a live session
   ## (waiting for the first connect) never raises.

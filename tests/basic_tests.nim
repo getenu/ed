@@ -479,7 +479,7 @@ proc run*() =
     # The pause-all / resume-all branches read changed_callbacks/paused_eids,
     # which the proxy/body split moved onto the body; this exercises them so a
     # regression is a test failure, not a latent compile error on first use.
-    # Relative checks (a set may emit >1 change) — what matters is that pause
+    # Relative checks (a set may emit >1 change) -- what matters is that pause
     # stops the increments and resume restarts them, for both per-eid and all.
     var s = EdValue[string].init
     var calls = 0
@@ -491,7 +491,7 @@ proc run*() =
     s.pause_changes zid # per-eid pause
     let c1 = calls
     s.value = "b"
-    check calls == c1 # paused → silent
+    check calls == c1 # paused -> silent
     s.resume_changes zid
     s.value = "c"
     check calls > c1 # resumed
@@ -718,7 +718,7 @@ proc run*() =
 
   test "refs freed when unreferenced":
     # New lifecycle contract (replaces the old 10s-grace "free refs" test). A
-    # container REMOVE only unlinks — it never schedules a free. A registered
+    # container REMOVE only unlinks -- it never schedules a free. A registered
     # ref's body persists while anything still holds it, so a remove-then-readd
     # re-links the *same* instance for any gap (move-identity, no timer). The
     # body is freed only when its last real reference drops: ORC reclaims it and
@@ -753,7 +753,7 @@ proc run*() =
       check dest.len == 0
       check id in ctx2.ref_pool
 
-      # Re-add across the gap re-links the very same instance — move-identity with
+      # Re-add across the gap re-links the very same instance -- move-identity with
       # no grace window (strictly better than the 10s timer it replaces).
       src += obj
       ctx2.tick
@@ -762,7 +762,7 @@ proc run*() =
 
       # Drop every reference to the dest-side body: unlink it from the container
       # and release the local handle. ORC reclaims it and its RefHandle records
-      # the id for the context to prune (the destructor never touches ref_pool) —
+      # the id for the context to prune (the destructor never touches ref_pool) --
       # freed exactly when unreferenced, no timer.
       src -= obj
       ctx2.tick

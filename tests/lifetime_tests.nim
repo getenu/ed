@@ -39,7 +39,7 @@ proc run*() =
 
       v.value = 2
       v.value = 3
-      check fired == after_finish # silent after finish — callback removed
+      check fired == after_finish # silent after finish -- callback removed
 
     test "binding to an already-finished lifetime cleans up immediately":
       var ctx = EdContext.init(id = "lt_ctx2")
@@ -80,7 +80,7 @@ proc run*() =
       check "own_items" in ctx.owned_by["owner1"]   # and indexed
 
       ctx.destroy_owned("owner1")
-      check "own_items" notin ctx                   # destroyed → out of ctx.objects
+      check "own_items" notin ctx                   # destroyed -> out of ctx.objects
       check "own_val" notin ctx
       check "owner1" notin ctx.owned_by
 
@@ -172,7 +172,7 @@ proc run*() =
       # through a synced field, and attributes it to itself via set_owner.
       # Destroying the unit must cascade: unit -> (set_owner) Shared ->
       # (own scope) its containers. Regression: set_owner indexed the BARE id
-      # while destroy_owned resolves ref_pool keys (tid:id) — the ref silently
+      # while destroy_owned resolves ref_pool keys (tid:id) -- the ref silently
       # escaped the cascade and its containers leaked on every reload.
       var ctx = EdContext.init(id = "so_ctx")
       Ed.thread_ctx = ctx
@@ -231,7 +231,7 @@ proc run*() =
       # replica, zero contention. Destroying an owner cascades a DESTROY to its
       # owned container; if that cascade DESTROY goes out with an empty
       # OperationContext (no source), the replica re-publishes it back to the
-      # authority — where it lands AFTER the authority has recreated the same id,
+      # authority -- where it lands AFTER the authority has recreated the same id,
       # killing the live recreate. A single ordered producer over FIFO can only
       # misorder if an op echoes, and the cascade is the lone sourceless op.
       var auth = EdContext.init(id = "casc_auth", is_authority = true)
@@ -259,7 +259,7 @@ proc run*() =
         rep.tick(blocking = false)
         auth.tick(blocking = false)
 
-      # The live recreate must still be valid on the authority — the stale
+      # The live recreate must still be valid on the authority -- the stale
       # DESTROY for the old incarnation must not have echoed back onto it.
       check "casc_items" in auth
       check o2.items.valid
@@ -313,7 +313,7 @@ proc run*() =
       # a synced seq (models state.units); its owned container "ri_x_items"
       # (models the build's code/units fields) carries a value that identifies
       # the incarnation. Reload = remove+destroy gen 1, recreate the SAME ids,
-      # re-add — all in one tick (no tick between destroy and recreate). The
+      # re-add -- all in one tick (no tick between destroy and recreate). The
       # replica must end up reflecting gen 2, not pinned on the dead gen 1.
       var auth = EdContext.init(id = "ri1_auth", is_authority = true)
       var rep = EdContext.init(id = "ri1_rep")
@@ -410,7 +410,7 @@ proc run*() =
       # while the replica (main) falls behind, so the replica processes a *batch*
       # spanning several reincarnations in one drain. Models that by flushing only
       # the authority between reloads, then draining the replica once at the end.
-      # The replica must converge on the LAST incarnation — valid, not a stale one.
+      # The replica must converge on the LAST incarnation -- valid, not a stale one.
       var auth = EdContext.init(id = "ri3_auth", is_authority = true)
       var rep = EdContext.init(id = "ri3_rep")
       rep.subscribe(auth)
@@ -453,7 +453,7 @@ proc run*() =
       # The enu BuildNode.model bug: the consumer holds a reference to the unit
       # and fails to release it on removal, so the object stays in ref_pool
       # across reincarnations. The replica drains every reload (no batching, no
-      # lag) — the ONLY extra ingredient vs the passing storm test is the held
+      # lag) -- the ONLY extra ingredient vs the passing storm test is the held
       # reference. If ed leaves the held object pointing at destroyed fields,
       # `held.items` goes invalid (the enu "Ed invalid" spam on self.model.code).
       var auth = EdContext.init(id = "ri4_auth", is_authority = true)
@@ -465,7 +465,7 @@ proc run*() =
       proc make(v: int): ReincUnit =
         result = ReincUnit(id: "ri4_x") # stable id (the build), reincarnated
         result.own:
-          # Fresh field id per incarnation — models enu, where a reloaded build's
+          # Fresh field id per incarnation -- models enu, where a reloaded build's
           # owned containers (code/units) get newly-generated ids each time.
           result.items = EdSeq[int].init(ctx = auth, id = "ri4_x_items_" & $v)
         result.items.add v
@@ -481,7 +481,7 @@ proc run*() =
       check held.items.valid
       check held.items.value == @[0]
 
-      # Churn, draining the replica fully each time — the consumer keeps `held`.
+      # Churn, draining the replica fully each time -- the consumer keeps `held`.
       for gen in 1 .. 20:
         units -= cur
         cur.destroy()
@@ -491,7 +491,7 @@ proc run*() =
           auth.tick(blocking = false)
           rep.tick(blocking = false)
 
-      # The held reference must still be usable — not silently left pointing at
+      # The held reference must still be usable -- not silently left pointing at
       # destroyed fields. (Crash-safe: read .value only if valid.)
       let held_usable =
         not held.is_nil and not held.items.is_nil and held.items.valid
@@ -504,7 +504,7 @@ proc run*() =
       # removal (remove_from_scene), the same instance revives on the re-add, and
       # the consumer re-establishes its watches bound to the unit's lifetime
       # (require_lifetime returns the EXISTING one). Binding to a finished
-      # lifetime untracks immediately — every re-established watch silently dies,
+      # lifetime untracks immediately -- every re-established watch silently dies,
       # so synced data arrives and nothing renders. Revive must hand back a
       # usable (unfinished) lifetime.
       var auth = EdContext.init(id = "ri6_auth", is_authority = true)
@@ -559,11 +559,11 @@ proc run*() =
 
     test "REINC fix-1: release-on-removal keeps the held ref valid":
       # Fix (1): the consumer (BuildNode) RELEASES its reference when the unit is
-      # removed and re-acquires on add — modelled as a seq watcher that clears
+      # removed and re-acquires on add -- modelled as a seq watcher that clears
       # `held` on REMOVED and sets it on ADDED. With the reference dropped on
       # removal the object prunes, so the next CREATE mints fresh; `held` is then
       # never left pointing at destroyed fields. (Same full-reload churn as the
-      # failing `REINC held ref` test — only the consumer discipline differs.)
+      # failing `REINC held ref` test -- only the consumer discipline differs.)
       var auth = EdContext.init(id = "ri5_auth", is_authority = true)
       var rep = EdContext.init(id = "ri5_rep")
       rep.subscribe(auth)
@@ -629,12 +629,12 @@ proc run*() =
       check "rd_items" notin ctx # owned containers gone
       let after = fired
       external.value = 2
-      check fired == after # lifetime finished → callback untracked
+      check fired == after # lifetime finished -> callback untracked
 
     test "EdRef.destroy uses the ref's own context, not thread_ctx":
       # A ref stamped with ctxA (it entered ctxA's ref_pool via collection
       # membership) must tear down ctxA's owned containers even when a *different*
-      # context is the active thread_ctx — destroy follows the ref's ctx backref,
+      # context is the active thread_ctx -- destroy follows the ref's ctx backref,
       # not Ed.thread_ctx (which is wrong under multiple contexts per thread).
       var ctxA = EdContext.init(id = "xd_a")
       var ctxB = EdContext.init(id = "xd_b")
@@ -647,7 +647,7 @@ proc run*() =
         parent.kids = EdSeq[OwnerTest].init(
           ctx = ctxA, id = "xd_kids", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
         )
-      parent.kids.add child # → ctxA.ref_pool, stamps child.ctx = ctxA
+      parent.kids.add child # -> ctxA.ref_pool, stamps child.ctx = ctxA
       check child.ctx == ctxA
 
       Ed.thread_ctx = ctxB # the wrong context is now active
@@ -666,7 +666,7 @@ proc run*() =
         parent.kids = EdSeq[OwnerTest].init(
           ctx = ctx, id = "om_kids", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
         )
-      parent.kids.add child # membership → owned by parent
+      parent.kids.add child # membership -> owned by parent
 
       parent.destroy()
       check child.destroyed # member cascaded via the destroy method

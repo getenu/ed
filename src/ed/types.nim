@@ -10,8 +10,8 @@ type
 
   SyncMode* = enum
     ## How a context replicates its authority. A single enum (rather than separate
-    ## partial/blocking flags) so the nonsensical combination — a full replica that
-    ## blocks waiting to materialize, when it never needs to — can't be expressed.
+    ## partial/blocking flags) so the nonsensical combination -- a full replica that
+    ## blocks waiting to materialize, when it never needs to -- can't be expressed.
     FULL          ## full replica; everything syncs, reads never block.
     PARTIAL       ## partial replica, blocking: touching an unmaterialized
                   ## id pumps I/O until it fills (synchronous semantics).
@@ -19,8 +19,8 @@ type
                   ## placeholder that fills on a later tick (frame-paced).
 
   Lifetime* = ref object
-    ## A set of teardown actions (typically untracking callbacks). An owner — a
-    ## Unit or a scope — holds a Lifetime and `finish`es it on teardown, so
+    ## A set of teardown actions (typically untracking callbacks). An owner -- a
+    ## Unit or a scope -- holds a Lifetime and `finish`es it on teardown, so
     ## everything bound to it cleans up at once with no manual `zid` bookkeeping.
     ## Standalone (not part of EdBase) so an owner holds one directly.
     cleanups: seq[proc() {.gcsafe.}]
@@ -46,7 +46,7 @@ type
   EdRef* = ref object of RootObj
     ## Base for registered (network-syncable) refs. Carries a `RefHandle` so the
     ## registry can clean up `ref_pool` when ORC reclaims the instance, keeping the
-    ## pool's non-owning (cursor) hold from dangling — the subtype's own default
+    ## pool's non-owning (cursor) hold from dangling -- the subtype's own default
     ## destructor stays intact (only the trivial `RefHandle` gets a custom one).
     id*: string
       ## The ref's identity (sync identity rides on it via `ref_id` = tid:id).
@@ -57,13 +57,13 @@ type
       ## Idempotency latch for `destroy`, set at its top. `ed_ignore`: local
       ## teardown state, never synced (a received ref must arrive un-destroyed).
     lifetime*: Lifetime
-      ## This ref's teardown actions — external subscriptions and (via `own`) its
+      ## This ref's teardown actions -- external subscriptions and (via `own`) its
       ## owned containers. `destroy` runs `lifetime.finish`. Never synced.
     ctx* {.cursor.}: EdContext
       ## The context this instance lives in, stamped on first `ref_pool` add. A
       ## registered ref belongs to exactly one context (sync mints a separate
-      ## instance per context), so `destroy` uses it — not `Ed.thread_ctx`, which
-      ## is wrong under multiple contexts per thread — to find the right
+      ## instance per context), so `destroy` uses it -- not `Ed.thread_ctx`, which
+      ## is wrong under multiple contexts per thread -- to find the right
       ## `owned_by`/`ref_pool` for the cascade. Non-owning cursor (the context
       ## outlives its refs); never synced.
 
@@ -74,14 +74,14 @@ type
     SYNC_REMOTE       ## Sync changes to remote contexts (network)
     SYNC_ALL_NO_OVERWRITE  ## Sync without overwriting existing data
     LAZY              ## Pull-only: closure pushes / deep-fetch serving skip
-                      ## this container — it syncs via explicit fetch or per-key
+                      ## this container -- it syncs via explicit fetch or per-key
                       ## requests (big voxel tables). Arrives as a placeholder
                       ## otherwise.
     OWNS_MEMBERS      ## This collection's EdRef members are *owned* by the
                       ## collection's owner: membership registers them in
                       ## `owned_by` (removal un-registers), so the owner's
                       ## `destroy_owned` cascades into them. For true child
-                      ## collections (a unit's `units`) — NOT reference
+                      ## collections (a unit's `units`) -- NOT reference
                       ## collections (a sign's owner, a selection list).
 
   ChangeKind* = enum
@@ -96,7 +96,7 @@ type
   ChangeReason* = enum
     ## Why a change fired, orthogonal to `ChangeKind`. (Unrelated to
     ## `Change.triggered_by`, which is the upstream changes that caused this one.)
-    Update    ## An ordinary live change — a mutation or touch
+    Update    ## An ordinary live change -- a mutation or touch
     Fill      ## A placeholder materialized (partial-replica fetch landed)
 
   MessageKind* = enum
@@ -113,13 +113,13 @@ type
     RELEASE    # per-key paging: a replica dropped table keys (obj = key batch).
                # Receivers decide by role: a registered partial subscriber's
                # RELEASE retracts its key interest; one arriving from *upstream*
-               # is an eviction notice — drop the keys locally and relay
+               # is an eviction notice -- drop the keys locally and relay
                # downstream. Full clones forward without evicting; the
                # authority terminates it.
-    INTEREST   # live/cache tier change (Option 2). Subscriber → upstream:
+    INTEREST   # live/cache tier change (Option 2). Subscriber -> upstream:
                # `demote` (true) downgrades object_id to cache tier (still
                # streamed, but no longer protects it from eviction); `demote`
-               # false promotes it back to live. Lightweight — no data.
+               # false promotes it back to live. Lightweight -- no data.
     UNSUBSCRIBE # a LOCAL peer is going away (unsubscribe or context destroy):
                 # the receiver drops its reverse subscription and fires the
                 # unsubscribed event. REMOTE peers learn this from the dead
@@ -175,8 +175,8 @@ type
     key_bin*: string # Table ops only: the serialized key, stamped by
                      # build_message so fanout can filter per-key (LAZY tables /
                      # key interest) without deserializing `obj`. Sender-side
-                     # only — blanked from the remote body.
-    demote*: bool    # INTEREST only: true = demote (live→cache), false = promote.
+                     # only -- blanked from the remote body.
+    demote*: bool    # INTEREST only: true = demote (live->cache), false = promote.
     when defined(ed_trace):
       trace*: string
       id*: int
@@ -208,7 +208,7 @@ type
     # a registered ref alive. Memory is ORC-owned; the real holders are the
     # containers that `track` it plus the app/Godot node. When the last real
     # reference drops, ORC reclaims the instance and its `RefHandle.=destroy` dels
-    # this entry — so the cursor can never dangle (ref_pool[id] non-nil ⟺ instance
+    # this entry -- so the cursor can never dangle (ref_pool[id] non-nil <=> instance
     # alive). Requires every registered type to inherit `EdRef`.
     obj* {.cursor.}: ref RootObj
 
@@ -218,9 +218,9 @@ type
     parse*:
       proc(ctx: EdContext, clone_from: string): ref RootObj {.no_side_effect.}
     # Revive: converge a freshly-parsed `incoming` incarnation onto an EXISTING
-    # instance (a reincarnated id whose object a consumer still holds) — copy its
+    # instance (a reincarnated id whose object a consumer still holds) -- copy its
     # synced scalars and (already-relinked) Ed fields, leaving main-side refs
-    # (e.g. a godot node) intact. Identity preserved → held references stay valid
+    # (e.g. a godot node) intact. Identity preserved -> held references stay valid
     # across destroy+recreate (eventual convergence).
     revive*:
       proc(existing: ref RootObj, incoming: ref RootObj) {.no_side_effect.}
@@ -234,11 +234,11 @@ type
     ctx_id*: string
     # Partial replicas: when `partial`, this subscriber only receives objects in
     # `interest` (its roots + ids it has fetched). Default (not partial) gets
-    # everything — the existing full-replica behavior.
+    # everything -- the existing full-replica behavior.
     partial*: bool
     # Partial + deep: push the ownership closure of OWNS_MEMBERS collection
     # members (ahead of the collection / the member ADD). A game client wants
-    # this — units arrive render-ready; a narrow utility (enu_mcp) doesn't, and
+    # this -- units arrive render-ready; a narrow utility (enu_mcp) doesn't, and
     # deep-fetches the few things it touches. Explicit per subscription for now;
     # the default may later defer to a per-object preference (an EdFlags bit),
     # making it tri-state.
@@ -246,14 +246,14 @@ type
     interest*: HashSet[string]
     # Live/cache interest tiers (Option 2; docs/partial-replicas.md).
     # `interest_cache` is a subset of `interest`: those objects still stream
-    # (the subscriber's cache stays current), but they're *cache tier* — this
+    # (the subscriber's cache stays current), but they're *cache tier* -- this
     # subscriber holds them cached, not live, so they DON'T protect against
     # eviction. We may evict a cache-tier object under our own memory pressure
     # and invalidate the subscriber. Live interest = `interest - interest_cache`
     # is mandatory: an upstream must hold what's live on a downstream.
     interest_cache*: HashSet[string]
     # Per-key interest (LAZY tables): object_id -> serialized keys this
-    # subscriber has requested. A requested key streams its future ops — even
+    # subscriber has requested. A requested key streams its future ops -- even
     # one that was missing at request time (an empty-space voxel chunk someone
     # later builds in). RELEASE retracts. Orthogonal to `interest`: a table in
     # `interest` streams *all* its keys.
@@ -262,10 +262,10 @@ type
     # materialize (its registered `type_initializers`). The authority skips any
     # object whose `type_id` isn't here, so a peer never receives an object it
     # can't construct (which would crash/drop on deserialize). Empty = unfiltered
-    # (no handshake / same-build peer) — preserves the full-replica default.
+    # (no handshake / same-build peer) -- preserves the full-replica default.
     capabilities*: HashSet[int]
     # Short ID mappings for this connection. Outgoing and incoming are
-    # *separate* namespaces — each peer independently allocates short IDs
+    # *separate* namespaces -- each peer independently allocates short IDs
     # in messages it sends. Sharing the table would let our own outgoing
     # assignments clobber an incoming mapping the peer expects us to use.
     next_short_id*: uint8  # Next outgoing short ID to assign
@@ -286,13 +286,13 @@ type
     ## Where a `fetch` stands. Resolves on a later tick (the request round-trip).
     Pending   ## request sent; no answer yet
     Found     ## the object (or, for a deep owner fetch, its closure) arrived
-    NotFound  ## the authority answered NOT_FOUND — it didn't exist *at fetch
+    NotFound  ## the authority answered NOT_FOUND -- it didn't exist *at fetch
               ## time*. With `follow` (the default) it still arrives later if
               ## something creates it; the handle stays NotFound either way.
 
   Fetch* = ref object
     ## Handle returned by `fetch`. Watch `state`; once `Found`, `obj` links the
-    ## container — except for a deep fetch of an *owner* id (a unit), which has
+    ## container -- except for a deep fetch of an *owner* id (a unit), which has
     ## no container of its own: state resolves via its arriving closure and
     ## `obj` stays nil.
     id*: string
@@ -323,17 +323,17 @@ type
     materialize*: proc(self: EdContext, id: string) {.gcsafe.}
     # Blocking materialize: a read of an unmaterialized placeholder pumps I/O
     # until it fills. Normally driven by SyncMode (EdClient sets it for PARTIAL)
-    # or scoped via the `blocking:` template — not set on its own (a full replica
+    # or scoped via the `blocking:` template -- not set on its own (a full replica
     # never needs to block; that's why SyncMode pairs the two).
     blocking*: bool
     # Partial-replica evictor (docs/partial-replicas.md). `mem_limit` is a cache
-    # budget for unclaimed bodies, in bytes — an honest, monotonic value from
+    # budget for unclaimed bodies, in bytes -- an honest, monotonic value from
     # "no cache" up to "unlimited":
-    #     0  no cache — evict everything the moment it isn't live (a utility
+    #     0  no cache -- evict everything the moment it isn't live (a utility
     #        client that holds nothing it isn't actively using). Negatives are
     #        clamped to this at init.
     #   0<n  cache up to n bytes; over budget, shed least-recently-read (LRU).
-    #   Unbounded (= int.high)  never evict — unlimited cache.
+    #   Unbounded (= int.high)  never evict -- unlimited cache.
     # Only a partial replica evicts (a full clone / authority never does, so the
     # value is moot there). `used_bytes` is the running sum of resident body
     # bytes (finite-budget mode only). See `evicts` / `has_budget`.
@@ -343,12 +343,12 @@ type
       ## Set whenever something an eviction sweep would act on changed since the
       ## last sweep: a message was processed, or a dead proxy/ref was pruned. The
       ## sweep skips its (O(objects)) reconcile/churn/pressure work when this is
-      ## false and we're under budget — so a calm context pays ~nothing per tick.
+      ## false and we're under budget -- so a calm context pays ~nothing per tick.
       ## (A pure read that mints a proxy without any message can delay a promote
       ## by a tick; harmless and self-correcting.)
     last_proxy_prune_epoch*: int # last dead_proxy_epoch this ctx pruned at
     last_ref_prune_epoch*: int   # last dead_ref_epoch this ctx pruned at
-    filling*: bool        # set while a placeholder fill applies → tags Fill changes
+    filling*: bool        # set while a placeholder fill applies -> tags Fill changes
     silent*: bool         # silent (blocking) materialize: defer callbacks to next tick
     pending_msgs*: seq[Message]            # received-but-deferred during a silent pump
     pending_fills*: seq[proc() {.gcsafe.}] # Fill callbacks deferred to the next tick
@@ -357,17 +357,17 @@ type
     # table, flushed on the next tick.
     pending_key_requests*: Table[string, seq[string]]
     # Per-key releases buffered between ticks, mirroring pending_key_requests:
-    # one RELEASE per table per tick. Broadcast to all peers — upstream reads it
+    # one RELEASE per table per tick. Broadcast to all peers -- upstream reads it
     # as an interest retract, downstream as an eviction notice.
     pending_key_releases*: Table[string, seq[string]]
     # Contexts we subscribed *to* (our data sources). An eviction notice
-    # (RELEASE) is honored only when it arrives from upstream — we are a clone
+    # (RELEASE) is honored only when it arrives from upstream -- we are a clone
     # of that context, so a key it dropped is gone for us too. This is how
     # partiality inherits down a clone chain (a full clone of a full source
     # never receives one); the authority has no upstream and terminates.
     upstream_ctx_ids*: HashSet[string]
     # This context subscribed partial somewhere: it holds data on demand, not
-    # by contract. Gates hub shedding — a partial hub that retracts the last
+    # by contract. Gates hub shedding -- a partial hub that retracts the last
     # downstream interest in a key drops its own copy and chains the release
     # upstream; a *full* clone never sheds (it wants everything).
     partial_replica*: bool
@@ -380,14 +380,14 @@ type
     # lingers as a tiny string, holding nothing alive.
     close_index: Table[EID, string]
     # The body registry: canonical, registry-owned state per id. Proxies are
-    # minted on demand over these — see `resolve_proxy`; `ctx[id]` still returns
+    # minted on demand over these -- see `resolve_proxy`; `ctx[id]` still returns
     # the proxy, so the public API is unchanged.
     objects*: OrderedTable[string, ref EdBodyBase]
     objects_need_packing*: bool
     # Ownership index: owner EdRef id -> ids of the containers it owns (whose
     # `owner_id` points back here). Built as containers are created/materialized,
     # pruned as they're destroyed. Lets an owner tear down what it owns
-    # (`destroy_owned`) in *any* context — including one that didn't construct it
+    # (`destroy_owned`) in *any* context -- including one that didn't construct it
     # (e.g. the server cleaning up an MCP-created bot after the client drops).
     owned_by*: Table[string, HashSet[string]]
     # In-flight fetches by id; resolved (Found/NotFound) as answers arrive, then
@@ -395,7 +395,7 @@ type
     fetches*: Table[string, Fetch]
     # Request chaining (hubs): wants we couldn't serve locally, forwarded
     # upstream and remembered here. Served when the data arrives; NACK-relayed
-    # when the upstream answers NOT_FOUND. The authority never forwards — a
+    # when the upstream answers NOT_FOUND. The authority never forwards -- a
     # miss there is a real NOT_FOUND.
     pending_obj_wants*:
       Table[string, seq[tuple[sub: Subscription, deep: bool]]]
@@ -437,7 +437,7 @@ type
       counts*: array[MessageKind, int]
 
   EdBodyBase* = object of RootObj
-    ## Registry-side state of a container — the *body* of the proxy/body split
+    ## Registry-side state of a container -- the *body* of the proxy/body split
     ## (docs/proxy-body.md). Carries the data and everything the wire needs; the
     ## app-facing proxy (`Ed`) forwards here via templates, so call sites read
     ## unchanged. The registry owns the body; the proxy is reached through the
@@ -447,7 +447,7 @@ type
     # container is created inside an `own` scope, and on materialize from the
     # synced CREATE envelope, so it's the same in every context. Indexed in
     # `EdContext.owned_by`; the owner's `destroy_owned` tears these down. Mutable
-    # on purpose — ownership transfer (re-home a live object) will reset it.
+    # on purpose -- ownership transfer (re-home a live object) will reset it.
     owner_id*: string
     destroyed*: bool
     # Partial replicas: a placeholder is a non-broadcasting stand-in for a
@@ -460,16 +460,16 @@ type
     # All cheap to maintain; only the partial-replica sweep reads them.
     last_read*: MonoTime  # stamped on a read-touch (value/[]/items/pairs)
     bytes*: int           # wire-weight, stamped where we serialize (drift-ok)
-    updates*: int         # arriving ops since the last read — the churn signal
+    updates*: int         # arriving ops since the last read -- the churn signal
     # Interest tier we last reported to our upstream for this object (Option 2).
     # Reconciled each sweep against `is_live_here`: when liveness flips we send
-    # a demote (live→cache) or promote (cache→live) so the upstream isn't
+    # a demote (live->cache) or promote (cache->live) so the upstream isn't
     # obligated to hold what we only have cached. 0 = none, 1 = live, 2 = cache.
     up_tier*: int
     # Per-key wire bytes for a table (key_bin -> last ASSIGN obj.len). Lets a
     # per-key evict/release subtract exactly what the entry added to `bytes`,
     # so paging out actually shrinks `used_bytes` (whole-body fill leaves this
-    # empty — only delta-grown tables populate it).
+    # empty -- only delta-grown tables populate it).
     key_bytes*: Table[string, int]
     # Per-key recency (key_bin -> last activity), for the per-key cache LRU on
     # LAZY tables: stamped when a key is served to a downstream (last in-view)
@@ -493,7 +493,7 @@ type
     # Per-key fetch (partial EdTable). Given a serialized key, build the ADD op
     # carrying that key's current value, so a partial subscriber can pull one
     # entry without the whole table. `found = false` if the key isn't present.
-    # `nested` lists Ed containers inside the value (a chunk's delta seq) — the
+    # `nested` lists Ed containers inside the value (a chunk's delta seq) -- the
     # server publishes those *before* the entry so the receiver links them
     # (per-key deep, one round trip). nil for non-table containers.
     publish_key:
@@ -502,7 +502,7 @@ type
       ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.}
 
     # Per-key eviction (paging). Given a serialized key, drop the entry locally
-    # — fires REMOVED callbacks, no publish — and report whether it was present
+    # -- fires REMOVED callbacks, no publish -- and report whether it was present
     # plus the ids of Ed containers nested in its value (so the caller can shed
     # interest / relay them). The local half of `release` and the receiving half
     # of a RELEASE eviction notice. nil for non-table containers.
@@ -517,13 +517,13 @@ type
     # object<->context reference cycle so a freed object/subtree is reclaimed
     # promptly instead of waiting on ORC's cycle collector. Safe because the
     # context strictly outlives its objects (it holds the only registry refs;
-    # teardown that touches `self.ctx` — untrack/destroy — is explicit and runs
+    # teardown that touches `self.ctx` -- untrack/destroy -- is explicit and runs
     # while the context is alive, and no Ed object has an ORC `=destroy` that
     # dereferences `ctx`). Validated under AddressSanitizer (tests/asan.sh).
     ctx* {.cursor.}: EdContext
     # The live proxy for this body, or nil. Non-owning ({.cursor.}): the app
     # and containers own proxies; when the last reference drops, the proxy's
-    # ProxyHandle records the death and `prune_dead_proxies` clears this —
+    # ProxyHandle records the death and `prune_dead_proxies` clears this --
     # always *before* an identity read, so the cursor is never read dangling
     # (the RefHandle discipline, applied to containers).
     proxy {.cursor.}: ref EdBase
@@ -532,7 +532,7 @@ type
     # Ed[T, O] is known). Mints over this body, sets the backref + handle.
     mint: proc(): ref EdBase {.gcsafe.}
     # Typed context-level untrack (see EdContext.close_index): untracks `zid`
-    # on the live proxy, or no-ops — a dead proxy already took its callbacks
+    # on the live proxy, or no-ops -- a dead proxy already took its callbacks
     # with it. Captures only the body (the mint pattern).
     untrack_zid: proc(zid: EID) {.gcsafe.}
     # Sweep callbacks registered through a now-dead proxy generation; returns
@@ -544,12 +544,12 @@ type
     changes: seq[Change[O]], it: ref EdBase
   ) {.gcsafe.}
     ## Stored callback shape: the live proxy arrives as a *parameter* (`it`),
-    ## never a capture — parameters pin nothing, so a watcher written against
+    ## never a capture -- parameters pin nothing, so a watcher written against
     ## `it` lets its proxy die promptly at refcount zero. `it` is nil only for
     ## CLOSED notifications fired after the proxy is already gone.
 
   EdBody*[T, O] = ref object of EdBodyBase
-    ## Typed body: the canonical data AND the callbacks live here — registry-
+    ## Typed body: the canonical data AND the callbacks live here -- registry-
     ## owned, no reliance on cycle collection (which Nim's ORC empirically
     ## does not perform for closure environments). A closure stored here must
     ## capture nothing that reaches a body or a context, or it leaks for the
@@ -557,7 +557,7 @@ type
     tracked: T
     changed_callbacks: OrderedTable[EID, ChangeCallback[O]]
     # zid -> proxy generation that registered it. When a dead proxy's gen is
-    # pruned, its callbacks sweep with it — deterministic next-tick cleanup.
+    # pruned, its callbacks sweep with it -- deterministic next-tick cleanup.
     callback_gens: Table[EID, int]
     link_eid: EID
     paused_eids: set[EID]
@@ -565,7 +565,7 @@ type
   ProxyHandle* = ref object
     ## Per-proxy registry-cleanup handle (the container twin of `RefHandle`).
     ## When a proxy's last reference drops, ORC destroys its fields and this
-    ## handle's `=destroy` records the death for the context to prune — the
+    ## handle's `=destroy` records the death for the context to prune -- the
     ## destructor dereferences *nothing* (the context, even the body, may be
     ## reclaimed in the same ORC batch). `gen` guards out-of-order prunes: a
     ## body only clears its backref if the dead proxy was its *current* one.
@@ -574,10 +574,10 @@ type
     gen*: int
 
   EdBase* = object of RootObj
-    ## Base type for all `Ed` containers — the *proxy* side of the split: what
+    ## Base type for all `Ed` containers -- the *proxy* side of the split: what
     ## the app holds. Local, handle-scoped state only (change callbacks and
     ## their EID bookkeeping die with the proxy); everything synced forwards
-    ## to `body`. Minted by `ctx[id]`/`resolve_proxy` when none is live —
+    ## to `body`. Minted by `ctx[id]`/`resolve_proxy` when none is live --
     ## reference identity holds because the body's backref always points at
     ## *the* live proxy (prune-before-read keeps it honest).
     body*: ref EdBodyBase
@@ -604,7 +604,7 @@ type
 const DEFAULT_FLAGS* = {SYNC_LOCAL, SYNC_REMOTE}
   ## Default flags for `Ed` containers: sync both locally and remotely.
 
-# Proxy → body forwarding. Templates expand at the call site, so field accesses
+# Proxy -> body forwarding. Templates expand at the call site, so field accesses
 # (reads *and* writes) compile unchanged; private body fields still require
 # `privileged` there. The typed `tracked` forward casts through `EdBody[T]`;
 # everything else lives on the untyped base.
@@ -635,7 +635,7 @@ template ctx*(self: ref EdBase): untyped =
 proc init_husk*[T, O](_: typedesc[Ed[T, O]], id: string): Ed[T, O] =
   ## A bare serialization stand-in: proxy + body carrying only the id. Used by
   ## registered-type `stringify`, which clones a ref and reduces its Ed fields
-  ## to their ids — the receiver re-links them from its own registry. Not
+  ## to their ids -- the receiver re-links them from its own registry. Not
   ## registered anywhere; never escapes serialization.
   result = Ed[T, O]()
   result.body = EdBody[T, O](id: id)
@@ -676,7 +676,7 @@ proc evict_key*(
 var next_ctx_uid*: Atomic[int]
   ## Global source of `EdContext.uid`. Must be process-wide: the dead-handle
   ## pending tables are global (a context can be created on one thread and live
-  ## on another), so a uid colliding across threads would misattribute deaths —
+  ## on another), so a uid colliding across threads would misattribute deaths --
   ## one context draining another's records and dangling its backref cursor.
 
 var dead_handles_lock: Lock
@@ -686,7 +686,7 @@ var dead_proxy_epoch*: Atomic[int]
 var dead_ref_epoch*: Atomic[int]
   ## Bumped (under the lock) whenever a proxy/ref death is recorded. A context
   ## remembers the epoch at its last prune (`last_*_prune_epoch`) and skips the
-  ## lock entirely when the epoch hasn't moved — so a tick with no deaths does no
+  ## lock entirely when the epoch hasn't moved -- so a tick with no deaths does no
   ## locking, even though `prune_dead_*` is called from several hot paths
   ## (tick, resolve_proxy, from_flatty). Process-global, matching the pending
   ## tables (a context can be created on one thread and pruned on another).
@@ -694,7 +694,7 @@ var dead_ref_epoch*: Atomic[int]
 var pending_dead_refs*: Table[int, seq[string]]
   ## ctx uid -> ref_ids whose registered instance ORC has reclaimed. Populated by
   ## `RefHandle.=destroy`, which must NOT touch its `EdContext` (it may already be
-  ## freed — even within the same cycle-collection batch). Each context drains its
+  ## freed -- even within the same cycle-collection batch). Each context drains its
   ## own uid via `prune_dead_refs` before any `ref_pool` identity read and on tick.
   ## Entries for a context that dies without draining just linger (bounded; freed
   ## at thread exit) and can't be misattributed, since the key is the uid.
@@ -718,12 +718,12 @@ var pending_dead_proxies*: Table[int, seq[(string, int)]]
   ## ctx uid -> (object_id, gen) of container proxies ORC has reclaimed.
   ## Populated by `ProxyHandle.=destroy` (which must touch nothing); drained by
   ## `prune_dead_proxies` before any proxy-identity read and on tick. Global +
-  ## lock-guarded (NOT a threadvar): a context can be created on one thread —
-  ## minting proxies there — and then live on another (the threading tests'
+  ## lock-guarded (NOT a threadvar): a context can be created on one thread --
+  ## minting proxies there -- and then live on another (the threading tests'
   ## worker handoff), so deaths must be visible to the pruning thread.
 
 proc `=destroy`(h: var typeof(ProxyHandle()[])) =
-  ## Records a dead proxy for its context to prune. Dereferences nothing — the
+  ## Records a dead proxy for its context to prune. Dereferences nothing -- the
   ## body and even the context may be reclaimed in the same ORC batch. A custom
   ## `=destroy` replaces field destruction, so `object_id` is freed by hand.
   if h.ctx_uid != 0 and h.object_id.len > 0:
@@ -735,12 +735,12 @@ proc `=destroy`(h: var typeof(ProxyHandle()[])) =
   `=destroy`(h.object_id)
 
 proc prune_dead_proxies*(self: EdContext) =
-  ## Clear body→proxy backrefs whose proxies ORC has reclaimed. Must run before
+  ## Clear body->proxy backrefs whose proxies ORC has reclaimed. Must run before
   ## any backref read so a dangling cursor is never returned; `gen` ensures a
   ## late prune can't clear a *newer* proxy minted after the death was recorded.
   {.cast(gcsafe).}:
     # Lock-free fast path: if no proxy has died anywhere since our last prune,
-    # there's nothing for us to drain — skip the global lock entirely. (A death
+    # there's nothing for us to drain -- skip the global lock entirely. (A death
     # in another context can cost us one redundant lock; a tick with no deaths
     # costs none.)
     let epoch = dead_proxy_epoch.load
@@ -754,13 +754,13 @@ proc prune_dead_proxies*(self: EdContext) =
     dead_handles_lock.release()
     self.last_proxy_prune_epoch = epoch
     if dead.len > 0:
-      self.sweep_dirty = true # a liveness flip → the next sweep must reconcile
+      self.sweep_dirty = true # a liveness flip -> the next sweep must reconcile
     for (object_id, gen) in dead:
       if object_id in self.objects and self.objects[object_id] != nil and
           self.objects[object_id].proxy_gen == gen:
         let body = self.objects[object_id]
         body.proxy = nil
-        # The dead proxy's callbacks die with it — registered through it,
+        # The dead proxy's callbacks die with it -- registered through it,
         # cleaned when it goes (the sentinel model). Deterministic: next
         # prune, not cycle-collector cadence.
         if body.sweep_gen != nil:
@@ -770,7 +770,7 @@ proc prune_dead_proxies*(self: EdContext) =
 proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
   ## The identity map: the one live proxy for `body`, minting if none. Two
   ## resolutions of the same id are reference-equal while anything holds the
-  ## proxy — honest `ref` identity (docs/proxy-body.md).
+  ## proxy -- honest `ref` identity (docs/proxy-body.md).
   if body == nil:
     return nil
   self.prune_dead_proxies
@@ -783,11 +783,11 @@ proc release_closures*(body: ref EdBodyBase) =
   ## Break the body's self-capturing closures. mint/untrack_zid/sweep_gen capture
   ## the body; `publish_create` captures both the body *and* its context (it
   ## reads `ctx.subscribers` / `ctx.send` / `ctx.tick_reactor`), so leaving it set
-  ## pins the whole context — the object<->context cycle the cursor backref was
+  ## pins the whole context -- the object<->context cycle the cursor backref was
   ## meant to break, reintroduced through the closure environment. ORC does not
   ## collect closure cycles, so an unreleased body leaks itself and its context.
   ## (build_message/change_receiver/publish_key/evict_key take `body` as a
-  ## parameter and reach ctx via `body.ctx` — they capture nothing, so they need
+  ## parameter and reach ctx via `body.ctx` -- they capture nothing, so they need
   ## no release.) Every caller removes the body from `objects` right after, so the
   ## body is leaving the registry and these will not be invoked again.
   body.mint = nil
@@ -796,7 +796,7 @@ proc release_closures*(body: ref EdBodyBase) =
   body.publish_create = nil
 
 const Unbounded* = high(int)
-  ## `mem_limit = Unbounded` means never evict — an unlimited cache. The top of
+  ## `mem_limit = Unbounded` means never evict -- an unlimited cache. The top of
   ## the byte-budget range, so the value stays an honest, monotonic size.
 
 const DEFAULT_MEM_LIMIT* = 16 * 1024 * 1024
@@ -810,13 +810,13 @@ proc evicts*(self: EdContext): bool {.inline.} =
 
 proc has_budget*(self: EdContext): bool {.inline.} =
   ## Tracks per-body bytes against a finite cap. No-cache (0) and `Unbounded`
-  ## skip the accounting — there's nothing to compare a running total against.
+  ## skip the accounting -- there's nothing to compare a running total against.
   self.evicts and self.mem_limit > 0
 
 proc set_body_bytes*(self: EdContext, body: ref EdBodyBase, n: int) =
   ## Record a body's resident wire-size and keep `used_bytes` in step. Called
   ## where we already have the serialized form (publish/fill); drift between
-  ## those points is harmless — the total only gates *when* the limit trips,
+  ## those points is harmless -- the total only gates *when* the limit trips,
   ## and LRU ordering doesn't use bytes at all. Only the finite-budget mode
   ## needs accounting; no-cache and Unbounded skip it.
   if not self.has_budget:
@@ -845,7 +845,7 @@ proc set_key_bytes*(
 proc forget_key_bytes*(self: EdContext, body: ref EdBodyBase, key_bin: string) =
   ## Drop a per-key entry's accounting on evict/release: its recency and its
   ## bytes. Called from `evict_key` (so every eviction site cleans both parallel
-  ## tables — they can't drift) and on UNASSIGN. `del` of a missing key is a
+  ## tables -- they can't drift) and on UNASSIGN. `del` of a missing key is a
   ## no-op, so recency is cleared even if bytes were never accounted.
   if not self.has_budget:
     return
@@ -859,7 +859,7 @@ proc drop_nested_bodies*(self: EdContext, nested: seq[string]) =
   ## Unregister the nested container bodies an evicted entry carried (a paged-
   ## out chunk's delta seq): the registry releases its strong hold, so the
   ## memory frees once any remaining holder drops, and the id resolves fresh
-  ## on re-page-in. Local only — eviction never destroys upstream data.
+  ## on re-page-in. Local only -- eviction never destroys upstream data.
   for id in nested:
     if id in self.objects:
       let body = self.objects[id]
@@ -893,7 +893,7 @@ proc prune_dead_refs*(self: EdContext) =
       self.ref_pool.del(ref_id)
 
 proc to_flatty*(s: var string, x: RefHandle) =
-  ## Per-context-local state (uid + id), never synced — its uid is meaningless in
+  ## Per-context-local state (uid + id), never synced -- its uid is meaningless in
   ## another context. Skip it; `ref_count` re-mints the handle on the receiver's
   ## first ADD.
   discard
@@ -939,19 +939,19 @@ proc finished*(self: Lifetime): bool =
 var current_lifetime* {.threadvar.}: Lifetime
   ## The lifetime an open `own` scope binds *callbacks* to (thread-local; nil = no
   ## scope). `track` consults it: a callback registered inside `self.own:` untracks
-  ## when `self.lifetime.finish` runs. nil outside a scope → no auto-binding.
+  ## when `self.lifetime.finish` runs. nil outside a scope -> no auto-binding.
 
 var current_owner_id* {.threadvar.}: string
   ## The id of the EdRef an open `own` scope attributes new *containers* to. A
   ## container created inside the scope records it (`owner_id` + the `owned_by`
   ## index); the owner's `destroy_owned` then tears those containers down. So
   ## `lifetime` carries callbacks while container ownership is the baked-in
-  ## `owner_id`. "" outside a scope → containers are unowned.
+  ## `owner_id`. "" outside a scope -> containers are unowned.
 
 template own*(owner_id: string, body: untyped) =
-  ## Like `self.own:`, but keyed by an owner *id* — for construction, where you
+  ## Like `self.own:`, but keyed by an owner *id* -- for construction, where you
   ## have the id but the owner object doesn't exist yet. Every Ed container created
-  ## in the block (including by procs it calls — the scope is dynamic) records
+  ## in the block (including by procs it calls -- the scope is dynamic) records
   ## `owner_id`. No lifetime is set; callbacks bind via the `EdRef` form once the
   ## owner exists.
   let prev_owner_id = current_owner_id
@@ -966,7 +966,7 @@ template own*[T: EdRef](self: T, body: untyped) =
   ## (so `self`'s teardown destroys them via `destroy_owned`), and every callback
   ## tracked binds its untrack to `self.lifetime` (lazily created). Generic on the
   ## concrete type so `self.id` resolves (EdRef has no `id` of its own). Scopes
-  ## nest by save/restore — innermost wins, control returns to the enclosing owner
+  ## nest by save/restore -- innermost wins, control returns to the enclosing owner
   ## on exit. It's a *dynamic* scope: things constructed in procs called from the
   ## body attribute here too, so keep blocks tight.
   if self.lifetime.is_nil:

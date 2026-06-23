@@ -194,7 +194,7 @@ proc run*() =
   test "resubscribe with same ctx_id drops the stale subscription":
     # Reproduces the Enu MCP reconnect scenario at the protocol level. A
     # client subscribes, then its EdContext is recreated (process didn't
-    # die — same id, fresh context) and subscribes again. The publisher
+    # die -- same id, fresh context) and subscribes again. The publisher
     # must drop the stale subscriber so it doesn't route messages to a
     # connection that now belongs to the new context.
     let host = free_addr()
@@ -223,7 +223,7 @@ proc run*() =
         publisher.tick(blocking = false)
 
     # Publisher should have swept the stale "mainA" subscriber when the
-    # new one's SUBSCRIBE arrived — exactly one REMOTE sub remains.
+    # new one's SUBSCRIBE arrived -- exactly one REMOTE sub remains.
     let remote_subs = publisher.subscribers.filter_it(it.kind == REMOTE)
     check remote_subs.len == 1
     check remote_subs[0].ctx_id == "mainA"
@@ -248,7 +248,7 @@ proc run*() =
     sv.value = "alive"
 
     # A "client" speaking a different wire format: valid netty framing,
-    # old-format-shaped payloads (no wire header) — including one that
+    # old-format-shaped payloads (no wire header) -- including one that
     # resembles the pre-header packet layout.
     var rogue = new_reactor()
     let conn = rogue.connect("127.0.0.1", port)

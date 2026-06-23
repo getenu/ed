@@ -14,14 +14,14 @@ proc trigger_callbacks*[T, O](body: EdBody[T, O], changes: seq[Change[O]]) {.gcs
 
 proc trigger_callbacks_deferred[T, O](body: EdBody[T, O], changes: seq[Change[O]]) =
   # Silent-materialize deferral: re-fires at the next tick. Captures the body
-  # (registry-owned) in a ctx-held seq — a plain chain, dropped when replayed.
+  # (registry-owned) in a ctx-held seq -- a plain chain, dropped when replayed.
   privileged
   body.ctx.pending_fills.add proc() {.gcsafe.} =
     body.trigger_callbacks(changes)
 
 proc trigger_callbacks*[T, O](body: EdBody[T, O], changes: seq[Change[O]]) {.gcsafe.} =
   ## Body-side: callbacks are registry-owned (see EdBody). The live proxy is
-  ## resolved lazily — only when there are callbacks to fire — and passed as
+  ## resolved lazily -- only when there are callbacks to fire -- and passed as
   ## the `it` parameter, never captured.
   privileged
 
@@ -40,7 +40,7 @@ proc trigger_callbacks*[T, O](body: EdBody[T, O], changes: seq[Change[O]]) {.gcs
     for c in changes:
       c.reason = Fill
 
-  # Silent (blocking) materialize: nothing application-visible fires mid-fetch —
+  # Silent (blocking) materialize: nothing application-visible fires mid-fetch --
   # defer the callbacks to the next explicit tick (preserves tick-boundary
   # semantics and clean reentrancy). The value is already applied, so the
   # blocking read still returns real data.

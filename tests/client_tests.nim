@@ -7,7 +7,7 @@ import ed/types {.all.}
 # server on the host can't leak packets into the test reactor.
 let test_address = free_addr()
 
-# A listening peer on its own thread, ticking continuously — the role Enu
+# A listening peer on its own thread, ticking continuously -- the role Enu
 # plays for the MCP server (separate process, independent tick loop). An
 # in-process same-thread server would deadlock the client's blocking
 # subscribe, so a thread is the faithful setup.
@@ -72,7 +72,7 @@ proc run*() =
       sleep 5
     check received == "hello"
 
-    # Idle ticking keeps the link up — no spurious reconnect, no re-setup.
+    # Idle ticking keeps the link up -- no spurious reconnect, no re-setup.
     for _ in 0 ..< 10:
       client.tick
       sleep 5
@@ -92,7 +92,7 @@ proc run*() =
   test "EdClient reconnects after the peer goes away and returns":
     # The MCP-server-survives-an-Enu-restart path. A dropped peer must be
     # detected (netty reaps the connection after its ~10s timeout) and the
-    # client must re-subscribe under the same id once the peer is back —
+    # client must re-subscribe under the same id once the peer is back --
     # all from plain idle ticking, no manual intervention.
     setups = 0
     start_server()
