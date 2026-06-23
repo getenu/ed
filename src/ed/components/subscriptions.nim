@@ -620,7 +620,7 @@ proc publish_changes*[T, O](
         # (return-to-source) -- so writers learn the canonical order/value and
         # converge. LSN dedup in process_message keeps this idempotent and
         # loop-free (receivers won't echo back to us: we're in their source).
-        let canon_ctx = OperationContext.init(source = [self.ctx.id].toHashSet)
+        let canon_ctx = OperationContext.init(source = [self.ctx.id].to_hash_set)
         for msg in msgs:
           self.ctx.fanout(msg, canon_ctx, self.flags, self.ctx.subscribers)
       else:
@@ -752,7 +752,7 @@ proc subscribe*(
       ctx_id: self.id,
       partial: partial,
       deep: deep,
-      interest: fetch.toHashSet,
+      interest: fetch.to_hash_set,
     ),
     push_all = bidirectional,
     remote_objects,
@@ -952,7 +952,7 @@ proc evict_sweep*(self: EdContext) =
           live = true
           break
       if not live:
-        keyed.add (body.key_last_read.getOrDefault(key_bin), id, key_bin)
+        keyed.add (body.key_last_read.get_or_default(key_bin), id, key_bin)
   var key_heap = keyed.to_heap_queue # min by recency: least-recently-served first
   while self.used_bytes > self.mem_limit and key_heap.len > 0:
     let (_, id, key_bin) = key_heap.pop
@@ -961,7 +961,7 @@ proc evict_sweep*(self: EdContext) =
     if obj != nil and obj.evict_key != nil:
       let evicted = obj.evict_key(obj, key_bin) # evict_key -> forget_key_bytes
       self.drop_nested_bodies(evicted.nested)    # ...clears key_last_read too
-    self.pending_key_releases.mgetOrPut(id, @[]).add key_bin # retract upstream
+    self.pending_key_releases.mget_or_put(id, @[]).add key_bin # retract upstream
 
 proc fetch*(
     self: EdContext, object_id: string, deep = false
@@ -1068,7 +1068,7 @@ proc subscribe*(
   # three to the subscription it creates for us.
   let type_ids = block:
     {.gcsafe.}:
-      toSeq(type_initializers.keys)
+      to_seq(type_initializers.keys)
   let handshake = (type_ids, partial, @fetch, deep).to_flatty
   self.send(
     Subscription(
@@ -1194,7 +1194,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
   if msg.origin == self.id:
     let superseded =
       msg.delta or
-      msg.op_id < self.latest_op_id.getOrDefault(msg.object_id, 0'i64)
+      msg.op_id < self.latest_op_id.get_or_default(msg.object_id, 0'i64)
     if superseded:
       if msg.lsn > self.applied_lsn:
         self.applied_lsn = msg.lsn
@@ -1264,7 +1264,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     if msg.owner_id.len > 0 and msg.object_id in self.objects and
         ?self.objects[msg.object_id]:
       self.objects[msg.object_id].owner_id = msg.owner_id
-      self.owned_by.mgetOrPut(msg.owner_id, initHashSet[string]()).incl(
+      self.owned_by.mget_or_put(msg.owner_id, init_hash_set[string]()).incl(
         msg.object_id
       )
     # Interest tiering (Option 2): a body materialized from an upstream CREATE
@@ -1444,7 +1444,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
             if obj.evict_key != nil:
               let evicted = obj.evict_key(obj, key_bin)
               self.drop_nested_bodies(evicted.nested)
-          self.pending_key_releases.mgetOrPut(msg.object_id, @[]).add key_bin
+          self.pending_key_releases.mget_or_put(msg.object_id, @[]).add key_bin
     if not retracted:
       var from_upstream = false
       for src in source:
@@ -1503,7 +1503,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
         # future ops stream (a missing chunk pops in when someone builds
         # there). RELEASE retracts.
         for key_bin in msg.obj.from_flatty(seq[string]):
-          s.key_interest.mgetOrPut(msg.object_id, initHashSet[string]()).incl(
+          s.key_interest.mget_or_put(msg.object_id, init_hash_set[string]()).incl(
             key_bin
           )
         var missing: seq[string]
@@ -1874,11 +1874,11 @@ proc tick*(
         var latest: Table[string, int64]
         for m in batch:
           if m.kind == ASSIGN and not m.delta and m.lsn > 0 and
-              m.lsn > latest.getOrDefault(m.object_id, 0'i64):
+              m.lsn > latest.get_or_default(m.object_id, 0'i64):
             latest[m.object_id] = m.lsn
         for m in batch:
           if m.kind == ASSIGN and not m.delta and m.lsn > 0 and
-              m.lsn < latest.getOrDefault(m.object_id, 0'i64):
+              m.lsn < latest.get_or_default(m.object_id, 0'i64):
             if m.lsn > self.applied_lsn:
               self.applied_lsn = m.lsn  # superseded register update: skip effect
           else:
@@ -2063,9 +2063,9 @@ proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
   self.silent = false
 
 proc find_bare_return(n: NimNode): NimNode =
-  if n.kind == nnkReturnStmt:
+  if n.kind == nnk_return_stmt:
     return n
-  if n.kind in {nnkProcDef, nnkFuncDef, nnkLambda, nnkDo}:
+  if n.kind in {nnk_proc_def, nnk_func_def, nnk_lambda, nnk_do}:
     return nil
   for child in n:
     let found = find_bare_return(child)

@@ -632,28 +632,28 @@ proc run*() =
       check fired == after # lifetime finished -> callback untracked
 
     test "EdRef.destroy uses the ref's own context, not thread_ctx":
-      # A ref stamped with ctxA (it entered ctxA's ref_pool via collection
-      # membership) must tear down ctxA's owned containers even when a *different*
+      # A ref stamped with ctx_a (it entered ctx_a's ref_pool via collection
+      # membership) must tear down ctx_a's owned containers even when a *different*
       # context is the active thread_ctx -- destroy follows the ref's ctx backref,
       # not Ed.thread_ctx (which is wrong under multiple contexts per thread).
-      var ctxA = EdContext.init(id = "xd_a")
-      var ctxB = EdContext.init(id = "xd_b")
-      Ed.thread_ctx = ctxA
+      var ctx_a = EdContext.init(id = "xd_a")
+      var ctx_b = EdContext.init(id = "xd_b")
+      Ed.thread_ctx = ctx_a
       var child = OwnerTest(id: "xd_child")
       child.own:
-        child.items = EdSeq[int].init(ctx = ctxA, id = "xd_child_items")
+        child.items = EdSeq[int].init(ctx = ctx_a, id = "xd_child_items")
       var parent = OwnerTest(id: "xd_parent")
       parent.own:
         parent.kids = EdSeq[OwnerTest].init(
-          ctx = ctxA, id = "xd_kids", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
+          ctx = ctx_a, id = "xd_kids", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
         )
-      parent.kids.add child # -> ctxA.ref_pool, stamps child.ctx = ctxA
-      check child.ctx == ctxA
+      parent.kids.add child # -> ctx_a.ref_pool, stamps child.ctx = ctx_a
+      check child.ctx == ctx_a
 
-      Ed.thread_ctx = ctxB # the wrong context is now active
+      Ed.thread_ctx = ctx_b # the wrong context is now active
       child.destroy()
       check child.destroyed
-      check "xd_child_items" notin ctxA # torn down via child.ctx, not thread_ctx
+      check "xd_child_items" notin ctx_a # torn down via child.ctx, not thread_ctx
 
     test "OWNS_MEMBERS: destroying the owner cascades into members":
       var ctx = EdContext.init(id = "om_ctx")

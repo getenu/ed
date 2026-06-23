@@ -4,12 +4,12 @@ import ed/components/private/global_state
 import ed/types {.all.}, ed/zens/[operations, contexts, private]
 import ed/utils/misc # ZenError
 
-# `quote do` (in create_initializer) expands to code referencing `newIdentNode`,
+# `quote do` (in create_initializer) expands to code referencing `new_ident_node`,
 # so it must be in scope here. Re-exported so it also resolves at `Ed.bootstrap`
 # expansion sites. Deprecated alias of `ident`; suppress the notice rather than
-# rewrite the macro to genAst for 0.3.
+# rewrite the macro to gen_ast for 0.3.
 {.push warning[Deprecated]: off.}
-export newIdentNode
+export new_ident_node
 {.pop.}
 
 # Per-type registration statements collected at compile time (one per
@@ -44,7 +44,7 @@ proc relay_fill*[T, O](item: Ed[T, O], op_ctx: OperationContext) =
   # already set there and `current_owner_id` is empty -- both paths covered.
   if current_owner_id.len > 0 and item.owner_id != current_owner_id:
     item.owner_id = current_owner_id
-    item.ctx.owned_by.mgetOrPut(current_owner_id, initHashSet[string]()).incl(
+    item.ctx.owned_by.mget_or_put(current_owner_id, init_hash_set[string]()).incl(
       item.id
     )
   item.publish_create(broadcast = true, op_ctx = op_ctx)
@@ -222,7 +222,7 @@ proc defaults[T, O](
   {.gcsafe.}:
     if current_owner_id.len > 0:
       self.owner_id = current_owner_id
-      ctx.owned_by.mgetOrPut(current_owner_id, initHashSet[string]()).incl(self.id)
+      ctx.owned_by.mget_or_put(current_owner_id, init_hash_set[string]()).incl(self.id)
 
   self.body.publish_create = proc(
       sub: Subscription,

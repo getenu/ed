@@ -11,7 +11,7 @@ type
     messages*: EdSeq[string]
 
   Bloop* = ref object of Beep
-    ageValue*: EdValue[int]
+    age_value*: EdValue[int]
 
 Ed.register(Boop)
 Ed.register(Bloop)

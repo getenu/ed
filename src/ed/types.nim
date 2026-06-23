@@ -838,7 +838,7 @@ proc set_key_bytes*(
   ## per-key evict. An update replaces the previous figure (no double-count).
   if not self.has_budget or key_bin.len == 0:
     return
-  let prev = body.key_bytes.getOrDefault(key_bin, 0)
+  let prev = body.key_bytes.get_or_default(key_bin, 0)
   self.set_body_bytes(body, body.bytes + n - prev)
   body.key_bytes[key_bin] = n
 

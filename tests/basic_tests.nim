@@ -231,16 +231,16 @@ proc run*() =
       Flag1
       Flag2
 
-    let innerSeq = EdSeq[EdSet[Flags]].init(
+    let inner_seq = EdSeq[EdSet[Flags]].init(
       @[EdSet[Flags].init({Flag1}, flags = flags), EdSet[Flags].init({Flag2}, flags = flags)],
       flags = flags
     )
-    let innerTable = EdTable[int, EdSeq[EdSet[Flags]]].init(
-      {1: innerSeq}.to_table,
+    let inner_table = EdTable[int, EdSeq[EdSet[Flags]]].init(
+      {1: inner_seq}.to_table,
       flags = flags
     )
     let buffers = EdTable[int, EdTable[int, EdSeq[EdSet[Flags]]]].init(
-      {1: innerTable}.to_table,
+      {1: inner_table}.to_table,
       flags = flags
     )
     var id = buffers.count_changes
@@ -276,15 +276,15 @@ proc run*() =
       # Added and Removed changes
     buffers.untrack(id)
 
-    let newInnerSeq = EdSeq[EdSet[Flags]].init(
+    let new_inner_seq = EdSeq[EdSet[Flags]].init(
       @[EdSet[Flags].init({Flag1}, flags = flags)],
       flags = flags
     )
-    let newInnerTable = EdTable[int, EdSeq[EdSet[Flags]]].init(
-      {1: newInnerSeq}.to_table,
+    let new_inner_table = EdTable[int, EdSeq[EdSet[Flags]]].init(
+      {1: new_inner_seq}.to_table,
       flags = flags
     )
-    buffers[1] = newInnerTable
+    buffers[1] = new_inner_table
     id = buffers[1][1][0].count_changes
     1.changes:
       buffers[1][1][0] += {Flag1, Flag2}

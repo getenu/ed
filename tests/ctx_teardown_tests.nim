@@ -29,10 +29,10 @@ proc run*() =
     const ITERS = 8
     cycle(N) # warm up one-time allocations (type registries, threadvars)
     cycle(N)
-    let base = getOccupiedMem()
+    let base = get_occupied_mem()
     for _ in 1 .. ITERS:
       cycle(N)
-    let growth = getOccupiedMem() - base
+    let growth = get_occupied_mem() - base
     # Pre-fix this leaked ~2 MB/cycle (~16 MB over 8 cycles). Post-fix it's flat;
     # the slack covers reachable per-cycle caches. A regressed closure cycle would
     # blow far past this.

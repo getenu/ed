@@ -4,10 +4,10 @@ proc free_port*(): int =
   ## Ask the OS for a free UDP port on loopback, then release it so the caller
   ## can bind it. Avoids hard-coded ports (e.g. 9632) colliding with a running
   ## Enu instance or with other tests.
-  let s = newSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+  let s = new_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
   try:
-    s.bindAddr(Port(0), "127.0.0.1")
-    result = s.getLocalAddr()[1].int
+    s.bind_addr(Port(0), "127.0.0.1")
+    result = s.get_local_addr()[1].int
   finally:
     s.close()
 
