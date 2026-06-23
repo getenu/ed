@@ -138,8 +138,12 @@ proc tick*(self: EdClient) =
     return
   try:
     self.ctx.tick
-  except CatchableError as e:
-    debug "EdClient tick raised; reconnecting", msg = e.msg
+  except ConnectionError as e:
+    # Only recover from a connection failure; let anything else propagate -- a
+    # logic error shouldn't be silently masked as a reconnect. (A dropped link
+    # normally surfaces as `connected == false` below, not as an exception;
+    # netty handles socket errors internally.)
+    warn "EdClient connection error; reconnecting", msg = e.msg
     self.reconnect
     return
   if self.ctx.connected:
