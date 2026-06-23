@@ -41,3 +41,4 @@ template privileged*() =
   private_access EdObject
   private_access EdBodyBase
   private_access EdBody
+  private_access Lifetime

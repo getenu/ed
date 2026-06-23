@@ -5,6 +5,7 @@ import
   ]
 import pkg/[chronicles, netty]
 import ed
+import ed/lifecycle
 import test_util
 from std/times import init_duration
 import ed/[types {.all.}, zens {.all.}, zens/contexts {.all.}]

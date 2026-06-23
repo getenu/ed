@@ -2,6 +2,7 @@ import std/[importutils, tables, sets, sequtils, intsets, locks, sugar]
 import
   ed/
     [core, components/type_registry, zens/contexts, zens/private, types {.all.}]
+import ed/lifecycle
 
 proc `-`*[T](a, b: seq[T]): seq[T] =
   a.filter proc(it: T): bool =

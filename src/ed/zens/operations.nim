@@ -1,6 +1,7 @@
 import std/[typetraits, macros, macrocache, tables]
 import pkg/flatty
 import ed/[core, components/private/tracking, types {.all.}]
+import ed/lifecycle
 import ./[contexts, validations, private]
 
 proc untrack_all*[T, O](self: Ed[T, O]) =
