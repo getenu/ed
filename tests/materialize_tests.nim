@@ -240,17 +240,22 @@ proc run*() =
       check table.loaded(1)
       check table[1] == "one"
 
-    test "blocking scope toggles the flag and restores it":
+    test "blocking scope raises PARTIAL_ASYNC to PARTIAL, then restores":
       var ctx = EdContext.init(id = "mb_ctx")
-      check not ctx.blocking
+      ctx.sync_mode = PARTIAL_ASYNC
       ctx.blocking:
-        check ctx.blocking # set inside the scope
-      check not ctx.blocking # restored after
-      # Nested / manual management still composes.
-      ctx.blocking = true
+        check ctx.sync_mode == PARTIAL # raised inside the scope
+      check ctx.sync_mode == PARTIAL_ASYNC # restored after
+      # No-op for any other mode: FULL has nothing to block on, PARTIAL already
+      # blocks.
+      ctx.sync_mode = FULL
       ctx.blocking:
-        check ctx.blocking
-      check ctx.blocking # restored to the manual value, not forced off
+        check ctx.sync_mode == FULL
+      check ctx.sync_mode == FULL
+      ctx.sync_mode = PARTIAL
+      ctx.blocking:
+        check ctx.sync_mode == PARTIAL
+      check ctx.sync_mode == PARTIAL
 
     test "blocking write materializes first: the fill can't clobber the write":
       var authority = EdContext.init(id = "bw_auth", is_authority = true)

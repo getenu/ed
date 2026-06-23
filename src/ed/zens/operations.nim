@@ -43,8 +43,8 @@ template touch_read(self: untyped) =
 
 template touch_placeholder(self: untyped) =
   ## Materialize-on-access: if `self` is an unmaterialized placeholder, ask its
-  ## context to materialize it (kick a fetch; block until filled when
-  ## `ctx.blocking`). No-op for a loaded object or a context without the hook.
+  ## context to materialize it (kick a fetch; block until filled when sync_mode
+  ## is PARTIAL). No-op for a loaded object or a context without the hook.
   ## LAZY containers are exempt: they're pull-only by design -- entries arrive
   ## per-key (`request`), so reading one must never materialize the whole table.
   self.touch_read
@@ -72,7 +72,7 @@ proc contains*[T, O](self: Ed[T, O], children: set[O] | seq[O]): bool =
 
 template materialize_for_write(self: untyped) =
   ## A local mutation of an unmaterialized placeholder materializes it first
-  ## (under `ctx.blocking`: pumps I/O until filled) so the in-flight fill
+  ## (in PARTIAL sync_mode: pumps I/O until filled) so the in-flight fill
   ## can't clobber the write -- a placeholder's tracked state is about to be
   ## replaced wholesale by its CREATE. Unlike `touch_placeholder` this skips
   ## `touch_read`: a write must not reset the evictor's updates-since-read

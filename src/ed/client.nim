@@ -89,9 +89,9 @@ proc reconnect*(self: EdClient): EdClient {.discardable.} =
     self.ctx.close
     self.prev = self.ctx
   self.ctx = EdContext.init(buffer = false, id = self.id)
-  self.ctx.blocking = self.mode == PARTIAL
   Ed.thread_ctx = self.ctx
   try:
+    # subscribe sets ctx.sync_mode from `mode` (PARTIAL => blocking reads)
     self.ctx.subscribe(
       self.address, mode = self.mode, fetch = self.fetch, deep = self.deep
     )

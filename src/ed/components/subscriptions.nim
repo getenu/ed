@@ -739,7 +739,7 @@ proc subscribe*(
   if upstream:
     self.upstream_ctx_ids.incl ctx.id
   if partial:
-    self.partial_replica = true
+    self.sync_mode = mode # FULL subscribes (incl. the reverse leg) don't downgrade
   self.pack_objects
   var remote_objects: HashSet[string]
   for id in self.objects.keys:
@@ -878,9 +878,9 @@ proc evict_sweep*(self: EdContext) =
   ## LRU-to-budget; Unbounded never evict. All eviction is gated on
   ## `evict_candidate`.
   ##
-  ## ONLY partial replicas evict (`evicts`). A full clone (partial_replica =
-  ## false) mirrors everything its upstream has -- there's no safe "residue" to
-  ## drop, because anything it holds is synced state something may read back.
+  ## ONLY partial replicas evict (`evicts`). A full clone (sync_mode FULL)
+  ## mirrors everything its upstream has -- there's no safe "residue" to drop,
+  ## because anything it holds is synced state something may read back.
   ## Evicting on a full clone breaks live round-trips, so `mem_limit` is ignored
   ## there.
   if not self.evicts:
@@ -1038,9 +1038,9 @@ proc subscribe*(
   ## "host:port". When `mode` is partial, the authority only sends the objects
   ## in `fetch` (and ids fetched later); the reference graph + materialize-on-
   ## access pull the rest. Mirrors the local `subscribe(mode = ..., fetch =
-  ## ...)`. Blocking semantics (PARTIAL vs PARTIAL_ASYNC) are a property of the
-  ## context (`self.blocking`), set by the caller -- the handshake only carries
-  ## the partial filter.
+  ## ...)`. Blocking semantics (PARTIAL vs PARTIAL_ASYNC) live in the context's
+  ## `sync_mode`, set here from `mode` -- the handshake only carries the partial
+  ## filter (the authority doesn't care whether our reads block).
   var address = address
   var port = 9632
   let partial = mode != FULL
@@ -1048,7 +1048,7 @@ proc subscribe*(
   debug "remote subscribe", address
   self.materialize = materialize_impl # enable materialize-on-access
   if partial:
-    self.partial_replica = true
+    self.sync_mode = mode
   if not ?self.reactor:
     self.reactor = new_reactor()
   self.subscribing = true
@@ -1422,7 +1422,7 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
                 self.pending_key_wants[msg.object_id][key_bin].filter_it(
                   it.ctx_id != s.ctx_id
                 )
-    if retracted and self.partial_replica and not self.is_authority and
+    if retracted and self.sync_mode != FULL and not self.is_authority and
         self.mem_limit == 0:
       # No-cache hub: shed immediately (the symmetric counterpart of request
       # chaining). When the last interest in a key retracts, drop our copy and
@@ -2023,7 +2023,7 @@ proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
   if id in self and ?self.objects[id] and not self.objects[id].placeholder:
     return
   let pending_fetch = self.fetch(id)
-  if not self.blocking:
+  if self.sync_mode != PARTIAL: # only PARTIAL blocks; PARTIAL_ASYNC fills on a later tick
     return
 
   template triage(candidate: Message) =

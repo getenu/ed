@@ -37,15 +37,17 @@ proc pack_objects*(self: EdContext) =
     self.objects_need_packing = false
 
 template blocking*(self: EdContext, body: untyped) =
-  ## Within this scope, a read that touches an unmaterialized placeholder blocks
-  ## (pumps I/O) until it fills, instead of returning empty and fetching async.
-  ## Just manages the `blocking` flag -- you can set `self.blocking` directly too.
-  let prev = self.blocking
-  self.blocking = true
+  ## Within this scope, raise a PARTIAL_ASYNC context to PARTIAL: a read that
+  ## touches an unmaterialized placeholder blocks (pumps I/O) until it fills
+  ## instead of returning empty. A no-op for any other `sync_mode` -- FULL has
+  ## nothing to block on, PARTIAL already blocks.
+  let prev = self.sync_mode
+  if self.sync_mode == PARTIAL_ASYNC:
+    self.sync_mode = PARTIAL
   try:
     body
   finally:
-    self.blocking = prev
+    self.sync_mode = prev
 
 proc contains*(self: EdContext, id: string): bool =
   id in self.objects and self.objects[id] != nil
@@ -156,7 +158,7 @@ proc `[]`*(self: EdContext, id: string): ref EdBase =
   ## waited for (bounded, silent pump); a NOT_FOUND NACK fails fast. Still
   ## absent afterwards -> `KeyError` as usual. A destroyed-but-unswept id keeps
   ## its old behavior (returns nil) and doesn't trigger a fetch.
-  if self.blocking and self.materialize != nil and id notin self.objects:
+  if self.sync_mode == PARTIAL and self.materialize != nil and id notin self.objects:
     self.materialize(self, id)
   result = self.resolve_proxy(self.objects[id])
 
