@@ -318,14 +318,15 @@ type
     latest_op_id*: Table[string, int64]  # object_id -> our highest op id (own-op reconciliation)
     # Materialize-on-access (partial replicas). `materialize` is wired up at
     # subscribe time (it needs fetch/tick) and called by the read accessors when
-    # they touch a placeholder. When `blocking`, that call pumps I/O until the
-    # object fills; otherwise it kicks a fetch and returns the empty placeholder.
+    # they touch a placeholder. In PARTIAL the call pumps I/O until the object
+    # fills; in PARTIAL_ASYNC it kicks a fetch and returns the empty placeholder.
     materialize*: proc(self: EdContext, id: string) {.gcsafe.}
-    # Blocking materialize: a read of an unmaterialized placeholder pumps I/O
-    # until it fills. Normally driven by SyncMode (EdClient sets it for PARTIAL)
-    # or scoped via the `blocking:` template -- not set on its own (a full replica
-    # never needs to block; that's why SyncMode pairs the two).
-    blocking*: bool
+    # How this context replicates its authority -- the single source of truth for
+    # partial-replica behavior. Set by `subscribe` from its `mode` (FULL by
+    # default): PARTIAL/PARTIAL_ASYNC mean a partial replica, PARTIAL also means
+    # blocking reads. The `blocking:` template raises PARTIAL_ASYNC to PARTIAL for
+    # a scope.
+    sync_mode*: SyncMode
     # Partial-replica evictor (docs/partial-replicas.md). `mem_limit` is a cache
     # budget for unclaimed bodies, in bytes -- an honest, monotonic value from
     # "no cache" up to "unlimited":
@@ -366,11 +367,6 @@ type
     # partiality inherits down a clone chain (a full clone of a full source
     # never receives one); the authority has no upstream and terminates.
     upstream_ctx_ids*: HashSet[string]
-    # This context subscribed partial somewhere: it holds data on demand, not
-    # by contract. Gates hub shedding -- a partial hub that retracts the last
-    # downstream interest in a key drops its own copy and chains the release
-    # upstream; a *full* clone never sheds (it wants everything).
-    partial_replica*: bool
     # Objects we've already logged a dropped-op notice for (once per id).
     warned_missing*: HashSet[string]
     changed_callback_eid: EID
@@ -806,7 +802,7 @@ const DEFAULT_MEM_LIMIT* = 16 * 1024 * 1024
 proc evicts*(self: EdContext): bool {.inline.} =
   ## Reclaims memory under pressure: a partial replica with a finite limit. A
   ## full clone / authority, and an `Unbounded` limit, never evict.
-  self.partial_replica and self.mem_limit < Unbounded
+  self.sync_mode != FULL and self.mem_limit < Unbounded
 
 proc has_budget*(self: EdContext): bool {.inline.} =
   ## Tracks per-body bytes against a finite cap. No-cache (0) and `Unbounded`
