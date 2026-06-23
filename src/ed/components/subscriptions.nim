@@ -317,11 +317,9 @@ proc fanout(
       # forever (the reload leak). A destroy for an id a peer doesn't hold is a
       # cheap no-op.
       continue
-    if sub.capabilities.len > 0 and msg.type_id != 0 and
-        msg.type_id notin sub.capabilities:
-      # Peer can't materialize this type — never send its ops. type_id == 0
-      # (DESTROY / control) isn't type-gated; it's a no-op on a peer that never
-      # got the CREATE, and must reach a peer that did.
+    if sub.capabilities.len > 0 and msg.type_id notin sub.capabilities:
+      # Peer can't materialize this type — never send its ops (incl. DESTROY: it
+      # never built the type, so it never held the object).
       continue
     if sub.kind == LOCAL:
       self.send(sub, msg, op_ctx, flags)
@@ -342,7 +340,9 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
   # Build the DESTROY once and stamp it with the global LSN (authority only),
   # so every subscriber receives the same ordered op. DESTROY is ordered like
   # ASSIGN — delete-vs-update is a real conflict (see spike doc).
-  var msg = Message(kind: DESTROY, object_id: self.id)
+  # type_id rides along for the capability filter (which types a peer can hold),
+  # not for construction — DESTROY tears down by id.
+  var msg = Message(kind: DESTROY, object_id: self.id, type_id: Ed[T, O].tid)
   msg.origin =
     if op_ctx.origin != "":
       op_ctx.origin
@@ -588,8 +588,7 @@ proc publish_changes*[T, O](
             id in sub.key_interest and sub.ctx_id notin op_ctx.source:
           for msg in msgs.mitems:
             if msg.key_bin.len > 0 and msg.key_bin in sub.key_interest[id]:
-              if sub.capabilities.len > 0 and msg.type_id != 0 and
-                  msg.type_id notin sub.capabilities:
+              if sub.capabilities.len > 0 and msg.type_id notin sub.capabilities:
                 continue
               if msg.kind == ASSIGN and msg.change_object_id.len > 0 and
                   msg.change_object_id in self.ctx and
