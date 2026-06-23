@@ -272,6 +272,46 @@ proc run*() =
 
     server.close
 
+  test "a subscribed peer sending unparseable bytes is disconnected":
+    # Got past the wire header and established a subscription (same version), then
+    # sent bytes we can't decode -- schema mismatch / corruption / a bug. Tear the
+    # connection down so it re-handshakes and resyncs, rather than silently
+    # dropping its packets forever. (Stray, un-subscribed noise is left alone --
+    # see the test above.)
+    let host = free_addr()
+    var server = EdContext.init(
+      id = "wd_srv",
+      listen_address = host,
+      min_recv_duration = recv_duration,
+      blocking_recv = true,
+    )
+    var sv = EdValue[string].init(id = "wd_v", ctx = server)
+    sv.value = "x"
+
+    Ed.thread_ctx = EdContext.init(id = "wd_cli")
+    let client = Ed.thread_ctx
+    client.subscribe host,
+      callback = proc() =
+        server.tick(blocking = false)
+    check "wd_cli" in server.subscribers.map_it(it.ctx_id) # sub established
+
+    # Garbage over the established connection: valid netty framing, no wire header.
+    var conn: Connection
+    for s in client.subscribers:
+      if s.kind == REMOTE:
+        conn = s.connection
+    client.reactor.send(conn, "not an ed packet")
+    client.reactor.tick()
+
+    for _ in 0 ..< 30:
+      server.tick(blocking = false)
+      client.reactor.tick()
+      if "wd_cli" notin server.subscribers.map_it(it.ctx_id):
+        break
+    check "wd_cli" notin server.subscribers.map_it(it.ctx_id) # connection dropped
+    check "wd_cli" in server.drain_unsubscribed # ...and reported for reaping
+    server.close
+
 when is_main_module:
   Ed.bootstrap
   run()
