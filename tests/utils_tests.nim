@@ -59,6 +59,14 @@ proc run*() =
       exc of ConnectionError
       exc of ZenError
 
+  test "invariant raises in debug, no-op when it holds":
+    # Release/danger builds log + continue instead; the suite runs in debug, so
+    # a violated invariant raises EdDefect here.
+    when not (defined(release) or defined(danger)):
+      expect EdDefect:
+        invariant(false, "should raise")
+    invariant(true, "holds -> no-op")
+
   test "stats functionality":
     # Test stats macros
     var call_count = 0

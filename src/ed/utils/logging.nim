@@ -56,3 +56,18 @@ else:
 
   template log_defaults*(log_topics = "") =
     discard
+
+type EdDefect* = object of Defect
+  ## Raised by `invariant` in non-release builds when a state we expect to hold
+  ## is violated.
+
+template invariant*(cond: bool, message: string) =
+  ## A state we always expect to hold. A violation is a bug, but a recoverable
+  ## one: in debug builds raise (so dev/test fails loud), in release log an error
+  ## and continue -- a long-lived process shouldn't die over a state it can
+  ## safely limp past. Use only where continuing really is safe.
+  if not cond:
+    when defined(release) or defined(danger):
+      error "invariant violated", detail = message
+    else:
+      raise newException(EdDefect, "invariant violated: " & message)
