@@ -14,7 +14,7 @@ proc init*[T](
 
 proc init*(
     _: type OperationContext,
-    source: HashSet[string] = initHashSet[string](),
+    source: HashSet[string] = init_hash_set[string](),
     ctx: EdContext = nil,
     origin = "",
     op_id: int64 = 0,
@@ -33,7 +33,7 @@ template setup_op_ctx*(self: EdContext) =
     if ?op_ctx:
       op_ctx
     else:
-      OperationContext.init(source = [self.id].toHashSet)
+      OperationContext.init(source = [self.id].to_hash_set)
 
 template privileged*() =
   private_access EdContext

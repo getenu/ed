@@ -92,7 +92,7 @@ template materialize_for_write(self: untyped, op_ctx: untyped) =
 proc clear*[T, O](self: Ed[T, O]) =
   assert self.valid
   self.materialize_for_write
-  mutate(OperationContext(source: [self.ctx.id].toHashSet)):
+  mutate(OperationContext(source: [self.ctx.id].to_hash_set)):
     self.tracked = T.default
 
 proc `value=`*[T, O](self: Ed[T, O], value: T, op_ctx = OperationContext()) =
@@ -139,9 +139,9 @@ proc request*[K, V](self: EdTable[K, V], key: K) =
   privileged
   assert self.valid
   if key notin self.tracked:
-    self.ctx.pending_key_requests.mgetOrPut(self.id, @[]).add key.to_flatty
+    self.ctx.pending_key_requests.mget_or_put(self.id, @[]).add key.to_flatty
 
-proc request*[K, V](self: EdTable[K, V], keys: openArray[K]) =
+proc request*[K, V](self: EdTable[K, V], keys: open_array[K]) =
   for key in keys:
     self.request(key)
 
@@ -161,9 +161,9 @@ proc release*[K, V](self: EdTable[K, V], key: K) =
     # The entry's nested containers (a chunk's delta seq) leave the registry
     # too, so paging out actually frees their memory.
     self.ctx.drop_nested_bodies(evicted.nested)
-  self.ctx.pending_key_releases.mgetOrPut(self.id, @[]).add key_bin
+  self.ctx.pending_key_releases.mget_or_put(self.id, @[]).add key_bin
 
-proc release*[K, V](self: EdTable[K, V], keys: openArray[K]) =
+proc release*[K, V](self: EdTable[K, V], keys: open_array[K]) =
   for key in keys:
     self.release(key)
 
@@ -244,7 +244,7 @@ proc delete*[T, O](self: Ed[T, O], value: O) =
       value,
       value,
       delete,
-      op_ctx = OperationContext(source: [self.ctx.id].toHashSet),
+      op_ctx = OperationContext(source: [self.ctx.id].to_hash_set),
     )
 
 proc delete*[K, V](self: EdTable[K, V], key: K) =
@@ -444,7 +444,7 @@ proc set_owner*(ctx: EdContext, obj: EdRef, owner_id: string) =
   # the OWNS_MEMBERS member index: destroy_owned's member pass resolves owned
   # ids through ctx.ref_pool, and a bare id never matches a pool key -- the ref
   # would silently escape the cascade (and leak everything *it* owns).
-  ctx.owned_by.mgetOrPut(owner_id, initHashSet[string]()).incl(
+  ctx.owned_by.mget_or_put(owner_id, init_hash_set[string]()).incl(
     $obj.type_id & ":" & obj.id
   )
 

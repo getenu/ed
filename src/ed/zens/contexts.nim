@@ -259,7 +259,7 @@ proc destroy*(self: EdContext) =
   # teardown (the peer keeps the stale sub, the pre-existing behavior).
   for sub in self.subscribers:
     if sub.kind == LOCAL:
-      var iso = isolate(Message(kind: UNSUBSCRIBE, source_set: [self.id].toHashSet))
+      var iso = isolate(Message(kind: UNSUBSCRIBE, source_set: [self.id].to_hash_set))
       discard sub.chan.try_take(iso)
   for id, body in self.objects:
     if ?body:

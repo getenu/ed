@@ -1,8 +1,8 @@
 import std/[hashes]
 
 proc base_type*(obj: RootObj): cstring =
-  when not defined(nimTypeNames):
-    {.error: "you need to compile this with '-d:nimTypeNames'".}
+  when not defined(nim_type_names):
+    {.error: "you need to compile this with '-d:nim_type_names'".}
   {.emit: "result = `obj`->m_type->name;".}
 
 proc base_type*(obj: ref RootObj): cstring =

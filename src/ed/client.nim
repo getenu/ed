@@ -182,7 +182,7 @@ template every*(self: EdClient, interval: Duration, body: untyped) =
     while true:
       self.tick
       if had_session and (self.ctx != session or not self.connected):
-        raise newException(
+        raise new_exception(
           SessionLost, "the session this wait started with is gone"
         )
       body

@@ -140,7 +140,7 @@ proc get_value_type(self: NimNode): NimNode =
       return self[1]
 
   error "get_value_type doesn't know how to handle type:\n\n" & self.tree_repr &
-    "\n\nThis is probably a ed bug.", self
+    "\n\n_this is probably a ed bug.", self
 
 macro build_accessors(T: type, public: bool): untyped =
   result = new_stmt_list()
@@ -275,7 +275,7 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
     # cascade. Entries are ref_pool keys (tid:id); `destroy_owned` resolves them
     # there and cascades through the EdRef `destroy` method. Runs identically on
     # every context that applies the ADD/REMOVE, so the index needs no extra sync.
-    let container = self.objects.getOrDefault(ed_id)
+    let container = self.objects.get_or_default(ed_id)
     if not container.is_nil and OWNS_MEMBERS in container.flags:
       # An ownerless flagged collection (the root units list) indexes members
       # under its own id instead: nothing cascades into them, but the closure
@@ -286,7 +286,7 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
         else:
           ed_id
       if ADDED in change.changes:
-        self.owned_by.mgetOrPut(owner, initHashSet[string]()).incl(id)
+        self.owned_by.mget_or_put(owner, init_hash_set[string]()).incl(id)
       if REMOVED in change.changes and owner in self.owned_by:
         self.owned_by[owner].excl(id)
 

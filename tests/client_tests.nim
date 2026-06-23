@@ -110,7 +110,7 @@ proc run*() =
     # reaped and the link reads as down.
     stop_server()
     var dropped = false
-    for _ in 0 ..< 1000: # generous: netty connTimeout is 10s
+    for _ in 0 ..< 1000: # generous: netty conn_timeout is 10s
       client.ctx.tick
       if not client.connected:
         dropped = true
