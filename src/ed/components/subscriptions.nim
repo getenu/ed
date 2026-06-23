@@ -1760,27 +1760,35 @@ proc track*[T, O](
 proc untrack_on_destroy*(self: ref EdBase, zid: EID) =
   self.bound_eids.add(zid)
 
+type RemoteParse = enum
+  Parsed      ## decoded into a usable Message
+  Ignored     ## keepalive ping -- skip
+  Unparseable ## bad/incompatible bytes -- drop the connection if it's a real peer
+
 proc parse_remote(
     self: EdContext, raw_msg: netty.Message
-): tuple[ok: bool, msg: Message] {.gcsafe.} =
+): tuple[status: RemoteParse, msg: Message] {.gcsafe.} =
   ## Decode one raw remote packet into a Message (source short-ids + mappings
-  ## attached, body uncompressed). ok = false for keepalive pings and unparseable
-  ## bytes -- a version-skewed peer or stray packet on the same port is dropped,
-  ## not fatal. Shared by `tick` and the silent materialize pump so the wire
-  ## decode lives in exactly one place.
+  ## attached, body uncompressed). `Ignored` = a keepalive ping. `Unparseable` =
+  ## a version-skewed peer, schema mismatch, or corruption; the caller drops the
+  ## connection (if it maps to a subscription) so the peer re-handshakes/resyncs.
+  ## netty doesn't checksum content and we have no gap replay, so silently
+  ## dropping the packet could leave a divergent op gap -- a reconnect is safer.
+  ## Shared by `tick` and the silent materialize pump so the wire decode lives in
+  ## one place.
   if raw_msg.data == "PING":
-    return (false, Message())
+    return (Ignored, Message())
   if not raw_msg.data.starts_with(wire_header):
-    # A peer speaking a different wire version (or a stray packet). Reject it
-    # here: flatty is positional, so foreign bytes can decode cleanly into
-    # wrong-typed fields and corrupt or crash processing. Warn once per peer --
-    # an old client reconnect-looping would otherwise flood the log.
+    # A peer speaking a different wire version (or a stray packet). flatty is
+    # positional, so foreign bytes can decode cleanly into wrong-typed fields and
+    # corrupt or crash processing. Warn once per peer -- a stray/un-subscribed
+    # source would otherwise flood the log (a subscribed one is dropped below).
     let peer = $raw_msg.conn.address
     if peer notin self.warned_missing:
       self.warned_missing.incl peer
       warn "dropping message from incompatible peer (wire version mismatch)",
         peer, bytes = raw_msg.data.len
-    return (false, Message())
+    return (Unparseable, Message())
   try:
     # Wire format: a small per-subscriber header (source short-ids + new
     # mappings) followed by the shared, compressed body (see send_remote).
@@ -1789,11 +1797,20 @@ proc parse_remote(
     var msg = body.ed_uncompress.from_flatty(Message, self)
     msg.source = enc_source
     msg.id_mappings = mappings
-    return (true, msg)
+    return (Parsed, msg)
   except CatchableError, Defect:
     warn "dropping unparseable remote message",
       bytes = raw_msg.data.len, peer = $raw_msg.conn.address
-    return (false, Message())
+    return (Unparseable, Message())
+
+proc drop_remote_conn(self: EdContext, conn: Connection) =
+  ## A real peer sent bytes we can't parse -- tear down its subscription so it
+  ## re-handshakes/resyncs instead of us silently dropping its packets forever.
+  ## No-op for stray/pre-handshake packets that match no subscription.
+  for s in self.subscribers:
+    if s.kind == REMOTE and s.connection == conn:
+      self.unsubscribe(s)
+      break
 
 proc tick*(
     self: EdContext,
@@ -1912,7 +1929,10 @@ proc tick*(
       for raw_msg in messages:
         inc count
         let parsed = self.parse_remote(raw_msg)
-        if not parsed.ok: # keepalive ping or unparseable -- already handled
+        if parsed.status == Ignored: # keepalive ping
+          continue
+        if parsed.status == Unparseable:
+          self.drop_remote_conn(raw_msg.conn) # real peer -> tear down; noise -> ignore
           continue
         var msg = parsed.msg
         when defined(ed_debug_messages):
@@ -2060,7 +2080,10 @@ proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
       self.remote_messages = @[]
       for raw_msg in raws:
         let parsed = self.parse_remote(raw_msg)
-        if not parsed.ok:
+        if parsed.status == Ignored:
+          continue
+        if parsed.status == Unparseable:
+          self.drop_remote_conn(raw_msg.conn)
           continue
         var rmsg = parsed.msg
         for s in self.subscribers:
