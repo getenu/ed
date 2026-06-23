@@ -3,7 +3,7 @@ import ed
 import ed/zens/contexts
 import test_util
 
-# A listening authority on its own thread, ticking continuously — the role Enu
+# A listening authority on its own thread, ticking continuously -- the role Enu
 # plays for the MCP server (separate process, independent tick loop), and what a
 # blocking remote materialize needs to respond to it.
 var rmat_running: Atomic[bool]
@@ -39,7 +39,7 @@ proc run*() =
       check "parent" in client
 
       # Author a child and add it to the parent. The child's CREATE is filtered
-      # (not in interest), but the parent's ADD op — which references the child —
+      # (not in interest), but the parent's ADD op -- which references the child --
       # is delivered, so the client must stand in with a placeholder.
       var child = EdValue[string].init(ctx = authority, id = "child")
       child.value = "hi"
@@ -99,7 +99,7 @@ proc run*() =
 
       client.fetch("child")
       authority.tick()
-      client.tick() # fill applies here → callback fires, tagged Fill
+      client.tick() # fill applies here -> callback fires, tagged Fill
       check client["child"].loaded
       check fill_reason == Fill
 
@@ -175,7 +175,7 @@ proc run*() =
       check "child" in client
       check not client["child"].loaded # placeholder, contents not pulled yet
 
-      # A blocking read materializes it over the network — the server thread
+      # A blocking read materializes it over the network -- the server thread
       # answers the fetch while we pump.
       var got = ""
       client.blocking:
@@ -208,7 +208,7 @@ proc run*() =
         if added:
           arrived.add (change.item.key, change.item.value)
 
-      # Two requests in one frame → one batched REQUEST on the next tick.
+      # Two requests in one frame -> one batched REQUEST on the next tick.
       table.request(1)
       table.request(3)
       client.tick() # flush_key_requests sends the batch
@@ -217,7 +217,7 @@ proc run*() =
 
       check table.loaded(1)
       check table.loaded(3)
-      check not table.loaded(2) # never requested → not pulled
+      check not table.loaded(2) # never requested -> not pulled
       check table[1] == "one"
       check table[3] == "three"
       check arrived.len == 2 # both fills fired as ADDED changes

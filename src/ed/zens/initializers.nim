@@ -13,8 +13,8 @@ export newIdentNode
 {.pop.}
 
 # Per-type registration statements collected at compile time (one per
-# instantiated `Ed[T,O]`), emitted by `Ed.bootstrap`. Each is a trivial call —
-# `register_initializer(tid, cast[pointer](materialize_received[T,O]))` — that
+# instantiated `Ed[T,O]`), emitted by `Ed.bootstrap`. Each is a trivial call --
+# `register_initializer(tid, cast[pointer](materialize_received[T,O]))` -- that
 # references a NAMED top-level proc, never an inline proc literal. That's what
 # lets `Ed.bootstrap` (hence `connect`) expand inside a `unittest test` block: an
 # inline `quote do` materializer carries gensym'd params the C codegen drops when
@@ -31,17 +31,17 @@ proc ctx(): EdContext =
 proc relay_fill*[T, O](item: Ed[T, O], op_ctx: OperationContext) =
   ## Re-broadcast a just-filled placeholder to our own subscribers: they hold
   ## the same id as a placeholder (minted from the same inline ref), and the
-  ## relayed CREATE fills theirs and clears their flag — `loaded` then means
+  ## relayed CREATE fills theirs and clears their flag -- `loaded` then means
   ## the same thing on every hop. Exported because the generated type
   ## initializer expands at the `Ed.bootstrap` call site, where the private
   ## `publish_create` field isn't reachable.
   privileged
   # The immediate fill runs inside the receive path's owner scope
   # (`msg.owner_id.own:`), but the placeholder was minted ownerless and the
-  # post-materialize stamp hasn't run yet — stamp before relaying, or second
+  # post-materialize stamp hasn't run yet -- stamp before relaying, or second
   # hops receive the fill unowned (same window as the create-relay fix). The
   # deferred (subscribe-time) fill runs after the stamp, so `owner_id` is
-  # already set there and `current_owner_id` is empty — both paths covered.
+  # already set there and `current_owner_id` is empty -- both paths covered.
   if current_owner_id.len > 0 and item.owner_id != current_owner_id:
     item.owner_id = current_owner_id
     item.ctx.owned_by.mgetOrPut(current_owner_id, initHashSet[string]()).incl(
@@ -64,7 +64,7 @@ proc materialize_received*[T, O](
     op_ctx: OperationContext,
 ) =
   ## Materialize or restore a received object of this concrete type. It is
-  ## (legitimately) not gcsafe — it reaches from_flatty/`value=`, which aren't —
+  ## (legitimately) not gcsafe -- it reaches from_flatty/`value=`, which aren't --
   ## and that's fine: it only ever runs via `subscribe`, which guards the call.
   ## `create_initializer` references it through `cast[pointer]`, which launders
   ## the effect so the reference can't poison the gcsafe defaults/init chain.
@@ -80,7 +80,7 @@ proc materialize_received*[T, O](
       let item = Ed[T, O](ctx[id])
       let was_placeholder = item.placeholder
       let prev_filling = ctx.filling # save: `value=` may nest a fill
-      ctx.filling = was_placeholder # fill of a placeholder → tag Fill
+      ctx.filling = was_placeholder # fill of a placeholder -> tag Fill
       item.placeholder = false # fill: real state arrived
       `value=`(item, value, op_ctx = op_ctx)
       ctx.filling = prev_filling # restore (not unconditionally false)
@@ -98,7 +98,7 @@ proc materialize_received*[T, O](
         let item = Ed[T, O](ctx[id])
         let was_placeholder = item.placeholder
         let prev_filling = ctx.filling # save: `value=` may nest a fill
-        ctx.filling = was_placeholder # fill of a placeholder → tag Fill
+        ctx.filling = was_placeholder # fill of a placeholder -> tag Fill
         item.placeholder = false # fill: real state arrived
         `value=`(item, value, op_ctx = op_ctx)
         ctx.filling = prev_filling # restore (not unconditionally false)
@@ -116,7 +116,7 @@ proc materialize_received*[T, O](
       Ed[T, O](ctx[id]).placeholder = true
   else:
     # Empty-body CREATE for an object we were holding as a placeholder:
-    # it exists for real now, just with no value yet. LAZY excepted — its
+    # it exists for real now, just with no value yet. LAZY excepted -- its
     # empty-body CREATE is a handle push and says nothing about contents.
     if LAZY notin flags:
       Ed[T, O](ctx[id]).placeholder = false
@@ -124,12 +124,12 @@ proc materialize_received*[T, O](
 proc create_initializer[T, O](self: Ed[T, O]) =
   ## Collect this concrete type's registration at COMPILE TIME (the `static`
   ## block runs when `Ed[T, O]` is instantiated). The runtime body is empty, so
-  ## this proc — and its caller `defaults`/`init` — stay gcsafe. `Ed.bootstrap`
+  ## this proc -- and its caller `defaults`/`init` -- stay gcsafe. `Ed.bootstrap`
   ## emits the collected statements at its call site.
   ##
   ## The collected statement references the named `materialize_received[T, O]`
   ## via `cast[pointer]` (subscribe casts back). Storing a raw pointer keeps the
-  ## emitted code a trivial call — template-safe, where an inline proc literal's
+  ## emitted code a trivial call -- template-safe, where an inline proc literal's
   ## gensym params would break codegen inside `unittest test` blocks.
   const ed_type_id = self.type.tid
   static:
@@ -151,8 +151,8 @@ proc defaults[T, O](
   log_defaults
 
   # The proxy/body split: the body carries the data + sync state; field access
-  # on the proxy forwards to it (types.nim templates). Minted here — before
-  # anything reads a forwarded field — since object construction can no longer
+  # on the proxy forwards to it (types.nim templates). Minted here -- before
+  # anything reads a forwarded field -- since object construction can no longer
   # set what are now body fields.
   let body = EdBody[T, O](flags: flags, placeholder: placeholder)
   self.body = body
@@ -190,14 +190,14 @@ proc defaults[T, O](
     body.proxy = proxy
     proxy
   body.untrack_zid = proc(zid: EID) {.gcsafe.} =
-    # Context-level untrack: only meaningful while a proxy is live — a dead
+    # Context-level untrack: only meaningful while a proxy is live -- a dead
     # proxy's callbacks died with it. Prune first so the backref read is safe.
     if body.ctx != nil:
       body.ctx.prune_dead_proxies
     if zid in body.changed_callbacks:
-      # Mirrors proxy-level `untrack` (defined downstream in subscriptions —
+      # Mirrors proxy-level `untrack` (defined downstream in subscriptions --
       # not importable here): CLOSED notification, then drop the callback.
-      # `it` is the live proxy or nil — callbacks are body-side now.
+      # `it` is the live proxy or nil -- callbacks are body-side now.
       let callback = body.changed_callbacks[zid]
       if zid notin body.paused_eids:
         callback(@[Change.init(O, {CLOSED})], body.proxy)
@@ -218,7 +218,7 @@ proc defaults[T, O](
   # If created inside an `own` scope, record the owner: bake its id into the
   # container and index it, so the owner's `destroy_owned` can tear this down in
   # any context (container teardown is ownership-driven; the lifetime carries
-  # callbacks). No scope open → unowned.
+  # callbacks). No scope open -> unowned.
   {.gcsafe.}:
     if current_owner_id.len > 0:
       self.owner_id = current_owner_id
@@ -235,7 +235,7 @@ proc defaults[T, O](
 
     {.gcsafe.}:
       # `contents = false` sends a handle: an empty-body CREATE (id + flags,
-      # no data). Used to push LAZY containers to partial subscribers — the
+      # no data). Used to push LAZY containers to partial subscribers -- the
       # receiver registers a placeholder and pulls entries per-key.
       let bin = if contents: body.tracked.to_flatty else: ""
     let id = body.id
@@ -288,7 +288,7 @@ proc defaults[T, O](
       TOUCHED in change.changes
     let change = Change[O](change)
     when change.item is Pair:
-      # Sender-side per-key filter tag (LAZY tables / key interest) — blanked
+      # Sender-side per-key filter tag (LAZY tables / key interest) -- blanked
       # from the remote body, so it costs nothing on the wire.
       {.gcsafe.}:
         msg.key_bin = change.item.key.to_flatty
@@ -297,7 +297,7 @@ proc defaults[T, O](
     elif change.item is Pair[auto, Ed]:
       # EdTable whose value is an Ed container (e.g. EdTable[Vector3, EdSeq]):
       # the value syncs by id, the key by value. Ref-typed keys aren't supported
-      # here — `to_flatty` nils refs, so the key wouldn't round-trip.
+      # here -- `to_flatty` nils refs, so the key wouldn't round-trip.
       {.gcsafe.}:
         msg.obj = change.item.key.to_flatty
       msg.change_object_id = change.item.value.id
@@ -339,7 +339,7 @@ proc defaults[T, O](
 
     if msg.kind == DESTROY:
       # Forward the upstream op-source so the re-broadcast (relay) filters the
-      # contexts this DESTROY already visited — otherwise it echoes back to its
+      # contexts this DESTROY already visited -- otherwise it echoes back to its
       # origin and, out of order with the reload stream, can kill a same-id
       # recreate.
       self.destroy(op_ctx = op_ctx)
@@ -348,7 +348,7 @@ proc defaults[T, O](
     when O is Ed:
       let object_id = msg.change_object_id
       if object_id notin self.ctx:
-        # Nested object not materialized yet — stand in with a non-broadcasting
+        # Nested object not materialized yet -- stand in with a non-broadcasting
         # placeholder so the container op applies and cardinality is correct.
         # Reading the placeholder later triggers a fetch (materialize-on-access).
         discard O.init_placeholder(self.ctx, object_id)
@@ -369,7 +369,7 @@ proc defaults[T, O](
         if msg.kind == UNASSIGN:
           debug "can't find ", obj = msg.change_object_id
           return
-        # Value object not materialized yet — placeholder it (see above).
+        # Value object not materialized yet -- placeholder it (see above).
         discard V.init_placeholder(self.ctx, msg.change_object_id)
       let value = V(self.ctx.resolve_proxy(self.ctx.objects[msg.change_object_id]))
       {.gcsafe.}:
@@ -389,7 +389,7 @@ proc defaults[T, O](
                 debug "item found (not restored)",
                   item = item.type.name, ref_id = item.ref_id
             else:
-              # Unknown ref type — can't parse the item, so skip this change
+              # Unknown ref type -- can't parse the item, so skip this change
               # rather than aborting. Forgiving on payload.
               debug "skipping change for unknown ref type", ref_tid = msg.ref_id
               return
@@ -415,7 +415,7 @@ proc defaults[T, O](
     # Per-key fetch: build the ADD op for one entry so a partial subscriber can
     # pull it without the whole table. `nested` carries the ids of Ed
     # containers inside the value (a chunk's delta seq) so the caller can
-    # publish them ahead of the entry — per-key deep. Only meaningful for
+    # publish them ahead of the entry -- per-key deep. Only meaningful for
     # table containers.
     when O is Pair:
       let self = Ed[T, O](body.ctx.resolve_proxy(body))
@@ -447,7 +447,7 @@ proc defaults[T, O](
       body: ref EdBodyBase, key_bin: string
   ): tuple[found: bool, nested: seq[string]] {.gcsafe.} =
     # Per-key eviction: drop the entry locally (REMOVED callbacks fire so
-    # watchers un-render; nothing publishes — the authority keeps the data) and
+    # watchers un-render; nothing publishes -- the authority keeps the data) and
     # report nested Ed containers so the caller can shed them. The local half
     # of `release` and the receiving half of an eviction notice.
     when O is Pair:

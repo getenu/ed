@@ -1,6 +1,6 @@
 ## Monotonic time and durations, exported deliberately. std/times' `now()`
 ## is a calendar DateTime and its `seconds()`/`milliseconds()` return
-## TimeInterval — calendar types whose operators don't mix with Duration.
+## TimeInterval -- calendar types whose operators don't mix with Duration.
 ## Import this (or `ed`) instead of std/times when you mean elapsed time:
 ## `now()` is a monotonic instant, and the unit helpers below all return
 ## std Duration.

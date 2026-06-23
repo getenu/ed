@@ -5,7 +5,7 @@ import ed
 # EdBodyBase.publish_create captured the body + its context, an ORC-uncollectable
 # closure cycle that pinned every body and its whole context. release_closures now
 # nils publish_create, and EdContext.destroy releases all bodies. This test fails
-# if that cycle comes back: it would show steady-state growth across create→destroy
+# if that cycle comes back: it would show steady-state growth across create->destroy
 # cycles that GC_fullCollect can't reclaim.
 
 proc cycle(n: int) =
@@ -24,7 +24,7 @@ proc cycle(n: int) =
   GC_fullCollect()
 
 proc run*() =
-  test "EdContext.destroy reclaims bodies — no steady-state growth":
+  test "EdContext.destroy reclaims bodies -- no steady-state growth":
     const N = 200
     const ITERS = 8
     cycle(N) # warm up one-time allocations (type registries, threadvars)
@@ -40,14 +40,14 @@ proc run*() =
     check growth < 512 * 1024
 
   test "destroying a LOCAL peer notifies the survivor (drops its reverse sub)":
-    # enu's main↔worker shape: a long-lived survivor subscribes to a worker that
+    # enu's main<->worker shape: a long-lived survivor subscribes to a worker that
     # is torn down on level reload. Without peer-notify the survivor keeps a
     # stale sub to the dead worker's inbox (fanning ops into it forever) and never
     # learns to reap what the worker owned (drain_unsubscribed).
     var survivor = EdContext.init(id = "survivor")
     var worker = EdContext.init(id = "worker1")
     Ed.thread_ctx = survivor
-    survivor.subscribe(worker) # bidirectional local: survivor ⇄ worker
+    survivor.subscribe(worker) # bidirectional local: survivor <-> worker
     survivor.tick()
     worker.tick()
     check worker.id in survivor.subscribers.map_it(it.ctx_id)

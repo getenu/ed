@@ -39,7 +39,7 @@ proc pack_objects*(self: EdContext) =
 template blocking*(self: EdContext, body: untyped) =
   ## Within this scope, a read that touches an unmaterialized placeholder blocks
   ## (pumps I/O) until it fills, instead of returning empty and fetching async.
-  ## Just manages the `blocking` flag — you can set `self.blocking` directly too.
+  ## Just manages the `blocking` flag -- you can set `self.blocking` directly too.
   let prev = self.blocking
   self.blocking = true
   try:
@@ -73,7 +73,7 @@ proc init*(
 ): EdContext =
   ## Create a new `EdContext`. Set `listen_address` to enable network sync.
   ## Set `is_authority` to make this context the sequencer (leader) that assigns
-  ## global LSNs — see docs/consistency.md.
+  ## global LSNs -- see docs/consistency.md.
   privileged
   log_scope:
     topics = "ed"
@@ -139,7 +139,7 @@ proc next_op_id*(self: EdContext): int64 =
 proc stamp_lsn*(self: EdContext, msg: var Message) =
   ## If this context is the authority, assign the op its global LSN, once.
   ## Applies to the ordered ops the authority broadcasts (self-originated or
-  ## forwarded). CREATE is intentionally not stamped — concurrent same-id
+  ## forwarded). CREATE is intentionally not stamped -- concurrent same-id
   ## creation is out of scope and the subscribe-time resend distinction needs
   ## its own step (see spike doc). DESTROY *is* stamped: delete-vs-update is a
   ## real conflict that must be ordered.
@@ -151,10 +151,10 @@ proc `[]`*[T, O](self: EdContext, src: Ed[T, O]): Ed[T, O] =
   result = Ed[T, O](self.resolve_proxy(self.objects[src.id]))
 
 proc `[]`*(self: EdContext, id: string): ref EdBase =
-  ## Container lookup by id. Raises `KeyError` when absent — except inside a
+  ## Container lookup by id. Raises `KeyError` when absent -- except inside a
   ## `blocking` scope, where an unknown id is fetched from the authority and
   ## waited for (bounded, silent pump); a NOT_FOUND NACK fails fast. Still
-  ## absent afterwards → `KeyError` as usual. A destroyed-but-unswept id keeps
+  ## absent afterwards -> `KeyError` as usual. A destroyed-but-unswept id keeps
   ## its old behavior (returns nil) and doesn't trigger a fetch.
   if self.blocking and self.materialize != nil and id notin self.objects:
     self.materialize(self, id)
@@ -241,19 +241,19 @@ proc close*(self: EdContext) =
 proc destroy*(self: EdContext) =
   ## Tear the context down and release everything it owns.
   ##
-  ## Bodies linger in the registry by design — they outlive their proxies (the
+  ## Bodies linger in the registry by design -- they outlive their proxies (the
   ## registry is a cache with its own eviction). So a dropped context can't
   ## reclaim them on its own: every body holds self-/context-capturing closures
   ## (`publish_create` et al.), and ORC doesn't collect closure cycles, so the
   ## context stays pinned through its own registry. This is the explicit
-  ## teardown that breaks those cycles — `release_closures` on each body — and
+  ## teardown that breaks those cycles -- `release_closures` on each body -- and
   ## drops the registry plus the per-context buffers. Afterwards the context
   ## holds nothing, so it (and its channel/reactor) is reclaimed when the last
   ## reference drops. Idempotent.
   privileged
   debug "destroying EdContext", id = self.id
   # Notify LOCAL peers so they drop their reverse subscription and stop fanning
-  # ops into our about-to-be-freed inbox — cross-thread channels have no
+  # ops into our about-to-be-freed inbox -- cross-thread channels have no
   # keepalive signal (REMOTE peers learn from the closed socket below). Enqueue
   # directly and non-blocking: if a peer's inbox is full we skip rather than hang
   # teardown (the peer keeps the stale sub, the pre-existing behavior).

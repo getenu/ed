@@ -52,7 +52,7 @@ proc run*() =
 
     test "DESTROY reaches a partial subscriber past the interest filter":
       # The client-reload leak: a partial replica mints placeholder bodies for
-      # ids it discovers via inline refs (a parsed unit's field husks) — ids the
+      # ids it discovers via inline refs (a parsed unit's field husks) -- ids the
       # authority never learned it holds, so they're in no interest set. If the
       # interest filter drops their DESTROYs, those bodies strand forever and
       # every server reload leaks a generation of husks (~600/reload in enu).
@@ -71,7 +71,7 @@ proc run*() =
       check "pd_x" in client
 
       # The client materializes pd_y on its own (an inline-ref placeholder mint
-      # during parse — the authority doesn't know, no interest registered).
+      # during parse -- the authority doesn't know, no interest registered).
       discard EdSeq[int].init_placeholder(client, "pd_y")
       check "pd_y" in client
 
@@ -86,7 +86,7 @@ proc run*() =
 
     test "reload of a LAZY-field OWNS_MEMBERS member (full clone) keeps siblings valid":
       # The enu reload: a full-clone replica, an OWNS_MEMBERS member reused by id
-      # while its owned tables get fresh ids — destroy the old incarnation, add a
+      # while its owned tables get fresh ids -- destroy the old incarnation, add a
       # new one. This is the path where the hoist corrupted the member's `units`
       # sibling, so reproduce it minimally.
       var authority = EdContext.init(id = "lzr_auth", is_authority = true)
@@ -112,7 +112,7 @@ proc run*() =
       check EdSeq[LazyOwner](client["lzr_units"])[0].items[0] == 1
 
       # Reload: remove + destroy the old incarnation, add a fresh one (same EdRef
-      # id, fresh table/seq ids — no container id reuse).
+      # id, fresh table/seq ids -- no container id reuse).
       units -= u1
       u1.destroy()
       var u2 = LazyOwner(id: "lzr_m")
@@ -130,7 +130,7 @@ proc run*() =
       client.tick()
 
       let m = EdSeq[LazyOwner](client["lzr_units"])[0]
-      check m.items.valid # ← the corruption point in enu
+      check m.items.valid # <- the corruption point in enu
       check m.items.len == 1
       check m.items[0] == 2
 
@@ -195,7 +195,7 @@ proc run*() =
       client.tick()
       check "omd_units" in client
       # The member's container arrives only as a placeholder stand-in (the
-      # inline reference mints one) — its value was not pushed.
+      # inline reference mints one) -- its value was not pushed.
       check not client["omd_u1_items"].loaded
 
       # It pulls what it touches, explicitly.
@@ -420,7 +420,7 @@ proc run*() =
       authority.tick()
       client.tick()
       check "lz_items" in client # normal container came with the closure
-      check "lz_big" in client # LAZY came too — but only as a handle
+      check "lz_big" in client # LAZY came too -- but only as a handle
       let big = EdTable[int, string](client["lz_big"])
       check not big.loaded # placeholder: shape unknown, entries page in
       check not big.loaded(1) # the entry did NOT ride along
@@ -450,9 +450,9 @@ proc run*() =
       authority.tick()
       client.tick()
       let ctbl = EdTable[int, string](client["ki_tbl"])
-      check not ctbl.loaded(1) # handle only — entries page in on request
+      check not ctbl.loaded(1) # handle only -- entries page in on request
 
-      # Requesting a present key loads it — and subscribes to it: a later
+      # Requesting a present key loads it -- and subscribes to it: a later
       # write to that key streams without re-requesting.
       ctbl.request(1)
       client.tick()
@@ -465,7 +465,7 @@ proc run*() =
       client.tick()
       check ctbl[1] == "one, live"
 
-      # Requesting a missing key is a normal answer (empty space) — but the
+      # Requesting a missing key is a normal answer (empty space) -- but the
       # interest sticks, so the key pops in when someone builds there.
       ctbl.request(2)
       client.tick()
@@ -541,7 +541,7 @@ proc run*() =
 
     test "evictor: per-key release shrinks used_bytes (paging out frees mem)":
       # The voxel case: a LAZY table grows per-key as chunks page in, and
-      # releasing a chunk must subtract exactly what it added — otherwise the
+      # releasing a chunk must subtract exactly what it added -- otherwise the
       # memory figure only ever climbs (the bug Scott saw: ed mem up on
       # move-in, never down on move-out).
       var authority = EdContext.init(id = "pk_auth", is_authority = true)
@@ -580,7 +580,7 @@ proc run*() =
       check client.used_bytes >= 200 # the still-loaded entry remains accounted
 
     test "interest tiers: a downstream cache doesn't pin its hub (Option 2)":
-      # A ← H ← L. L caches X with a big limit; that must NOT force H to hold X.
+      # A <- H <- L. L caches X with a big limit; that must NOT force H to hold X.
       # When L demotes X (it goes non-live), H may reclaim X under its own
       # pressure and invalidate L.
       var authority = EdContext.init(id = "it_auth", is_authority = true)
@@ -595,7 +595,7 @@ proc run*() =
       leaf.subscribe(hub, mode = PARTIAL_ASYNC, fetch = [])
       leaf.tick()
 
-      # L fetches X live (chains L→H→A); H holds it because L is live on it.
+      # L fetches X live (chains L->H->A); H holds it because L is live on it.
       var f = leaf.fetch("it_x")
       leaf.tick()
       hub.tick()
@@ -612,22 +612,22 @@ proc run*() =
       f.obj = nil
       f = nil
       GC_full_collect()
-      leaf.tick() # reconcile: X non-live here → demote upstream
+      leaf.tick() # reconcile: X non-live here -> demote upstream
       hub.tick() # H records X as cache-tier for L
       check "it_x" in leaf # L still caches it
       check "it_x" in hub
 
       # H is over its own budget (X is 400+ bytes, limit 200) and X is now
-      # cache-tier (unprotected) — H sheds X and invalidates L.
+      # cache-tier (unprotected) -- H sheds X and invalidates L.
       for i in 1 .. 4:
         hub.tick()
         leaf.tick()
-      check "it_x" notin hub # H reclaimed it — not pinned by L's cache
+      check "it_x" notin hub # H reclaimed it -- not pinned by L's cache
       check "it_x" notin leaf # ...and invalidated L's cache
 
     test "mem_limit encoding: default budget, negative clamps, Unbounded holds":
       # Honest byte budget: a small default cache, negatives clamp to no-cache,
-      # and Unbounded means never evict — the mirror image of the mem_limit 0
+      # and Unbounded means never evict -- the mirror image of the mem_limit 0
       # case below (there the dropped object is shed; here it's kept).
       check EdContext.init(id = "ml_def").mem_limit == DEFAULT_MEM_LIMIT
       check EdContext.init(id = "ml_neg", mem_limit = -5).mem_limit == 0
@@ -646,7 +646,7 @@ proc run*() =
       check "ub_x" in client and f.obj != nil
 
       f.obj = nil
-      f = nil # drop the reference — nothing is live now
+      f = nil # drop the reference -- nothing is live now
       GC_full_collect()
       client.tick() # Unbounded: the sweep is a no-op, the cache holds it
       check "ub_x" in client # a finite limit / no-cache would have shed it
@@ -670,7 +670,7 @@ proc run*() =
       check f.obj != nil
 
       f.obj = nil
-      f = nil # drop the reference — nothing is live now
+      f = nil # drop the reference -- nothing is live now
       GC_full_collect()
       client.tick() # no-cache sweep evicts it immediately
       check "nc_x" notin client
@@ -692,7 +692,7 @@ proc run*() =
       client.tick()
       # Fetch all three. On a leaf (no downstream), an object with no live
       # proxy is an eviction candidate regardless of our own upstream interest
-      # — so dropping the handles makes them evictable. Hold the handles until
+      # -- so dropping the handles makes them evictable. Hold the handles until
       # we're set up, then drop them (the app is done with them).
       var f1 = client.fetch("ev_1")
       var f2 = client.fetch("ev_2")
@@ -720,7 +720,7 @@ proc run*() =
       check client.used_bytes <= 250
 
     test "caching hub keeps released keys; per-key LRU sheds under pressure":
-      # A ← H(cache) ← L. L pages a chunk in then out; a caching hub keeps it
+      # A <- H(cache) <- L. L pages a chunk in then out; a caching hub keeps it
       # (so L's return is served from H, no refetch to A) until H's own budget
       # forces it out, least-recently-served first.
       var authority = EdContext.init(id = "ck_auth", is_authority = true)
@@ -768,7 +768,7 @@ proc run*() =
       check htbl.loaded(1) # ...but the caching hub KEPT it (no refetch on return)
 
       # Now drive H over its 600 budget: page in 2 and 3 too (still under after
-      # 1+2+3 ≈ 600+? push past it). Least-recently-served (key 1) sheds first.
+      # 1+2+3 ~= 600+? push past it). Least-recently-served (key 1) sheds first.
       ltbl.request(2)
       ltbl.request(3)
       leaf.tick()
@@ -778,8 +778,8 @@ proc run*() =
       leaf.tick()
       for i in 1 .. 3:
         hub.tick()
-      check htbl.loaded(2) and htbl.loaded(3) # live (L wants them) — protected
-      check not htbl.loaded(1) # cache-tier + stalest → shed under pressure
+      check htbl.loaded(2) and htbl.loaded(3) # live (L wants them) -- protected
+      check not htbl.loaded(1) # cache-tier + stalest -> shed under pressure
 
     test "hub shedding: last retract releases the hub's copy upstream":
       # The enu client topology: authority (server) <- partial hub (worker)
@@ -896,7 +896,7 @@ proc run*() =
       # push carrying the LAZY handle hasn't landed). Without handle-first
       # replies the per-key ADD drops at the hub as an op for a missing
       # object, the want dangles (only the first want per key forwards), and
-      # the entry never loads — the invisible-tower bug.
+      # the entry never loads -- the invisible-tower bug.
       var authority = EdContext.init(id = "hf_auth", is_authority = true)
       var hub = EdContext.init(id = "hf_hub")
       var leaf = EdContext.init(id = "hf_leaf")
@@ -910,7 +910,7 @@ proc run*() =
       hub.tick()
       leaf.subscribe(hub)
       leaf.tick()
-      # The leaf knows the table only by its derived id — neither it nor the
+      # The leaf knows the table only by its derived id -- neither it nor the
       # hub holds the container.
       let ltbl = EdTable[int, string].init_placeholder(leaf, "hf_tbl")
       check "hf_tbl" notin hub
@@ -973,7 +973,7 @@ proc run*() =
       check "d_items" notin client # out of interest
       check "d_val" notin client
 
-      # The owner id isn't itself a container — a deep fetch expands its
+      # The owner id isn't itself a container -- a deep fetch expands its
       # ownership closure on the authority and sends everything it owns.
       client.fetch("d_bot", deep = true)
       authority.tick() # serves the REQUEST: walks owned_by, publishes the closure
@@ -995,7 +995,7 @@ proc run*() =
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["pc_root"])
       client.tick()
 
-      # Created after the subscribe — the broadcast CREATE must still be filtered.
+      # Created after the subscribe -- the broadcast CREATE must still be filtered.
       var root = EdValue[int].init(ctx = authority, id = "pc_root")
       var other = EdValue[int].init(ctx = authority, id = "pc_other")
       client.tick()

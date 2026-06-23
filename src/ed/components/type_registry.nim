@@ -52,7 +52,7 @@ proc register_type(typ: type) =
         when src is Ed:
           if ?src:
             # Proxy/body split: a bare `type(src)()` has no body, and `.id`
-            # forwards there — mint a husk that carries one.
+            # forwards there -- mint a husk that carries one.
             dest = type(src).init_husk(src.id)
         elif src is ref:
           dest = nil
@@ -73,7 +73,7 @@ proc register_type(typ: type) =
       for field in self[].fields:
         when field is Ed:
           if ?field and field.id in ctx:
-            # Direct registry read — `ctx[...]` would blocking-materialize in a
+            # Direct registry read -- `ctx[...]` would blocking-materialize in a
             # `blocking` scope, which deserialization must never do (and a func
             # can't have side effects; resolve_proxy's registry upkeep is cast
             # away as the one tolerated effect).
@@ -87,7 +87,7 @@ proc register_type(typ: type) =
       # replacing it. `incoming`'s Ed fields are already resolved/relinked by
       # `parse`; copy them and the synced scalars onto `existing`, but LEAVE
       # main-side refs / `ed_ignore` state untouched (the consumer depends on
-      # them — e.g. a godot `node`). Mirrors `stringify`'s field handling.
+      # them -- e.g. a godot `node`). Mirrors `stringify`'s field handling.
       let src = typ(incoming)
       let dest = typ(existing)
       for s, d in fields(src[], dest[]):
@@ -237,12 +237,12 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
       continue
     # Only registered refs belong in `ref_pool`. It's the serialization identity
     # index (from_flatty dedup / find_ref), and now a *cursor* index, so an
-    # instance in it must carry a `RefHandle` to clean itself out on free — i.e.
+    # instance in it must carry a `RefHandle` to clean itself out on free -- i.e.
     # it must be an `EdRef`. Non-registered refs that happen to live in an Ed
     # container are never looked up and have no cleanup handle, so they must
     # never enter the pool (their cursor would dangle on free). Widen to the
     # common base first: `change.item`'s static type may be an unrelated ref
-    # (a sibling of EdRef), which can't be converted to EdRef directly — but the
+    # (a sibling of EdRef), which can't be converted to EdRef directly -- but the
     # runtime `of` check + downcast through RootRef is always valid.
     let item = RootRef(change.item)
     if not (item of EdRef):
@@ -255,13 +255,13 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
       self.ref_pool[id].obj = change.item
       # Wire the per-instance cleanup handle the first time we see this instance.
       # The pool's `obj` hold is non-owning (cursor); this handle keeps it from
-      # dangling — when ORC reclaims the instance its RefHandle.=destroy dels this
+      # dangling -- when ORC reclaims the instance its RefHandle.=destroy dels this
       # context's `ref_pool` entry. The handle carries the instance's own ctx, the
       # one thing a bare registered ref can't know under multiple contexts/thread.
       let handle_owner = EdRef(item)
       if handle_owner.ref_handle.is_nil:
         handle_owner.ref_handle = RefHandle(ctx_uid: self.uid, ref_id: id)
-      # The instance's own context, for destroy's owner cascade — the one
+      # The instance's own context, for destroy's owner cascade -- the one
       # context it lives in (see EdRef.ctx). Cursor, so no cycle.
       handle_owner.ctx = self
     # REMOVE only unlinks a container from the ref; it never frees. ORC reclaims
@@ -270,7 +270,7 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
     # re-links the same instance across any gap.
 
     # Member ownership: an OWNS_MEMBERS collection's EdRef members belong to the
-    # collection's *owner* — membership drives the `owned_by` index, and removal
+    # collection's *owner* -- membership drives the `owned_by` index, and removal
     # un-registers, so an independently-removed member just drops out of the
     # cascade. Entries are ref_pool keys (tid:id); `destroy_owned` resolves them
     # there and cascades through the EdRef `destroy` method. Runs identically on
@@ -293,7 +293,7 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
 proc find_ref*[T](self: EdContext, value: var T): bool =
   privileged
 
-  # Drop entries for instances ORC already reclaimed before reading `obj` — the
+  # Drop entries for instances ORC already reclaimed before reading `obj` -- the
   # cursor would otherwise dangle (see prune_dead_refs / RefHandle).
   self.prune_dead_refs()
   if ?value:
@@ -307,8 +307,8 @@ proc find_ref*[T](self: EdContext, value: var T): bool =
         result = true
       else:
         # Dedup to the pooled instance, but REVIVE it: converge the freshly-parsed
-        # incarnation (`value`) onto it — re-linking owned fields a reload gave
-        # fresh ids — and clear any destroyed latch. This merges a same-id
+        # incarnation (`value`) onto it -- re-linking owned fields a reload gave
+        # fresh ids -- and clear any destroyed latch. This merges a same-id
         # destroy+recreate into an in-place update: identity is preserved, so a
         # consumer still holding the instance converges to the new state instead
         # of being left on dead fields.
@@ -320,7 +320,7 @@ proc find_ref*[T](self: EdContext, value: var T): bool =
           EdRef(existing).destroyed = false
         # A revived ref must come back fully alive: its lifetime was finished by
         # the destroy, and binding a new watcher to a finished lifetime untracks
-        # it immediately — every watch a consumer re-establishes on the revived
+        # it immediately -- every watch a consumer re-establishes on the revived
         # object would silently die. Fresh lifetime = watchable again.
         if EdRef(existing).lifetime != nil and EdRef(existing).lifetime.finished:
           EdRef(existing).lifetime = new_lifetime()
@@ -332,7 +332,7 @@ when defined(dump_ed_objects):
 
 proc free_refs*(self: EdContext) =
   ## Per-tick ref-pool maintenance: prune entries for instances ORC has
-  ## reclaimed (RefHandle can't touch `ref_pool` itself — see prune_dead_refs).
+  ## reclaimed (RefHandle can't touch `ref_pool` itself -- see prune_dead_refs).
   ## Memory is ORC-owned; there is no manual free.
   privileged
 

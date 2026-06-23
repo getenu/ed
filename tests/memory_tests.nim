@@ -169,7 +169,7 @@ proc run*() =
 
   test "dropped proxy frees promptly; its callbacks sweep on the next prune":
     # The sentinel model (callbacks live on the registry-owned body): a proxy
-    # holds nothing, so it dies at refcount zero — no cycle collector — and
+    # holds nothing, so it dies at refcount zero -- no cycle collector -- and
     # the next prune sweeps the callbacks registered through it. No GC_full_
     # collect anywhere in this test.
     var ctx = EdContext.init(id = "pc_ctx")

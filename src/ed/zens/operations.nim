@@ -35,7 +35,7 @@ template touch_read(self: untyped) =
   ## Coarse eviction touch: mark the body as recently used and reset its churn
   ## counter. Every read accessor runs this (it precedes `touch_placeholder`),
   ## so the evictor's LRU clock and "updates since read" both advance on real
-  ## use — and never on the hot voxel render path, which doesn't read through
+  ## use -- and never on the hot voxel render path, which doesn't read through
   ## these accessors. Only meaningful on a context with a memory limit.
   if self.ctx != nil and self.ctx.has_budget:
     self.body.last_read = get_mono_time()
@@ -45,7 +45,7 @@ template touch_placeholder(self: untyped) =
   ## Materialize-on-access: if `self` is an unmaterialized placeholder, ask its
   ## context to materialize it (kick a fetch; block until filled when
   ## `ctx.blocking`). No-op for a loaded object or a context without the hook.
-  ## LAZY containers are exempt: they're pull-only by design — entries arrive
+  ## LAZY containers are exempt: they're pull-only by design -- entries arrive
   ## per-key (`request`), so reading one must never materialize the whole table.
   self.touch_read
   if self.placeholder and LAZY notin self.flags and self.ctx.materialize != nil:
@@ -73,7 +73,7 @@ proc contains*[T, O](self: Ed[T, O], children: set[O] | seq[O]): bool =
 template materialize_for_write(self: untyped) =
   ## A local mutation of an unmaterialized placeholder materializes it first
   ## (under `ctx.blocking`: pumps I/O until filled) so the in-flight fill
-  ## can't clobber the write — a placeholder's tracked state is about to be
+  ## can't clobber the write -- a placeholder's tracked state is about to be
   ## replaced wholesale by its CREATE. Unlike `touch_placeholder` this skips
   ## `touch_read`: a write must not reset the evictor's updates-since-read
   ## churn counter.
@@ -84,7 +84,7 @@ template materialize_for_write(self: untyped) =
 template materialize_for_write(self: untyped, op_ctx: untyped) =
   ## Gated variant for accessors the receive path also calls (via
   ## change_receiver): a received op carries a non-empty source and is
-  ## replicated state, not local intent — and materializing inside message
+  ## replicated state, not local intent -- and materializing inside message
   ## processing would re-enter the pump.
   if op_ctx.source.len == 0:
     self.materialize_for_write
@@ -150,7 +150,7 @@ proc release*[K, V](self: EdTable[K, V], key: K) =
   ## deletes on the authority; `request(key)` re-fetches. Three effects:
   ## evict locally (REMOVED fires, watches un-render), retract our per-key
   ## interest upstream (ops for this key stop flowing), and notify downstream
-  ## clones so they evict too — all via one batched RELEASE on the next tick.
+  ## clones so they evict too -- all via one batched RELEASE on the next tick.
   ## Also retracts a pending interest in a key that never loaded (a requested
   ## empty-space chunk).
   privileged
@@ -400,10 +400,10 @@ template pause*(self: Ed, body: untyped) =
 
 proc destroy*[T, O](self: Ed[T, O], publish = true, op_ctx = OperationContext()) =
   ## Destroy the container and remove it from its context. `op_ctx` carries the
-  ## source of the op that triggered this — for a *received* DESTROY (re-broadcast
+  ## source of the op that triggered this -- for a *received* DESTROY (re-broadcast
   ## by `change_receiver` so it relays past this hop) it's the upstream source, so
   ## the re-broadcast filters the contexts the op already visited and never echoes
-  ## back to its origin. Empty (a local destroy) ⇒ just this context's id.
+  ## back to its origin. Empty (a local destroy) => just this context's id.
   log_defaults
   debug "destroying", unit = self.id, stack = get_stack_trace()
   assert self.valid
@@ -435,14 +435,14 @@ method destroy*(self: EdRef) {.base, gcsafe.}
 proc set_owner*(ctx: EdContext, obj: EdRef, owner_id: string) =
   ## Attribute a standalone EdRef to `owner_id`, so `destroy_owned(owner_id)`
   ## tears it down (cascading through its own `destroy`). Unlike a container's
-  ## baked-in, synced `owner_id`, this ownership isn't sent as data — it's
+  ## baked-in, synced `owner_id`, this ownership isn't sent as data -- it's
   ## re-derived locally on each context, exactly like OWNS_MEMBERS membership
   ## (`type_registry`): call it wherever the ref is created/adopted, on every
   ## context, and the index lands the same everywhere with no extra sync.
   privileged
-  # Index by the ref_pool key ("tid:id" — `ref_id` in type_registry), matching
+  # Index by the ref_pool key ("tid:id" -- `ref_id` in type_registry), matching
   # the OWNS_MEMBERS member index: destroy_owned's member pass resolves owned
-  # ids through ctx.ref_pool, and a bare id never matches a pool key — the ref
+  # ids through ctx.ref_pool, and a bare id never matches a pool key -- the ref
   # would silently escape the cascade (and leak everything *it* owns).
   ctx.owned_by.mgetOrPut(owner_id, initHashSet[string]()).incl(
     $obj.type_id & ":" & obj.id
@@ -451,11 +451,11 @@ proc set_owner*(ctx: EdContext, obj: EdRef, owner_id: string) =
 proc destroy_owned*(ctx: EdContext, owner_id: string) =
   ## Destroy everything owned by `owner_id` (per the `owned_by` index). Two
   ## passes: first owned EdRef *members* (an OWNS_MEMBERS collection's children)
-  ## — cascaded through their `destroy` method while the containers they unlink
-  ## themselves from are still alive — then the owned containers, each firing
+  ## -- cascaded through their `destroy` method while the containers they unlink
+  ## themselves from are still alive -- then the owned containers, each firing
   ## its CLOSED, dropping from `ctx.objects`, and broadcasting DESTROY so
-  ## replicas tear down their mirrors. Works in *any* context — including one
-  ## that didn't construct the object — because ownership is synced, not derived
+  ## replicas tear down their mirrors. Works in *any* context -- including one
+  ## that didn't construct the object -- because ownership is synced, not derived
   ## from the constructing context. The owner's `lifetime.finish` handles its
   ## callbacks separately. Containers are type-erased here (`ref EdBase`), so
   ## they're destroyed via their `change_receiver` (the same path a received
@@ -480,7 +480,7 @@ proc destroy_owned*(ctx: EdContext, owner_id: string) =
 
 method destroy*(self: EdRef) {.base, gcsafe.} =
   ## Generic teardown for a registered ref: finish its callback lifetime, tear
-  ## down everything it owns — containers, and owned members recursively — then
+  ## down everything it owns -- containers, and owned members recursively -- then
   ## latch `destroyed`. Subclasses override with their type-specific cleanup and
   ## call this last (enu: unlink from the parent, clear globals, then here).
   ## Deliberately unguarded: an overriding destroy latches `destroyed` at its
@@ -489,7 +489,7 @@ method destroy*(self: EdRef) {.base, gcsafe.} =
   if not self.lifetime.is_nil:
     self.lifetime.finish()
   # The context this ref lives in (stamped on ref_pool add). Fall back to
-  # thread_ctx only for a ref that never entered a ref_pool — i.e. created and
+  # thread_ctx only for a ref that never entered a ref_pool -- i.e. created and
   # destroyed without ever being added to a collection, where it was minted on
   # the current thread anyway.
   let ctx = if self.ctx != nil: self.ctx else: Ed.thread_ctx
