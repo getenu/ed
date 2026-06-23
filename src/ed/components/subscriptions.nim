@@ -1263,7 +1263,16 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     # Keyed by owner id, so arrival order vs. the owner doesn't matter.
     if msg.owner_id.len > 0 and msg.object_id in self.objects and
         ?self.objects[msg.object_id]:
-      self.objects[msg.object_id].owner_id = msg.owner_id
+      let body = self.objects[msg.object_id]
+      # Ownership transfer isn't supported yet, so an object's owner shouldn't
+      # change once set. (When re-home lands, replace this with a drop from
+      # owned_by[body.owner_id] before re-indexing under the new owner.)
+      invariant(
+        body.owner_id.len == 0 or body.owner_id == msg.owner_id,
+        "owner_id changed for " & msg.object_id & ": '" & body.owner_id &
+          "' -> '" & msg.owner_id & "'",
+      )
+      body.owner_id = msg.owner_id
       self.owned_by.mget_or_put(msg.owner_id, init_hash_set[string]()).incl(
         msg.object_id
       )
