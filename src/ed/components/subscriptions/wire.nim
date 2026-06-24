@@ -44,14 +44,14 @@ proc encode_source(
     if is_new:
       result.mappings.add (short_id, full_id)
 
-proc register_mappings*(sub: Subscription, mappings: seq[IdMapping]) =
+proc register_mappings(sub: Subscription, mappings: seq[IdMapping]) =
   ## Register new ID mappings from an incoming message into the *incoming*
   ## namespace. The peer chose these short IDs independently of ours, so we
   ## must not let them interact with our outgoing allocation.
   for (short_id, full_id) in mappings:
     sub.incoming_short_to_id[short_id] = full_id
 
-proc decode_source*(sub: Subscription, source: seq[uint8]): HashSet[string] =
+proc decode_source(sub: Subscription, source: seq[uint8]): HashSet[string] =
   ## Convert short IDs back to full context ID HashSet.
   for short_id in source:
     if short_id in sub.incoming_short_to_id:
@@ -181,7 +181,7 @@ proc flush_buffers*(self: EdContext) =
       for msg in buffer:
         sub.send_or_buffer(msg, true)
 
-template ed_compress*(s: string): string =
+template ed_compress(s: string): string =
   ## Pass-through under `-d:ed_no_compress` -- supersnappy's snappy fast-path
   ## over-reads within an allocation, which trips AddressSanitizer (it's a benign
   ## third-party over-read, not our bug). The sanitizer build defines the flag so
@@ -189,10 +189,10 @@ template ed_compress*(s: string): string =
   ## so both sides agree on the (un)compressed wire format.
   when defined(ed_no_compress): s else: s.compress
 
-template ed_uncompress*(s: string): string =
+template ed_uncompress(s: string): string =
   when defined(ed_no_compress): s else: s.uncompress
 
-proc remote_body*(msg: Message, no_overwrite: bool): string =
+proc remote_body(msg: Message, no_overwrite: bool): string =
   ## The shared, compressed wire body for a remote message -- identical across
   ## subscribers (source / id_mappings travel per-subscriber, outside it), so a
   ## fanout serializes + compresses it once.
@@ -203,7 +203,7 @@ proc remote_body*(msg: Message, no_overwrite: bool): string =
     body_msg.obj = ""
   result = body_msg.to_flatty.ed_compress
 
-const wire_header* = "ED\x01"
+const wire_header = "ED\x01"
   ## Magic + wire-format version, prefixed to every remote packet. flatty is
   ## positional: bytes from an older wire format can decode *cleanly* into
   ## wrong-typed fields and blow up (or corrupt state) deep in processing -- a
@@ -211,7 +211,7 @@ const wire_header* = "ED\x01"
   ## rejects foreign packets at the front door instead. Bump the version byte
   ## whenever the wire format changes.
 
-proc send_remote*(
+proc send_remote(
     self: EdContext, sub: Subscription, source: HashSet[string], body: string
 ) =
   ## One remote packet: the wire header, then a small per-subscriber header

@@ -11,7 +11,7 @@ import pkg/flatty
 import ed/[core, types {.all.}], ed/zens/[contexts, private, initializers {.all.}]
 import ed/components/private/global_state
 import ed/lifecycle
-import ./wire
+import ./wire {.all.}
 
 privileged
 proc fanout(
@@ -79,7 +79,7 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
 
   self.ctx.tick_reactor
 
-proc publish_closure*(
+proc publish_closure(
     self: EdContext, s: Subscription, root_id: string
 ): bool {.discardable.} =
   ## Serve an ownership closure to `s`: BFS from `root_id` over `owned_by`,

@@ -87,7 +87,7 @@ proc evict_candidate(self: EdContext, body: ref EdBodyBase): bool =
     return false
   result = not self.is_live_here(body)
 
-const up_live* = 1
+const up_live = 1
 const up_cache = 2
 
 proc reconcile_tier(self: EdContext, body: ref EdBodyBase) =

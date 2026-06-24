@@ -10,7 +10,7 @@ import ed/lifecycle
 import ./wire
 
 privileged
-proc serve_key_wants*(self: EdContext, object_id: string) =
+proc serve_key_wants(self: EdContext, object_id: string) =
   ## Serve chained per-key wants that can now be answered -- entries for
   ## `object_id` may have just arrived (see forward_request).
   privileged
@@ -56,7 +56,7 @@ proc request_targets(self: EdContext): seq[Subscription] =
     error "request_with_no_upstream", ctx = self.id
     assert false, "request_targets: forwarding with no recorded upstream"
 
-proc forward_request*(self: EdContext, requester: Subscription, msg: Message) =
+proc forward_request(self: EdContext, requester: Subscription, msg: Message) =
   ## Chain a request we can't serve: send it to our upstream(s).
   ## The forward makes *us* the requester there, so the answer lands here and
   ## the want-serving hooks relay it back to the original asker. The authority
@@ -70,7 +70,7 @@ proc forward_request*(self: EdContext, requester: Subscription, msg: Message) =
       continue
     self.send(sub, fwd, OperationContext(), DEFAULT_FLAGS)
 
-proc add_obj_want*(self: EdContext, requester: Subscription, msg: Message) =
+proc add_obj_want(self: EdContext, requester: Subscription, msg: Message) =
   ## Remember + chain a whole-object want. Dedup: only the first want for an
   ## id forwards upstream; later askers just join the waiters.
   if msg.object_id in self.pending_obj_wants:
@@ -115,7 +115,7 @@ proc fetch*(
     self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
   self.tick_reactor
 
-proc flush_key_requests*(self: EdContext) =
+proc flush_key_requests(self: EdContext) =
   ## Send the per-key fetches buffered since the last tick -- one REQUEST per
   ## table, carrying the batch of serialized keys in `obj`. The authority replies
   ## with an ADD op per found key (see the REQUEST handler).
@@ -129,7 +129,7 @@ proc flush_key_requests*(self: EdContext) =
       self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
   self.tick_reactor
 
-proc flush_key_releases*(self: EdContext) =
+proc flush_key_releases(self: EdContext) =
   ## Send the per-key releases buffered since the last tick -- one RELEASE per
   ## table, broadcast to every peer. Upstream reads it as an interest retract
   ## (ops for those keys stop flowing); downstream clones read it as an
