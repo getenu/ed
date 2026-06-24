@@ -429,14 +429,18 @@ proc serve_key_wants(self: EdContext, object_id: string) =
 proc request_targets(self: EdContext): seq[Subscription] =
   ## Who to send a REQUEST to: our upstreams (the contexts we page from).
   ## Never downstream — a clone's copy of us is stale-by-definition, and
-  ## letting it answer can overwrite fresher local state with its echo.
-  ## No known upstream (e.g. a one-way local subscribe) falls back to all
-  ## subscribers.
+  ## letting it answer can overwrite fresher local state with its echo. Only a
+  ## non-authority forwards, and a non-authority pages from a recorded upstream,
+  ## so this is non-empty in practice. An empty result means a degenerate
+  ## topology (a non-authority with no upstream); rather than fall back to all
+  ## subscribers — which could route the request downstream — treat it as a bug
+  ## (assert in debug, log in release) and forward nowhere.
   for sub in self.subscribers:
     if sub.ctx_id in self.upstream_ctx_ids:
       result.add sub
   if result.len == 0:
-    result = self.subscribers
+    error "request_with_no_upstream", ctx = self.id
+    assert false, "request_targets: forwarding with no recorded upstream"
 
 proc forward_request(self: EdContext, requester: Subscription, msg: Message) =
   ## Chain a request we can't serve: send it to our upstream(s).
