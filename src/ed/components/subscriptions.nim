@@ -1140,7 +1140,494 @@ proc subscribe*(
 
   self.tick(blocking = false)
 
-proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
+proc process_message(
+  self: EdContext, msg: Message, sub: Subscription = nil
+) {.gcsafe.}
+
+proc handle_packed(self: EdContext, msg: Message, sub: Subscription) {.gcsafe.} =
+  privileged
+  log_defaults("ed publishing")
+  let ops = msg.obj.from_flatty(seq[PackedMessageOperation])
+  for op in ops:
+    var new_msg = Message(
+      kind: op.kind,
+      object_id: msg.object_id,
+      type_id: msg.type_id,
+      ref_id: op.ref_id,
+      change_object_id: op.change_object_id,
+      obj: op.obj,
+      delta: op.delta,
+      key_bin: op.key_bin,
+      flags: msg.flags,
+      source: msg.source,
+      source_set: msg.source_set,
+      id_mappings: msg.id_mappings,
+    )
+
+    self.process_message(new_msg, sub)
+  if msg.lsn > self.applied_lsn:
+    self.applied_lsn = msg.lsn
+
+proc handle_create(self: EdContext, msg: Message, source: HashSet[string]) =
+  privileged
+  log_defaults("ed publishing")
+  {.gcsafe.}:
+    if msg.type_id notin type_initializers:
+      # Unknown type: a version-skewed peer or a type this context wasn't
+      # compiled with. Skip it rather than aborting -- the consistency layer no
+      # longer needs every object present to trust the rest. (Relaying unknown
+      # types through the authority is a separate, future step.)
+      debug "skipping create for unknown type",
+        type_id = msg.type_id, object_id = msg.object_id
+      return
+
+  {.gcsafe.}:
+    # Stored as a raw pointer (see initializers.register_initializer); cast
+    # back to the materializer proc type to call it.
+    let fn = cast[CreateInitializer](type_initializers[msg.type_id])
+    # Synced ownership: materialize INSIDE the owner's scope, not after -- the
+    # initializer (`defaults`) re-broadcasts the CREATE to our own subscribers
+    # while it runs (a relay: e.g. worker -> node ctx for an object an MCP
+    # client built), so owner_id must be stamped before that re-broadcast or
+    # second-hop contexts receive it unowned.
+    template materialize_it() =
+      fn(
+        msg.obj,
+        self,
+        msg.object_id,
+        msg.flags,
+        OperationContext.init(
+          source = source, ctx = self, origin = msg.origin, op_id = msg.op_id
+        ),
+      )
+
+    if msg.owner_id.len > 0:
+      msg.owner_id.own:
+        materialize_it()
+    else:
+      materialize_it()
+  # Safety net for paths where the initializer fills an existing object (a
+  # placeholder) rather than running `defaults` -- stamp + index after the fact.
+  # Keyed by owner id, so arrival order vs. the owner doesn't matter.
+  if msg.owner_id.len > 0 and msg.object_id in self.objects and
+      ?self.objects[msg.object_id]:
+    let body = self.objects[msg.object_id]
+    # Ownership transfer isn't supported yet, so an object's owner shouldn't
+    # change once set. (When re-home lands, replace this with a drop from
+    # owned_by[body.owner_id] before re-indexing under the new owner.)
+    invariant(
+      body.owner_id.len == 0 or body.owner_id == msg.owner_id,
+      "owner_id changed for " & msg.object_id & ": '" & body.owner_id &
+        "' -> '" & msg.owner_id & "'",
+    )
+    body.owner_id = msg.owner_id
+    self.owned_by.mget_or_put(msg.owner_id, init_hash_set[string]()).incl(
+      msg.object_id
+    )
+  # Interest tiering (Option 2): a body materialized from an upstream CREATE
+  # is one we follow -- mark it live-up so the sweep reconciles its tier as it
+  # goes live/cache here. Only on an evicting partial replica with an upstream.
+  if self.evicts and self.upstream_ctx_ids.len > 0 and
+      msg.object_id in self.objects and self.objects[msg.object_id] != nil:
+    if self.objects[msg.object_id].up_tier == 0:
+      self.objects[msg.object_id].up_tier = up_live
+  # Resolve fetch handles: the object itself and -- for a deep fetch of an
+  # *owner* id -- the owner its containers point back to (the owner has no
+  # container of its own, so its handle resolves via the arriving closure).
+  if msg.object_id in self.fetches:
+    let pending_fetch = self.fetches[msg.object_id]
+    pending_fetch.state = Found
+    if msg.object_id in self.objects and ?self.objects[msg.object_id]:
+      pending_fetch.obj = self.resolve_proxy(self.objects[msg.object_id])
+    self.fetches.del(msg.object_id)
+  if msg.owner_id.len > 0 and msg.owner_id in self.fetches:
+    self.fetches[msg.owner_id].state = Found
+    self.fetches.del(msg.owner_id)
+  # Serve chained wants (see forward_request): whoever asked while we didn't
+  # have it. Deep wants serve the closure -- its CREATEs precede this one
+  # (deepest-first publish); owner-only ids resolve via msg.owner_id.
+  template serve_obj_wants(id: string) =
+    if id in self.pending_obj_wants:
+      let wants = self.pending_obj_wants[id]
+      self.pending_obj_wants.del(id)
+      for want in wants:
+        want.sub.interest.incl id
+        if want.deep:
+          discard self.publish_closure(want.sub, id)
+        elif id in self.objects and ?self.objects[id]:
+          self.objects[id].publish_create(want.sub)
+
+  serve_obj_wants(msg.object_id)
+  if msg.owner_id.len > 0:
+    serve_obj_wants(msg.owner_id)
+  # A fill can bring table entries chained key-waiters are waiting on.
+  self.serve_key_wants(msg.object_id)
+  # The creator is interested in its own object: make sure its canonical ops
+  # flow back. Matters for partial subscribers; a no-op for full ones.
+  for s in self.subscribers:
+    if s.ctx_id in source:
+      s.interest.incl msg.object_id
+
+proc handle_not_found(self: EdContext, msg: Message) =
+  privileged
+  log_defaults("ed publishing")
+  # The authority NACKed a fetch: resolve the handle so callers (and the
+  # blocking `ctx[]` pump) learn promptly instead of waiting out a deadline,
+  # and relay the answer to any chained waiters (see forward_request).
+  if msg.obj.len > 0:
+    # Per-key NACK: a missing key is a *normal* answer (an empty-space voxel
+    # chunk). Relay per waiter and clear the wants so nothing dangles.
+    if msg.object_id in self.pending_key_wants:
+      for key_bin in msg.obj.from_flatty(seq[string]):
+        if key_bin in self.pending_key_wants[msg.object_id]:
+          for waiter in self.pending_key_wants[msg.object_id][key_bin]:
+            self.send(
+              waiter,
+              Message(
+                kind: NOT_FOUND,
+                object_id: msg.object_id,
+                obj: @[key_bin].to_flatty,
+              ),
+              OperationContext(),
+              DEFAULT_FLAGS,
+            )
+          self.pending_key_wants[msg.object_id].del key_bin
+      if self.pending_key_wants[msg.object_id].len == 0:
+        self.pending_key_wants.del msg.object_id
+  else:
+    if msg.object_id in self.fetches:
+      self.fetches[msg.object_id].state = NotFound
+      self.fetches.del(msg.object_id)
+    if msg.object_id in self.pending_obj_wants:
+      for want in self.pending_obj_wants[msg.object_id]:
+        self.send(
+          want.sub,
+          Message(kind: NOT_FOUND, object_id: msg.object_id),
+          OperationContext(),
+          DEFAULT_FLAGS,
+        )
+      self.pending_obj_wants.del msg.object_id
+
+proc handle_release_object(
+    self: EdContext, msg: Message, source: HashSet[string]
+) =
+  privileged
+  log_defaults("ed publishing")
+  # Whole-object release (evictor): a peer dropped object_id entirely.
+  #  - From a subscriber: an interest retract -- stop streaming it to them.
+  #  - From upstream: an eviction notice -- but a received drop is NEVER
+  #    authoritative over a live local hold (Scott's rule). Evict only if we
+  #    aren't using it ourselves and nobody below us wants it; otherwise keep
+  #    using it and let our own evictor reclaim it when it goes dormant.
+  for s in self.subscribers:
+    if s.ctx_id notin source:
+      continue
+    s.interest.excl msg.object_id
+    s.interest_cache.excl msg.object_id
+    s.key_interest.del msg.object_id
+  var from_upstream = false
+  for src in source:
+    if src in self.upstream_ctx_ids:
+      from_upstream = true
+      break
+  if from_upstream and msg.object_id in self and
+      self.objects[msg.object_id].proxy == nil and
+      not self.any_interest(msg.object_id):
+    self.evict_body(msg.object_id)
+
+proc handle_interest(self: EdContext, msg: Message, source: HashSet[string]) =
+  privileged
+  log_defaults("ed publishing")
+  # Live/cache tier change from a downstream subscriber (Option 2). Demote
+  # moves the object to that subscriber's cache tier -- it still streams, but
+  # no longer protects the object from our eviction; promote moves it back.
+  # Our own up-tier to the authority then reconciles on the next sweep (our
+  # aggregate downstream liveness changed).
+  for s in self.subscribers:
+    if s.ctx_id notin source:
+      continue
+    if msg.object_id notin s.interest:
+      continue
+    if msg.demote:
+      s.interest_cache.incl msg.object_id
+    else:
+      s.interest_cache.excl msg.object_id
+
+proc handle_release_keys(
+    self: EdContext, msg: Message, source: HashSet[string]
+) =
+  privileged
+  log_defaults("ed publishing")
+  # Per-key paging notice (see `release`). Role decides the meaning:
+  #  - From a subscriber that pages from us: an interest retract -- stop
+  #    streaming those keys (and the nested containers that rode in with
+  #    them). Our copy is untouched; we may serve others.
+  #  - From *upstream*: an eviction notice -- our data source dropped the
+  #    keys, and we're a clone of it, so they're gone for us too. Evict
+  #    locally (REMOVED fires, watches un-render) and relay downstream.
+  # A full clone of a full source never receives one (full sources don't
+  # release); the authority has no upstream, so it only ever retracts.
+  let keys = msg.obj.from_flatty(seq[string])
+  var retracted = false
+  for s in self.subscribers:
+    if s.ctx_id notin source:
+      continue
+    if msg.object_id in s.key_interest:
+      retracted = true
+      for key_bin in keys:
+        s.key_interest[msg.object_id].excl key_bin
+        # Shed the keys' nested containers (the chunk's delta seq) from the
+        # follow set, so their ops stop streaming as well.
+        if msg.object_id in self:
+          let obj = self.objects[msg.object_id]
+          let reply = obj.publish_key(obj, key_bin)
+          for nested_id in reply.nested:
+            s.interest.excl nested_id
+      if s.key_interest[msg.object_id].len == 0:
+        s.key_interest.del msg.object_id
+      # A release can outrun an in-flight chained request: drop the
+      # subscriber from any pending wants so the late answer isn't served
+      # to someone who no longer wants it (re-materializing a paged-out key).
+      if msg.object_id in self.pending_key_wants:
+        for key_bin in keys:
+          if key_bin in self.pending_key_wants[msg.object_id]:
+            self.pending_key_wants[msg.object_id][key_bin] =
+              self.pending_key_wants[msg.object_id][key_bin].filter_it(
+                it.ctx_id != s.ctx_id
+              )
+  if retracted and self.sync_mode != FULL and not self.is_authority and
+      self.mem_limit == 0:
+    # No-cache hub: shed immediately (the symmetric counterpart of request
+    # chaining). When the last interest in a key retracts, drop our copy and
+    # chain the release upstream. A caching hub (mem_limit > 0) instead KEEPS
+    # the key -- it becomes cache-tier (no live downstream wants it), stays
+    # current via the stream, and the per-key cache LRU sheds it under our
+    # own pressure (so a downstream's release doesn't force us to refetch on
+    # its return).
+    for key_bin in keys:
+      var still_wanted = false
+      for s in self.subscribers:
+        if msg.object_id in s.key_interest and
+            key_bin in s.key_interest[msg.object_id]:
+          still_wanted = true
+          break
+      if not still_wanted:
+        if msg.object_id in self:
+          let obj = self.objects[msg.object_id]
+          if obj.evict_key != nil:
+            let evicted = obj.evict_key(obj, key_bin)
+            self.drop_nested_bodies(evicted.nested)
+        self.pending_key_releases.mget_or_put(msg.object_id, @[]).add key_bin
+  if not retracted:
+    var from_upstream = false
+    for src in source:
+      if src in self.upstream_ctx_ids:
+        from_upstream = true
+        break
+    if from_upstream:
+      if msg.object_id in self:
+        let obj = self.objects[msg.object_id]
+        if obj.evict_key != nil:
+          for key_bin in keys:
+            let evicted = obj.evict_key(obj, key_bin)
+            self.drop_nested_bodies(evicted.nested)
+      if not self.is_authority:
+        # Relay to our own subscribers (downstream clones); the accumulated
+        # source stops it echoing back the way it came.
+        var fwd_source = source
+        fwd_source.incl self.id
+        for s in self.subscribers:
+          if s.ctx_id notin fwd_source:
+            self.send(
+              s, msg, OperationContext(source: fwd_source), DEFAULT_FLAGS
+            )
+
+proc handle_request(self: EdContext, msg: Message, source: HashSet[string]) =
+  privileged
+  log_defaults("ed publishing")
+  # A partial subscriber wants data. Two forms:
+  #  - whole-object (`obj` empty): add the object to interest and publish_create
+  #    it (existing behavior -- future ops then follow).
+  #  - per-key (`obj` = a batch of serialized table keys): reply with just those
+  #    entries (an ADD op each), without adding the whole table to interest.
+  # The requester is whoever the message came from -- match by ctx id in `source`.
+  #
+  # Request chaining: a hub that can't serve a request forwards it to its
+  # upstream(s) (becoming the requester there) and remembers who asked; the
+  # answer -- data or NOT_FOUND -- relays back down hop by hop. Only misses
+  # forward, and only the first want for an id/key does; the authority never
+  # forwards (its miss is the real NOT_FOUND).
+  #
+  # A REQUEST only ever arrives from a downstream subscriber that pages from
+  # us; it can't come from one of our own upstreams, since upstreams are
+  # authorities (or page further up) and never send requests back down. If one
+  # does, our copy is a stale subset of theirs and serving it would echo old
+  # state over fresher data -- treat it as a bug (assert in debug, log in
+  # release) but stay safe by not serving.
+  for src in source:
+    if src in self.upstream_ctx_ids:
+      error "request_from_upstream",
+        ctx = self.id, src = src, source = source.to_seq.join(",")
+      assert src notin self.upstream_ctx_ids
+      return
+  for s in self.subscribers:
+    if s.ctx_id notin source:
+      continue
+    if msg.obj.len > 0:
+      # Per-key: serve what we have, chain or NACK the rest. Every requested
+      # key joins the subscriber's key interest -- found or missing -- so its
+      # future ops stream (a missing chunk pops in when someone builds
+      # there). RELEASE retracts.
+      for key_bin in msg.obj.from_flatty(seq[string]):
+        s.key_interest.mget_or_put(msg.object_id, init_hash_set[string]()).incl(
+          key_bin
+        )
+      var missing: seq[string]
+      if msg.object_id in self:
+        let obj = self.objects[msg.object_id]
+        # Handle-first: the requester (or a hub between us) may not hold the
+        # container yet -- a chained request can outrun the closure push that
+        # carries it. An ADD for an unknown object is dropped on arrival and
+        # the want dangles (only the first want per key forwards), so the
+        # entry would never load. The empty-body CREATE is idempotent and
+        # makes the ADDs below always applicable.
+        if not obj.placeholder:
+          obj.publish_create(s, contents = false)
+        for key_bin in msg.obj.from_flatty(seq[string]):
+          let reply = obj.publish_key(obj, key_bin)
+          if reply.found:
+            if self.has_budget: # recency only feeds the cache LRU
+              obj.key_last_read[key_bin] = get_mono_time() # served -> in-view
+            # Per-key deep: nested containers (a chunk's delta seq) go
+            # first so the receiver's parse links them -- and they're
+            # followed, so their future ops (delta appends) stream.
+            for nested_id in reply.nested:
+              if nested_id in self and not self.objects[nested_id].placeholder:
+                s.interest.incl nested_id
+                self.objects[nested_id].publish_create(s)
+            self.send(s, reply.msg, OperationContext(), DEFAULT_FLAGS)
+          else:
+            missing.add key_bin
+      else:
+        missing = msg.obj.from_flatty(seq[string])
+      if missing.len > 0:
+        if self.is_authority:
+          self.send(
+            s,
+            Message(
+              kind: NOT_FOUND,
+              object_id: msg.object_id,
+              obj: missing.to_flatty,
+            ),
+            OperationContext(),
+            DEFAULT_FLAGS,
+          )
+        else:
+          var to_forward: seq[string]
+          for key_bin in missing:
+            if msg.object_id notin self.pending_key_wants:
+              self.pending_key_wants[msg.object_id] =
+                init_table[string, seq[Subscription]]()
+            if key_bin notin self.pending_key_wants[msg.object_id]:
+              to_forward.add key_bin
+              self.pending_key_wants[msg.object_id][key_bin] = @[s]
+            elif s notin self.pending_key_wants[msg.object_id][key_bin]:
+              self.pending_key_wants[msg.object_id][key_bin].add s
+          if to_forward.len > 0:
+            var fwd = msg
+            fwd.obj = to_forward.to_flatty
+            self.forward_request(s, fwd)
+    elif msg.deep:
+      # Deep fetch: the id plus its ownership closure (see publish_closure --
+      # the requested id may be an *owner*, a unit id with no container of its
+      # own, and the walk recurses through owned members into their subtrees).
+      let found = self.publish_closure(s, msg.object_id)
+      # Follow the root id itself even if nothing exists yet: a later CREATE
+      # under this id is then delivered without re-fetching.
+      s.interest.incl msg.object_id
+      if not found:
+        if self.is_authority:
+          self.send(
+            s,
+            Message(kind: NOT_FOUND, object_id: msg.object_id),
+            OperationContext(),
+            DEFAULT_FLAGS,
+          )
+        else:
+          self.add_obj_want(s, msg)
+    else:
+      if msg.object_id in self and not self.objects[msg.object_id].placeholder:
+        s.interest.incl msg.object_id
+        self.objects[msg.object_id].publish_create(s)
+      else:
+        # Missing -- or held only as an unloaded placeholder, which would
+        # serve empty state; chain instead so the real data comes back. Keep
+        # the interest so a later CREATE under this id is delivered.
+        s.interest.incl msg.object_id
+        if self.is_authority:
+          self.send(
+            s,
+            Message(kind: NOT_FOUND, object_id: msg.object_id),
+            OperationContext(),
+            DEFAULT_FLAGS,
+          )
+        else:
+          self.add_obj_want(s, msg)
+
+proc handle_unsubscribe(self: EdContext, source: HashSet[string]) =
+  privileged
+  log_defaults("ed publishing")
+  # A LOCAL peer is leaving. Drop our reverse subscription(s) to it (without
+  # echoing UNSUBSCRIBE back) and record it in `unsubscribed` so consumers
+  # reap what it owned (drain_unsubscribed).
+  for s in self.subscribers.filter_it(it.ctx_id in source):
+    self.unsubscribe(s, notify = false)
+
+proc handle_op(self: EdContext, msg: Message, source: HashSet[string]) =
+  privileged
+  log_defaults("ed publishing")
+  if msg.object_id notin self:
+    # An op for an object we don't hold is dropped. Usually benign
+    # (partial replica, version skew), but a drop on a paging path means a
+    # requested entry silently never loads -- surface the first one per
+    # object so a stalled chain is visible in the logs. DESTROY misses are
+    # fully expected (destroys broadcast past the interest filter so peers
+    # holding self-minted placeholders converge) -- drop them silently.
+    if msg.kind != DESTROY and msg.object_id notin self.warned_missing:
+      self.warned_missing.incl msg.object_id
+      notice "dropping op for missing object",
+        object_id = msg.object_id, kind = msg.kind
+    return
+  let obj = self.objects[msg.object_id]
+  # Eviction accounting: an arriving op for a body we're not reading is churn
+  # (the signal that holding it costs traffic); collection deltas also move
+  # its resident size. Cheap, and only when there's a finite budget to track.
+  if self.has_budget:
+    inc obj.updates
+    if msg.delta and msg.key_bin.len > 0:
+      # Table entry: account per-key so per-key evict can subtract exactly.
+      if msg.kind == ASSIGN:
+        self.set_key_bytes(obj, msg.key_bin, msg.obj.len)
+        obj.key_last_read[msg.key_bin] = get_mono_time() # updated -> recent
+      elif msg.kind == UNASSIGN:
+        self.forget_key_bytes(obj, msg.key_bin)
+    elif msg.delta and msg.kind == ASSIGN:
+      self.set_body_bytes(obj, obj.bytes + msg.obj.len)
+  obj.change_receiver(
+    obj,
+    msg,
+    op_ctx = OperationContext.init(
+      source = source, ctx = self, origin = msg.origin, op_id = msg.op_id
+    ),
+  )
+  if msg.lsn > self.applied_lsn:
+    self.applied_lsn = msg.lsn
+  # Ops (table ADDs) may have brought entries chained key-waiters want.
+  self.serve_key_wants(msg.object_id)
+
+proc process_message(
+    self: EdContext, msg: Message, sub: Subscription = nil
+) {.gcsafe.} =
   privileged
   log_defaults("ed publishing")
 
@@ -1203,455 +1690,23 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     # else: our latest own write -- fall through and apply it.
 
   if msg.kind == PACKED:
-    let ops = msg.obj.from_flatty(seq[PackedMessageOperation])
-    for op in ops:
-      var new_msg = Message(
-        kind: op.kind,
-        object_id: msg.object_id,
-        type_id: msg.type_id,
-        ref_id: op.ref_id,
-        change_object_id: op.change_object_id,
-        obj: op.obj,
-        delta: op.delta,
-        key_bin: op.key_bin,
-        flags: msg.flags,
-        source: msg.source,
-        source_set: msg.source_set,
-        id_mappings: msg.id_mappings,
-      )
-
-      self.process_message(new_msg, sub)
-    if msg.lsn > self.applied_lsn:
-      self.applied_lsn = msg.lsn
+    self.handle_packed(msg, sub)
   elif msg.kind == CREATE:
-    {.gcsafe.}:
-      if msg.type_id notin type_initializers:
-        # Unknown type: a version-skewed peer or a type this context wasn't
-        # compiled with. Skip it rather than aborting -- the consistency layer no
-        # longer needs every object present to trust the rest. (Relaying unknown
-        # types through the authority is a separate, future step.)
-        debug "skipping create for unknown type",
-          type_id = msg.type_id, object_id = msg.object_id
-        return
-
-    {.gcsafe.}:
-      # Stored as a raw pointer (see initializers.register_initializer); cast
-      # back to the materializer proc type to call it.
-      let fn = cast[CreateInitializer](type_initializers[msg.type_id])
-      # Synced ownership: materialize INSIDE the owner's scope, not after -- the
-      # initializer (`defaults`) re-broadcasts the CREATE to our own subscribers
-      # while it runs (a relay: e.g. worker -> node ctx for an object an MCP
-      # client built), so owner_id must be stamped before that re-broadcast or
-      # second-hop contexts receive it unowned.
-      template materialize_it() =
-        fn(
-          msg.obj,
-          self,
-          msg.object_id,
-          msg.flags,
-          OperationContext.init(
-            source = source, ctx = self, origin = msg.origin, op_id = msg.op_id
-          ),
-        )
-
-      if msg.owner_id.len > 0:
-        msg.owner_id.own:
-          materialize_it()
-      else:
-        materialize_it()
-    # Safety net for paths where the initializer fills an existing object (a
-    # placeholder) rather than running `defaults` -- stamp + index after the fact.
-    # Keyed by owner id, so arrival order vs. the owner doesn't matter.
-    if msg.owner_id.len > 0 and msg.object_id in self.objects and
-        ?self.objects[msg.object_id]:
-      let body = self.objects[msg.object_id]
-      # Ownership transfer isn't supported yet, so an object's owner shouldn't
-      # change once set. (When re-home lands, replace this with a drop from
-      # owned_by[body.owner_id] before re-indexing under the new owner.)
-      invariant(
-        body.owner_id.len == 0 or body.owner_id == msg.owner_id,
-        "owner_id changed for " & msg.object_id & ": '" & body.owner_id &
-          "' -> '" & msg.owner_id & "'",
-      )
-      body.owner_id = msg.owner_id
-      self.owned_by.mget_or_put(msg.owner_id, init_hash_set[string]()).incl(
-        msg.object_id
-      )
-    # Interest tiering (Option 2): a body materialized from an upstream CREATE
-    # is one we follow -- mark it live-up so the sweep reconciles its tier as it
-    # goes live/cache here. Only on an evicting partial replica with an upstream.
-    if self.evicts and self.upstream_ctx_ids.len > 0 and
-        msg.object_id in self.objects and self.objects[msg.object_id] != nil:
-      if self.objects[msg.object_id].up_tier == 0:
-        self.objects[msg.object_id].up_tier = up_live
-    # Resolve fetch handles: the object itself and -- for a deep fetch of an
-    # *owner* id -- the owner its containers point back to (the owner has no
-    # container of its own, so its handle resolves via the arriving closure).
-    if msg.object_id in self.fetches:
-      let pending_fetch = self.fetches[msg.object_id]
-      pending_fetch.state = Found
-      if msg.object_id in self.objects and ?self.objects[msg.object_id]:
-        pending_fetch.obj = self.resolve_proxy(self.objects[msg.object_id])
-      self.fetches.del(msg.object_id)
-    if msg.owner_id.len > 0 and msg.owner_id in self.fetches:
-      self.fetches[msg.owner_id].state = Found
-      self.fetches.del(msg.owner_id)
-    # Serve chained wants (see forward_request): whoever asked while we didn't
-    # have it. Deep wants serve the closure -- its CREATEs precede this one
-    # (deepest-first publish); owner-only ids resolve via msg.owner_id.
-    template serve_obj_wants(id: string) =
-      if id in self.pending_obj_wants:
-        let wants = self.pending_obj_wants[id]
-        self.pending_obj_wants.del(id)
-        for want in wants:
-          want.sub.interest.incl id
-          if want.deep:
-            discard self.publish_closure(want.sub, id)
-          elif id in self.objects and ?self.objects[id]:
-            self.objects[id].publish_create(want.sub)
-
-    serve_obj_wants(msg.object_id)
-    if msg.owner_id.len > 0:
-      serve_obj_wants(msg.owner_id)
-    # A fill can bring table entries chained key-waiters are waiting on.
-    self.serve_key_wants(msg.object_id)
-    # The creator is interested in its own object: make sure its canonical ops
-    # flow back. Matters for partial subscribers; a no-op for full ones.
-    for s in self.subscribers:
-      if s.ctx_id in source:
-        s.interest.incl msg.object_id
+    self.handle_create(msg, source)
   elif msg.kind == NOT_FOUND:
-    # The authority NACKed a fetch: resolve the handle so callers (and the
-    # blocking `ctx[]` pump) learn promptly instead of waiting out a deadline,
-    # and relay the answer to any chained waiters (see forward_request).
-    if msg.obj.len > 0:
-      # Per-key NACK: a missing key is a *normal* answer (an empty-space voxel
-      # chunk). Relay per waiter and clear the wants so nothing dangles.
-      if msg.object_id in self.pending_key_wants:
-        for key_bin in msg.obj.from_flatty(seq[string]):
-          if key_bin in self.pending_key_wants[msg.object_id]:
-            for waiter in self.pending_key_wants[msg.object_id][key_bin]:
-              self.send(
-                waiter,
-                Message(
-                  kind: NOT_FOUND,
-                  object_id: msg.object_id,
-                  obj: @[key_bin].to_flatty,
-                ),
-                OperationContext(),
-                DEFAULT_FLAGS,
-              )
-            self.pending_key_wants[msg.object_id].del key_bin
-        if self.pending_key_wants[msg.object_id].len == 0:
-          self.pending_key_wants.del msg.object_id
-    else:
-      if msg.object_id in self.fetches:
-        self.fetches[msg.object_id].state = NotFound
-        self.fetches.del(msg.object_id)
-      if msg.object_id in self.pending_obj_wants:
-        for want in self.pending_obj_wants[msg.object_id]:
-          self.send(
-            want.sub,
-            Message(kind: NOT_FOUND, object_id: msg.object_id),
-            OperationContext(),
-            DEFAULT_FLAGS,
-          )
-        self.pending_obj_wants.del msg.object_id
+    self.handle_not_found(msg)
   elif msg.kind == RELEASE and msg.obj.len == 0:
-    # Whole-object release (evictor): a peer dropped object_id entirely.
-    #  - From a subscriber: an interest retract -- stop streaming it to them.
-    #  - From upstream: an eviction notice -- but a received drop is NEVER
-    #    authoritative over a live local hold (Scott's rule). Evict only if we
-    #    aren't using it ourselves and nobody below us wants it; otherwise keep
-    #    using it and let our own evictor reclaim it when it goes dormant.
-    for s in self.subscribers:
-      if s.ctx_id notin source:
-        continue
-      s.interest.excl msg.object_id
-      s.interest_cache.excl msg.object_id
-      s.key_interest.del msg.object_id
-    var from_upstream = false
-    for src in source:
-      if src in self.upstream_ctx_ids:
-        from_upstream = true
-        break
-    if from_upstream and msg.object_id in self and
-        self.objects[msg.object_id].proxy == nil and
-        not self.any_interest(msg.object_id):
-      self.evict_body(msg.object_id)
+    self.handle_release_object(msg, source)
   elif msg.kind == INTEREST:
-    # Live/cache tier change from a downstream subscriber (Option 2). Demote
-    # moves the object to that subscriber's cache tier -- it still streams, but
-    # no longer protects the object from our eviction; promote moves it back.
-    # Our own up-tier to the authority then reconciles on the next sweep (our
-    # aggregate downstream liveness changed).
-    for s in self.subscribers:
-      if s.ctx_id notin source:
-        continue
-      if msg.object_id notin s.interest:
-        continue
-      if msg.demote:
-        s.interest_cache.incl msg.object_id
-      else:
-        s.interest_cache.excl msg.object_id
+    self.handle_interest(msg, source)
   elif msg.kind == RELEASE:
-    # Per-key paging notice (see `release`). Role decides the meaning:
-    #  - From a subscriber that pages from us: an interest retract -- stop
-    #    streaming those keys (and the nested containers that rode in with
-    #    them). Our copy is untouched; we may serve others.
-    #  - From *upstream*: an eviction notice -- our data source dropped the
-    #    keys, and we're a clone of it, so they're gone for us too. Evict
-    #    locally (REMOVED fires, watches un-render) and relay downstream.
-    # A full clone of a full source never receives one (full sources don't
-    # release); the authority has no upstream, so it only ever retracts.
-    let keys = msg.obj.from_flatty(seq[string])
-    var retracted = false
-    for s in self.subscribers:
-      if s.ctx_id notin source:
-        continue
-      if msg.object_id in s.key_interest:
-        retracted = true
-        for key_bin in keys:
-          s.key_interest[msg.object_id].excl key_bin
-          # Shed the keys' nested containers (the chunk's delta seq) from the
-          # follow set, so their ops stop streaming as well.
-          if msg.object_id in self:
-            let obj = self.objects[msg.object_id]
-            let reply = obj.publish_key(obj, key_bin)
-            for nested_id in reply.nested:
-              s.interest.excl nested_id
-        if s.key_interest[msg.object_id].len == 0:
-          s.key_interest.del msg.object_id
-        # A release can outrun an in-flight chained request: drop the
-        # subscriber from any pending wants so the late answer isn't served
-        # to someone who no longer wants it (re-materializing a paged-out key).
-        if msg.object_id in self.pending_key_wants:
-          for key_bin in keys:
-            if key_bin in self.pending_key_wants[msg.object_id]:
-              self.pending_key_wants[msg.object_id][key_bin] =
-                self.pending_key_wants[msg.object_id][key_bin].filter_it(
-                  it.ctx_id != s.ctx_id
-                )
-    if retracted and self.sync_mode != FULL and not self.is_authority and
-        self.mem_limit == 0:
-      # No-cache hub: shed immediately (the symmetric counterpart of request
-      # chaining). When the last interest in a key retracts, drop our copy and
-      # chain the release upstream. A caching hub (mem_limit > 0) instead KEEPS
-      # the key -- it becomes cache-tier (no live downstream wants it), stays
-      # current via the stream, and the per-key cache LRU sheds it under our
-      # own pressure (so a downstream's release doesn't force us to refetch on
-      # its return).
-      for key_bin in keys:
-        var still_wanted = false
-        for s in self.subscribers:
-          if msg.object_id in s.key_interest and
-              key_bin in s.key_interest[msg.object_id]:
-            still_wanted = true
-            break
-        if not still_wanted:
-          if msg.object_id in self:
-            let obj = self.objects[msg.object_id]
-            if obj.evict_key != nil:
-              let evicted = obj.evict_key(obj, key_bin)
-              self.drop_nested_bodies(evicted.nested)
-          self.pending_key_releases.mget_or_put(msg.object_id, @[]).add key_bin
-    if not retracted:
-      var from_upstream = false
-      for src in source:
-        if src in self.upstream_ctx_ids:
-          from_upstream = true
-          break
-      if from_upstream:
-        if msg.object_id in self:
-          let obj = self.objects[msg.object_id]
-          if obj.evict_key != nil:
-            for key_bin in keys:
-              let evicted = obj.evict_key(obj, key_bin)
-              self.drop_nested_bodies(evicted.nested)
-        if not self.is_authority:
-          # Relay to our own subscribers (downstream clones); the accumulated
-          # source stops it echoing back the way it came.
-          var fwd_source = source
-          fwd_source.incl self.id
-          for s in self.subscribers:
-            if s.ctx_id notin fwd_source:
-              self.send(
-                s, msg, OperationContext(source: fwd_source), DEFAULT_FLAGS
-              )
+    self.handle_release_keys(msg, source)
   elif msg.kind == REQUEST:
-    # A partial subscriber wants data. Two forms:
-    #  - whole-object (`obj` empty): add the object to interest and publish_create
-    #    it (existing behavior -- future ops then follow).
-    #  - per-key (`obj` = a batch of serialized table keys): reply with just those
-    #    entries (an ADD op each), without adding the whole table to interest.
-    # The requester is whoever the message came from -- match by ctx id in `source`.
-    #
-    # Request chaining: a hub that can't serve a request forwards it to its
-    # upstream(s) (becoming the requester there) and remembers who asked; the
-    # answer -- data or NOT_FOUND -- relays back down hop by hop. Only misses
-    # forward, and only the first want for an id/key does; the authority never
-    # forwards (its miss is the real NOT_FOUND).
-    #
-    # A REQUEST only ever arrives from a downstream subscriber that pages from
-    # us; it can't come from one of our own upstreams, since upstreams are
-    # authorities (or page further up) and never send requests back down. If one
-    # does, our copy is a stale subset of theirs and serving it would echo old
-    # state over fresher data -- treat it as a bug (assert in debug, log in
-    # release) but stay safe by not serving.
-    for src in source:
-      if src in self.upstream_ctx_ids:
-        error "request_from_upstream",
-          ctx = self.id, src = src, source = source.to_seq.join(",")
-        assert src notin self.upstream_ctx_ids
-        return
-    for s in self.subscribers:
-      if s.ctx_id notin source:
-        continue
-      if msg.obj.len > 0:
-        # Per-key: serve what we have, chain or NACK the rest. Every requested
-        # key joins the subscriber's key interest -- found or missing -- so its
-        # future ops stream (a missing chunk pops in when someone builds
-        # there). RELEASE retracts.
-        for key_bin in msg.obj.from_flatty(seq[string]):
-          s.key_interest.mget_or_put(msg.object_id, init_hash_set[string]()).incl(
-            key_bin
-          )
-        var missing: seq[string]
-        if msg.object_id in self:
-          let obj = self.objects[msg.object_id]
-          # Handle-first: the requester (or a hub between us) may not hold the
-          # container yet -- a chained request can outrun the closure push that
-          # carries it. An ADD for an unknown object is dropped on arrival and
-          # the want dangles (only the first want per key forwards), so the
-          # entry would never load. The empty-body CREATE is idempotent and
-          # makes the ADDs below always applicable.
-          if not obj.placeholder:
-            obj.publish_create(s, contents = false)
-          for key_bin in msg.obj.from_flatty(seq[string]):
-            let reply = obj.publish_key(obj, key_bin)
-            if reply.found:
-              if self.has_budget: # recency only feeds the cache LRU
-                obj.key_last_read[key_bin] = get_mono_time() # served -> in-view
-              # Per-key deep: nested containers (a chunk's delta seq) go
-              # first so the receiver's parse links them -- and they're
-              # followed, so their future ops (delta appends) stream.
-              for nested_id in reply.nested:
-                if nested_id in self and not self.objects[nested_id].placeholder:
-                  s.interest.incl nested_id
-                  self.objects[nested_id].publish_create(s)
-              self.send(s, reply.msg, OperationContext(), DEFAULT_FLAGS)
-            else:
-              missing.add key_bin
-        else:
-          missing = msg.obj.from_flatty(seq[string])
-        if missing.len > 0:
-          if self.is_authority:
-            self.send(
-              s,
-              Message(
-                kind: NOT_FOUND,
-                object_id: msg.object_id,
-                obj: missing.to_flatty,
-              ),
-              OperationContext(),
-              DEFAULT_FLAGS,
-            )
-          else:
-            var to_forward: seq[string]
-            for key_bin in missing:
-              if msg.object_id notin self.pending_key_wants:
-                self.pending_key_wants[msg.object_id] =
-                  init_table[string, seq[Subscription]]()
-              if key_bin notin self.pending_key_wants[msg.object_id]:
-                to_forward.add key_bin
-                self.pending_key_wants[msg.object_id][key_bin] = @[s]
-              elif s notin self.pending_key_wants[msg.object_id][key_bin]:
-                self.pending_key_wants[msg.object_id][key_bin].add s
-            if to_forward.len > 0:
-              var fwd = msg
-              fwd.obj = to_forward.to_flatty
-              self.forward_request(s, fwd)
-      elif msg.deep:
-        # Deep fetch: the id plus its ownership closure (see publish_closure --
-        # the requested id may be an *owner*, a unit id with no container of its
-        # own, and the walk recurses through owned members into their subtrees).
-        let found = self.publish_closure(s, msg.object_id)
-        # Follow the root id itself even if nothing exists yet: a later CREATE
-        # under this id is then delivered without re-fetching.
-        s.interest.incl msg.object_id
-        if not found:
-          if self.is_authority:
-            self.send(
-              s,
-              Message(kind: NOT_FOUND, object_id: msg.object_id),
-              OperationContext(),
-              DEFAULT_FLAGS,
-            )
-          else:
-            self.add_obj_want(s, msg)
-      else:
-        if msg.object_id in self and not self.objects[msg.object_id].placeholder:
-          s.interest.incl msg.object_id
-          self.objects[msg.object_id].publish_create(s)
-        else:
-          # Missing -- or held only as an unloaded placeholder, which would
-          # serve empty state; chain instead so the real data comes back. Keep
-          # the interest so a later CREATE under this id is delivered.
-          s.interest.incl msg.object_id
-          if self.is_authority:
-            self.send(
-              s,
-              Message(kind: NOT_FOUND, object_id: msg.object_id),
-              OperationContext(),
-              DEFAULT_FLAGS,
-            )
-          else:
-            self.add_obj_want(s, msg)
+    self.handle_request(msg, source)
   elif msg.kind == UNSUBSCRIBE:
-    # A LOCAL peer is leaving. Drop our reverse subscription(s) to it (without
-    # echoing UNSUBSCRIBE back) and record it in `unsubscribed` so consumers
-    # reap what it owned (drain_unsubscribed).
-    for s in self.subscribers.filter_it(it.ctx_id in source):
-      self.unsubscribe(s, notify = false)
+    self.handle_unsubscribe(source)
   elif msg.kind != BLANK:
-    if msg.object_id notin self:
-      # An op for an object we don't hold is dropped. Usually benign
-      # (partial replica, version skew), but a drop on a paging path means a
-      # requested entry silently never loads -- surface the first one per
-      # object so a stalled chain is visible in the logs. DESTROY misses are
-      # fully expected (destroys broadcast past the interest filter so peers
-      # holding self-minted placeholders converge) -- drop them silently.
-      if msg.kind != DESTROY and msg.object_id notin self.warned_missing:
-        self.warned_missing.incl msg.object_id
-        notice "dropping op for missing object",
-          object_id = msg.object_id, kind = msg.kind
-      return
-    let obj = self.objects[msg.object_id]
-    # Eviction accounting: an arriving op for a body we're not reading is churn
-    # (the signal that holding it costs traffic); collection deltas also move
-    # its resident size. Cheap, and only when there's a finite budget to track.
-    if self.has_budget:
-      inc obj.updates
-      if msg.delta and msg.key_bin.len > 0:
-        # Table entry: account per-key so per-key evict can subtract exactly.
-        if msg.kind == ASSIGN:
-          self.set_key_bytes(obj, msg.key_bin, msg.obj.len)
-          obj.key_last_read[msg.key_bin] = get_mono_time() # updated -> recent
-        elif msg.kind == UNASSIGN:
-          self.forget_key_bytes(obj, msg.key_bin)
-      elif msg.delta and msg.kind == ASSIGN:
-        self.set_body_bytes(obj, obj.bytes + msg.obj.len)
-    obj.change_receiver(
-      obj,
-      msg,
-      op_ctx = OperationContext.init(
-        source = source, ctx = self, origin = msg.origin, op_id = msg.op_id
-      ),
-    )
-    if msg.lsn > self.applied_lsn:
-      self.applied_lsn = msg.lsn
-    # Ops (table ADDs) may have brought entries chained key-waiters want.
-    self.serve_key_wants(msg.object_id)
+    self.handle_op(msg, source)
   else:
     fail "Can't recv a blank message"
 
@@ -1813,6 +1868,92 @@ proc drop_remote_conn(self: EdContext, conn: Connection) =
       self.unsubscribe(s)
       break
 
+proc handle_subscribe(
+    self: EdContext, msg: Message, conn: Connection
+) {.gcsafe.} =
+  ## A remote SUBSCRIBE arrived: register the subscriber (dropping any
+  ## subscription it supersedes), ACK with our object ids, and pump the reactor
+  ## so the ACK and any follow-on traffic flow.
+  # New subscriber - create subscription and extract their ID from mappings
+  var source_str = ""
+  if msg.id_mappings.len > 0 and msg.source.len > 0:
+    # First mapping with matching short ID is the sender's ID
+    for (short_id, full_id) in msg.id_mappings:
+      if msg.source.len > 0 and short_id == msg.source[0]:
+        source_str = full_id
+        break
+  if source_str == "":
+    source_str = "unknown"
+
+  # Drop any subscription that this SUBSCRIBE supersedes. Two
+  # conditions both warrant a sweep:
+  #   1. Same ctx_id -- the client reused its stable id (same
+  #      process reconnect, or a deterministically-assigned id).
+  #      Without this the old subscription persists until netty's
+  #      ~10s keepalive timeout, during which the publisher can
+  #      route messages back to the reconnected peer via the
+  #      stale route.
+  #   2. Same remote endpoint -- a previous client at that
+  #      address/port has been replaced by a new process that
+  #      happened to get the same UDP source port. Different
+  #      ctx_ids, but routing to the old sub's endpoint would now
+  #      land in the new process's reactor.
+  let new_addr_str = $conn.address
+  let stale = self.subscribers.filter_it(
+    it.kind == REMOTE and (
+      (source_str != "" and source_str != "unknown" and
+        it.ctx_id == source_str) or
+      $it.connection.address == new_addr_str
+    )
+  )
+  for sub in stale:
+    debug "dropping superseded subscription",
+      old_ctx_id = sub.ctx_id, new_ctx_id = source_str
+    self.unsubscribe(sub)
+
+  # Handshake (capabilities, partial, fetch ids) rides in the SUBSCRIBE `obj`.
+  # Empty (older peer) = unfiltered, full replica.
+  var caps: HashSet[int]
+  var is_partial = false
+  var interest: HashSet[string]
+  var is_deep = false
+  if msg.obj.len > 0:
+    let (cap_ids, p, fetch_ids, d) =
+      msg.obj.from_flatty((seq[int], bool, seq[string], bool))
+    caps = cap_ids.to_hash_set
+    is_partial = p
+    is_deep = d
+    interest = fetch_ids.to_hash_set
+
+  var new_sub = Subscription(
+    kind: REMOTE,
+    connection: conn,
+    ctx_id: source_str,
+    last_sent_time: epoch_time(),
+    capabilities: caps,
+    partial: is_partial,
+    deep: is_deep,
+    interest: interest,
+  )
+  # Register all mappings from the subscribe message
+  new_sub.register_mappings(msg.id_mappings)
+
+  var remote: HashSet[string]
+  self.add_subscriber(new_sub, push_all = true, remote)
+
+  self.pack_objects
+  var objects = self.objects.keys.to_seq.join(":")
+
+  let ack_data = "ACK:" & self.id & ":" & objects
+  self.bytes_sent += ack_data.len
+  self.reactor.send(conn, ack_data)
+  sent_message_counter.inc(label_values = [self.metrics_label])
+  self.reactor.tick
+  self.dead_connections &= self.reactor.dead_connections
+  for msg in self.reactor.messages:
+    self.bytes_received += msg.data.len
+  self.remote_messages &= self.reactor.messages
+
 proc tick*(
     self: EdContext,
     messages = int.high,
@@ -1950,85 +2091,7 @@ proc tick*(
             break
 
         if msg.kind == SUBSCRIBE:
-          # New subscriber - create subscription and extract their ID from mappings
-          var source_str = ""
-          if msg.id_mappings.len > 0 and msg.source.len > 0:
-            # First mapping with matching short ID is the sender's ID
-            for (short_id, full_id) in msg.id_mappings:
-              if msg.source.len > 0 and short_id == msg.source[0]:
-                source_str = full_id
-                break
-          if source_str == "":
-            source_str = "unknown"
-
-          # Drop any subscription that this SUBSCRIBE supersedes. Two
-          # conditions both warrant a sweep:
-          #   1. Same ctx_id -- the client reused its stable id (same
-          #      process reconnect, or a deterministically-assigned id).
-          #      Without this the old subscription persists until netty's
-          #      ~10s keepalive timeout, during which the publisher can
-          #      route messages back to the reconnected peer via the
-          #      stale route.
-          #   2. Same remote endpoint -- a previous client at that
-          #      address/port has been replaced by a new process that
-          #      happened to get the same UDP source port. Different
-          #      ctx_ids, but routing to the old sub's endpoint would now
-          #      land in the new process's reactor.
-          let new_addr_str = $raw_msg.conn.address
-          let stale = self.subscribers.filter_it(
-            it.kind == REMOTE and (
-              (source_str != "" and source_str != "unknown" and
-                it.ctx_id == source_str) or
-              $it.connection.address == new_addr_str
-            )
-          )
-          for sub in stale:
-            debug "dropping superseded subscription",
-              old_ctx_id = sub.ctx_id, new_ctx_id = source_str
-            self.unsubscribe(sub)
-
-          # Handshake (capabilities, partial, fetch ids) rides in the SUBSCRIBE `obj`.
-          # Empty (older peer) = unfiltered, full replica.
-          var caps: HashSet[int]
-          var is_partial = false
-          var interest: HashSet[string]
-          var is_deep = false
-          if msg.obj.len > 0:
-            let (cap_ids, p, fetch_ids, d) =
-              msg.obj.from_flatty((seq[int], bool, seq[string], bool))
-            caps = cap_ids.to_hash_set
-            is_partial = p
-            is_deep = d
-            interest = fetch_ids.to_hash_set
-
-          var new_sub = Subscription(
-            kind: REMOTE,
-            connection: raw_msg.conn,
-            ctx_id: source_str,
-            last_sent_time: epoch_time(),
-            capabilities: caps,
-            partial: is_partial,
-            deep: is_deep,
-            interest: interest,
-          )
-          # Register all mappings from the subscribe message
-          new_sub.register_mappings(msg.id_mappings)
-
-          var remote: HashSet[string]
-          self.add_subscriber(new_sub, push_all = true, remote)
-
-          self.pack_objects
-          var objects = self.objects.keys.to_seq.join(":")
-
-          let ack_data = "ACK:" & self.id & ":" & objects
-          self.bytes_sent += ack_data.len
-          self.reactor.send(raw_msg.conn, ack_data)
-          sent_message_counter.inc(label_values = [self.metrics_label])
-          self.reactor.tick
-          self.dead_connections &= self.reactor.dead_connections
-          for msg in self.reactor.messages:
-            self.bytes_received += msg.data.len
-          self.remote_messages &= self.reactor.messages
+          self.handle_subscribe(msg, raw_msg.conn)
         else:
           # Regular message - decode source using subscription's mappings
           if sub != nil:
