@@ -541,8 +541,9 @@ type
   ) {.gcsafe.}
     ## Stored callback shape: the live proxy arrives as a *parameter* (`it`),
     ## never a capture -- parameters pin nothing, so a watcher written against
-    ## `it` lets its proxy die promptly at refcount zero. `it` is nil only for
-    ## CLOSED notifications fired after the proxy is already gone.
+    ## `it` lets its proxy die promptly at refcount zero. `it` is the live proxy,
+    ## resolved (and minted if none is currently held) per fire; nil only for a
+    ## body with no context, which never fires callbacks.
 
   EdBody*[T, O] = ref object of EdBodyBase
     ## Typed body: the canonical data AND the callbacks live here -- registry-

@@ -9,6 +9,7 @@
 import std/[tables, sets, atomics]
 import ed/[core, types {.all.}]
 import ed/zens/private
+import ed/utils/logging
 
 # --- eviction byte accounting (partial replicas; docs/partial-replicas.md) ----
 
@@ -174,6 +175,11 @@ proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
     return body.proxy
   if body.mint != nil:
     return body.mint()
+  # A registered body always carries its typed `mint` (wired in `defaults`), so
+  # one of the branches above returns. Reaching here means a released or
+  # malformed body slipped into an identity read -- a bug, surfaced rather than
+  # silently returning nil. nil is safe to limp past in release.
+  invariant(false, "resolve_proxy: body " & body.id & " has neither proxy nor mint")
 
 # --- Lifetime: owner-bound teardown ------------------------------------------
 
