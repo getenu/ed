@@ -16,7 +16,7 @@ import ed/[core, types {.all.}], ed/zens/[contexts, private, initializers {.all.
 import ed/components/private/global_state
 import ed/lifecycle
 import ../type_registry
-import ./[wire, publish, eviction, paging]
+import ./[wire {.all.}, publish {.all.}, eviction {.all.}, paging {.all.}]
 
 privileged
 
