@@ -643,17 +643,21 @@ proc add_subscriber*(
         from_ctx = self.id, to_ctx = sub.ctx_id, ed_id = id
 
 proc unsubscribe*(self: EdContext, sub: Subscription) =
+  # Snapshot the id before the delete below: `sub` is a borrowed param (ORC
+  # doesn't refcount parameters), and the seq slot is the only owner, so the
+  # delete frees it -- every later read must use this local, not `sub`.
+  let ctx_id = sub.ctx_id
   if sub.kind == REMOTE:
     self.reactor.disconnect(sub.connection)
   else:
     # ???
     discard
   self.subscribers.delete self.subscribers.find(sub)
-  self.unsubscribed.add sub.ctx_id
+  self.unsubscribed.add ctx_id
   # Purge the subscriber's chained wants so nothing is served to a dead sub.
   var empty_ids: seq[string]
   for id, wants in self.pending_obj_wants.mpairs:
-    wants = wants.filter_it(it.sub.ctx_id != sub.ctx_id)
+    wants = wants.filter_it(it.sub.ctx_id != ctx_id)
     if wants.len == 0:
       empty_ids.add id
   for id in empty_ids:
@@ -662,7 +666,7 @@ proc unsubscribe*(self: EdContext, sub: Subscription) =
   for id, keys in self.pending_key_wants.mpairs:
     var empty_keys: seq[string]
     for key_bin, waiters in keys.mpairs:
-      waiters = waiters.filter_it(it.ctx_id != sub.ctx_id)
+      waiters = waiters.filter_it(it.ctx_id != ctx_id)
       if waiters.len == 0:
         empty_keys.add key_bin
     for key_bin in empty_keys:
@@ -1199,11 +1203,17 @@ proc process_message(self: EdContext, msg: Message, sub: Subscription = nil) =
     # forward, and only the first want for an id/key does; the authority never
     # forwards (its miss is the real NOT_FOUND).
     #
-    # Never serve a REQUEST from our own upstream: our copy is a stale subset
-    # of theirs, and answering would echo old state back over fresher data.
-    # (Requests route upstream-only, so this shouldn't normally arrive.)
+    # A REQUEST only ever arrives from a downstream subscriber that pages from
+    # us; it can't come from one of our own upstreams, since upstreams are
+    # authorities (or page further up) and never send requests back down. If one
+    # does, our copy is a stale subset of theirs and serving it would echo old
+    # state over fresher data -- treat it as a bug (assert in debug, log in
+    # release) but stay safe by not serving.
     for src in source:
       if src in self.upstream_ctx_ids:
+        error "request_from_upstream",
+          ctx = self.id, src = src, source = source.to_seq.join(",")
+        assert src notin self.upstream_ctx_ids
         return
     for s in self.subscribers:
       if s.ctx_id notin source:
