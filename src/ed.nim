@@ -23,8 +23,8 @@ export monotimes
 import pkg/[threading/channels, flatty]
 export channels, flatty
 
-import ed/[types, zens, components, utils]
-export types, zens, components, utils
+import ed/[types, zens, components, utils, lifecycle]
+export types, zens, components, utils, lifecycle
 
 import ed/client
 export client
