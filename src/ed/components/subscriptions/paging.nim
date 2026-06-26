@@ -43,18 +43,15 @@ proc serve_key_wants(self: EdContext, object_id: string) =
 proc request_targets(self: EdContext): seq[Subscription] =
   ## Who to send a REQUEST to: our upstreams (the contexts we page from).
   ## Never downstream -- a clone's copy of us is stale-by-definition, and
-  ## letting it answer can overwrite fresher local state with its echo. Only a
-  ## non-authority forwards, and a non-authority pages from a recorded upstream,
-  ## so this is non-empty in practice. An empty result means a degenerate
-  ## topology (a non-authority with no upstream); rather than fall back to all
-  ## subscribers -- which could route the request downstream -- treat it as a bug
-  ## (assert in debug, log in release) and forward nowhere.
+  ## letting it answer can overwrite fresher local state with its echo.
+  ## Empty means no *live* upstream right now -- normally a transient reconnect
+  ## window (the link dropped and we haven't re-subscribed). Callers must handle
+  ## empty gracefully (`fetch` resolves NotFound; a disconnected partial replica
+  ## simply can't page) -- never fall back to all subscribers, which could route
+  ## a request downstream.
   for sub in self.subscribers:
     if sub.ctx_id in self.upstream_ctx_ids:
       result.add sub
-  if result.len == 0:
-    error "request_with_no_upstream", ctx = self.id
-    assert false, "request_targets: forwarding with no recorded upstream"
 
 proc forward_request(self: EdContext, requester: Subscription, msg: Message) =
   ## Chain a request we can't serve: send it to our upstream(s).
@@ -110,8 +107,15 @@ proc fetch*(
     return self.fetches[object_id]
   result = Fetch(id: object_id, state: Pending)
   self.fetches[object_id] = result
+  let targets = self.request_targets
+  if targets.len == 0:
+    # No live upstream to page from (a disconnected partial replica). Resolve the
+    # handle now instead of forwarding into the void; the data arrives via the
+    # reconnect's full resubscribe, and a later re-fetch mints a fresh handle.
+    result.state = NotFound
+    return
   var msg = Message(kind: REQUEST, object_id: object_id, deep: deep)
-  for sub in self.request_targets:
+  for sub in targets:
     self.send(sub, msg, OperationContext(), DEFAULT_FLAGS)
   self.tick_reactor
 

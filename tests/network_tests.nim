@@ -1,10 +1,10 @@
-import std/[tables, sugar, unittest, sequtils, strutils]
+import std/[tables, sugar, unittest, sequtils, strutils, sets]
 import pkg/[flatty, chronicles, netty]
 import ed
 import ed/types {.all.}
 import ed/zens/private {.all.}
 import test_util
-from std/times import init_duration
+from std/times import init_duration, epoch_time
 
 const recv_duration = init_duration(milliseconds = 10)
 
@@ -311,6 +311,37 @@ proc run*() =
     check "wd_cli" notin server.subscribers.map_it(it.ctx_id) # connection dropped
     check "wd_cli" in server.drain_unsubscribed # ...and reported for reaping
     server.close
+
+  test "a real upstream timeout leaves fetch resolving NotFound, not crashing":
+    # A PARTIAL_ASYNC replica whose upstream times out (netty connTimeout) used to
+    # crash on the next fetch: the sub is reaped but the id stays in the append-only
+    # upstream_ctx_ids, so request_targets found a recorded-but-dead upstream. Drive
+    # a genuine timeout (clock-jump the reactor past connTimeout) and confirm fetch
+    # degrades to NotFound -- the data returns via the reconnect's resubscribe.
+    let host = free_addr()
+    var
+      authority = EdContext.init(id = "rt_auth", listen_address = host)
+      client = EdContext.init(id = "rt_cli")
+    client.subscribe host,
+      mode = PARTIAL_ASYNC,
+      callback = proc() =
+        authority.tick(blocking = false)
+    var recorded = authority.id in client.upstream_ctx_ids
+    check recorded
+    check client.subscribers.len == 1
+
+    # Jump the client's reactor clock past connTimeout (10s): a sleep/wake or a
+    # >10s starved thread reaches the same state with zero real inactivity.
+    client.reactor.debug.tick_time = epoch_time() + 11.0
+    client.tick(blocking = false) # timeoutConnections -> dead -> unsubscribe
+
+    check client.subscribers.len == 0 # upstream sub reaped...
+    recorded = authority.id in client.upstream_ctx_ids # ...but still recorded
+    check recorded
+    let handle = client.fetch("rt_missing")
+    check handle.state == NotFound # no crash
+    authority.close
+    client.close
 
 when is_main_module:
   Ed.bootstrap

@@ -81,6 +81,20 @@ proc unsubscribe*(self: EdContext, sub: Subscription, notify = true) =
     self.send(sub, Message(kind: UNSUBSCRIBE), OperationContext(), DEFAULT_FLAGS)
   self.subscribers.delete self.subscribers.find(sub)
   self.unsubscribed.add ctx_id
+  # If that was our last live upstream, fail any in-flight fetches rather than
+  # leaving them Pending forever: a disconnected partial replica can't page, and
+  # a reconnect re-pages from scratch anyway. (Without this, a blocking
+  # materialize would wait out its full deadline on a fetch that can never land.)
+  if ctx_id in self.upstream_ctx_ids:
+    var still_upstream = false
+    for s in self.subscribers:
+      if s.ctx_id in self.upstream_ctx_ids:
+        still_upstream = true
+        break
+    if not still_upstream:
+      for f in self.fetches.values:
+        if f.state == Pending:
+          f.state = NotFound
   # Purge the subscriber's chained wants so nothing is served to a dead sub.
   var empty_ids: seq[string]
   for id, wants in self.pending_obj_wants.mpairs:

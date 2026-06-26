@@ -281,6 +281,42 @@ proc run*() =
       check handle.state == NotFound
       check "does_not_exist" notin client
 
+    test "disconnected partial replica: fetch resolves NotFound, doesn't crash":
+      var authority = EdContext.init(id = "dc_auth", is_authority = true)
+      var client = EdContext.init(id = "dc_client")
+      var x = EdValue[int].init(ctx = authority, id = "dc_x")
+      x.value = 7
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
+      client.tick()
+
+      # Simulate the upstream link dropping: remove the client's subscription to
+      # the authority, leaving a partial replica with a recorded-but-gone
+      # upstream (upstream_ctx_ids is append-only).
+      for sub in client.subscribers:
+        if sub.ctx_id == "dc_auth":
+          client.unsubscribe(sub, notify = false)
+          break
+      check "dc_auth" in client.upstream_ctx_ids # still recorded, but no live sub
+
+      # A fetch now has no live upstream to page from. It must resolve NotFound,
+      # not assert (the old request_targets invariant crashed here).
+      let handle = client.fetch("dc_x")
+      check handle.state == NotFound
+
+    test "losing the upstream fails in-flight fetches instead of hanging them":
+      var authority = EdContext.init(id = "df_auth", is_authority = true)
+      var client = EdContext.init(id = "df_client")
+      client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
+      client.tick()
+
+      let handle = client.fetch("df_missing")
+      check handle.state == Pending # in flight, request sent upstream
+      for sub in client.subscribers:
+        if sub.ctx_id == "df_auth":
+          client.unsubscribe(sub, notify = false)
+          break
+      check handle.state == NotFound # resolved on disconnect, not left Pending
+
     test "follow (default): a missing fetch is delivered when created later":
       var authority = EdContext.init(id = "fl_auth", is_authority = true)
       var client = EdContext.init(id = "fl_client")
