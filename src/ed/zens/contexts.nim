@@ -203,14 +203,13 @@ proc tick_keepalives*(self: EdContext) {.gcsafe.} =
   ## Lightweight tick that only sends keepalives if enough time has passed.
   ## Safe to call frequently - won't do anything if called too soon.
   ## Call this after long operations (file I/O, etc.) to prevent connection timeouts.
-  const keepalive_interval = 5.0  ## Seconds between keepalive pings to idle connections
-  const keepalive_tick_interval = 3.0  ## Seconds between keepalive-only ticks
+  const keepalive_interval = 3.0  ## Seconds between keepalive pings / pumps
 
   if not ?self.reactor:
     return
 
   let now = epoch_time()
-  if now - self.last_keepalive_tick < keepalive_tick_interval:
+  if now - self.last_keepalive_tick < keepalive_interval:
     return
 
   self.last_keepalive_tick = now
