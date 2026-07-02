@@ -189,8 +189,37 @@ template ed_compress(s: string): string =
   ## so both sides agree on the (un)compressed wire format.
   when defined(ed_no_compress): s else: s.compress
 
-template ed_uncompress(s: string): string =
-  when defined(ed_no_compress): s else: s.uncompress
+const max_decompressed_body = 64 * 1024 * 1024
+  ## Ceiling on a decompressed remote body. supersnappy reads the target size
+  ## from the stream's leading varint and `setLen`s it up front, so a tiny
+  ## hostile packet could otherwise demand gigabytes before any data is
+  ## validated. Larger than any legitimate ed message; a claim past it means the
+  ## packet is malformed or hostile.
+
+proc snappy_declared_len(s: string): int =
+  ## The uncompressed length from a snappy stream's leading LEB128 varint,
+  ## without decoding the body. `-1` if the header is truncated or malformed, so
+  ## the caller can reject it before supersnappy allocates.
+  var shift = 0
+  var n = 0'i64
+  for i in 0 ..< min(s.len, 10):  # a 64-bit varint is at most 10 bytes
+    let b = s[i].uint8
+    n = n or (int64(b and 0x7f) shl shift)
+    if (b and 0x80) == 0:
+      return (if n < 0: -1 else: n.int)
+    shift += 7
+  -1
+
+proc ed_uncompress(s: string): string =
+  when defined(ed_no_compress):
+    s
+  else:
+    let declared = s.snappy_declared_len
+    if declared < 0 or declared > max_decompressed_body:
+      raise newException(
+        FlattyError, "remote body decompressed size out of range: " & $declared
+      )
+    s.uncompress
 
 proc remote_body(msg: Message, no_overwrite: bool): string =
   ## The shared, compressed wire body for a remote message -- identical across

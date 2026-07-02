@@ -2,7 +2,7 @@ import
   ed, basic_tests, threading_tests, network_tests, publish_tests,
   object_tests, utils_tests, validation_tests, error_handling_tests, memory_tests,
   lsn_tests, client_tests, partial_tests, capability_tests, materialize_tests,
-  lifetime_tests, ctx_teardown_tests
+  lifetime_tests, ctx_teardown_tests, wire_hardening_tests
 
 Ed.bootstrap
 
@@ -22,3 +22,4 @@ capability_tests.run()
 materialize_tests.run()
 lifetime_tests.run()
 ctx_teardown_tests.run()
+wire_hardening_tests.run()

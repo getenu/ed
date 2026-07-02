@@ -11,7 +11,7 @@ import
     strutils, macros, os, heapqueue,
   ]
 import pkg/threading/channels {.all.}
-import pkg/[flatty, supersnappy]
+import pkg/flatty
 import ed/[core, types {.all.}], ed/zens/[contexts, private, initializers {.all.}]
 import ed/components/private/global_state
 import ed/lifecycle
@@ -1136,13 +1136,24 @@ proc tick*(
             sub = s
             break
 
-        if msg.kind == SUBSCRIBE:
-          self.handle_subscribe(msg, raw_msg.conn)
-        else:
-          # Regular message - decode source using subscription's mappings
-          if sub != nil:
-            sub.register_mappings(msg.id_mappings)
-          self.process_message(msg, sub)
+        try:
+          if msg.kind == SUBSCRIBE:
+            self.handle_subscribe(msg, raw_msg.conn)
+          else:
+            # Regular message - decode source using subscription's mappings
+            if sub != nil:
+              sub.register_mappings(msg.id_mappings)
+            self.process_message(msg, sub)
+        except FlattyError as e:
+          # A nested wire field -- typically a registered-type payload inside
+          # msg.obj, decoded here rather than in parse_remote's envelope check --
+          # was malformed or hostile (a length prefix past the buffer). Tear the
+          # peer down like any other unparseable input instead of letting the
+          # error escape tick and crash us.
+          warn "dropping peer after undecodable payload",
+            peer = $raw_msg.conn.address, reason = e.msg
+          self.drop_remote_conn(raw_msg.conn)
+          continue
 
     if poll == false or
         ((count > 0 or not blocking) and get_mono_time() > recv_until):
@@ -1201,7 +1212,15 @@ proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
             s.register_mappings(rmsg.id_mappings)
             rmsg.source_set = s.decode_source(rmsg.source)
             break
-        triage(rmsg)
+        try:
+          triage(rmsg)
+        except FlattyError as e:
+          # Same guard as tick's remote loop: an undecodable payload during a
+          # blocking materialize drops the peer instead of escaping the read.
+          warn "dropping peer after undecodable payload",
+            peer = $raw_msg.conn.address, reason = e.msg
+          self.drop_remote_conn(raw_msg.conn)
+          continue
   self.silent = false
 
 when defined(ed_debug_messages):
