@@ -4,7 +4,12 @@
 !*.*
 
 nimbledeps/
-deps/
+# Ignore the Atlas-managed dep checkouts and machine-specific caches, but keep
+# atlas.config tracked -- it's the portable resolution policy (e.g. the flatty
+# pkgOverride). Contents-glob (not `deps/`) so the exception can re-include a
+# child; a bare directory ignore can't be negated.
+deps/*
+!deps/atlas.config
 nimcache/
 nimblecache/
 htmldocs/
