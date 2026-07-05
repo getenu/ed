@@ -76,27 +76,48 @@ proc materialize_received*[T, O](
       let item = Ed.init(value, ctx = ctx, id = id, flags = flags, op_ctx)
       ctx.set_body_bytes(item.body, bin.len) # evictor accounting
     elif not ctx.subscribing:
-      debug "restoring received object", id
-      var value = bin.from_flatty(T, ctx)
       let item = Ed[T, O](ctx[id])
-      let was_placeholder = item.placeholder
-      let prev_filling = ctx.filling # save: `value=` may nest a fill
-      ctx.filling = was_placeholder # fill of a placeholder -> tag Fill
-      item.placeholder = false # fill: real state arrived
-      `value=`(item, value, op_ctx = op_ctx)
-      ctx.filling = prev_filling # restore (not unconditionally false)
-      ctx.set_body_bytes(item.body, bin.len) # evictor accounting
-      if was_placeholder:
-        relay_fill(item, op_ctx)
+      if not item.placeholder and not ctx.from_upstream(op_ctx):
+        # A CREATE for an object we already hold *materialized*, arriving from a
+        # non-upstream -- e.g. the bidirectional reverse leg (a peer pushing its
+        # own writes up to us) or another context that independently created the
+        # same id. Establish existence only; do NOT overwrite live local content.
+        # Only an upstream (our data source / authority) is authoritative enough
+        # to overwrite -- that's what lets a subscriber adopt the authority's
+        # state on subscribe. An empty collection serializes to a non-empty `bin`
+        # (a length-0 prefix), so without this guard a same-id CREATE from a peer
+        # silently resets our contents. See getenu/ed#28.
+        debug "ignoring non-upstream CREATE for materialized object", id
+      else:
+        # Fill a placeholder, or adopt an upstream's authoritative content.
+        debug "restoring received object", id
+        var value = bin.from_flatty(T, ctx)
+        let was_placeholder = item.placeholder
+        let prev_filling = ctx.filling # save: `value=` may nest a fill
+        ctx.filling = was_placeholder # fill of a placeholder -> tag Fill
+        item.placeholder = false # fill: real state arrived
+        `value=`(item, value, op_ctx = op_ctx)
+        ctx.filling = prev_filling # restore (not unconditionally false)
+        ctx.set_body_bytes(item.body, bin.len) # evictor accounting
+        if was_placeholder:
+          relay_fill(item, op_ctx)
     else:
-      if id notin ctx:
+      let existed = id in ctx
+      if not existed:
         discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
 
       let initializer = proc() =
+        let item = Ed[T, O](ctx[id])
+        if existed and not item.placeholder and not ctx.from_upstream(op_ctx):
+          # Pre-existing materialized object with a non-upstream CREATE: don't
+          # clobber live local content (getenu/ed#28). An upstream CREATE still
+          # overwrites (so subscribe adopts the authority's state). When we minted
+          # it above, `existed` is false, so the fill still runs.
+          debug "ignoring non-upstream deferred CREATE for materialized object", id
+          return
         debug "deferred restore of received object value", id
         {.gcsafe.}:
           let value = bin.from_flatty(T, ctx)
-        let item = Ed[T, O](ctx[id])
         let was_placeholder = item.placeholder
         let prev_filling = ctx.filling # save: `value=` may nest a fill
         ctx.filling = was_placeholder # fill of a placeholder -> tag Fill
@@ -328,6 +349,13 @@ proc defaults[T, O](
         UNASSIGN
       else:
         fail "Can't build message for changes " & $change.changes
+
+    if change.positional:
+      # Positional seq op: carry (index, shift) in key_bin (unused by seqs
+      # otherwise) so the replica applies at the same position rather than
+      # appending / removing by value.
+      {.gcsafe.}:
+        msg.key_bin = (change.index, change.shift).to_flatty
     result = msg
 
   self.body.change_receiver = proc(
@@ -402,9 +430,32 @@ proc defaults[T, O](
           item = msg.obj.from_flatty(O, self.ctx)
 
     if msg.kind == ASSIGN:
-      self.assign(item, op_ctx = op_ctx)
+      when T is seq:
+        if msg.key_bin.len > 0:
+          # Positional replace (see set_at): apply at the same index instead of
+          # appending. Out of range means a prior op was lost/reordered so the
+          # slot isn't here yet -- append to keep the element rather than drop it.
+          let (index, _) = msg.key_bin.from_flatty((int, bool))
+          if index < self.len:
+            self.set_at(index, item, op_ctx)
+          else:
+            self.assign(item, op_ctx = op_ctx)
+        else:
+          self.assign(item, op_ctx = op_ctx)
+      else:
+        self.assign(item, op_ctx = op_ctx)
     elif msg.kind == UNASSIGN:
-      self.unassign(item, op_ctx = op_ctx)
+      when T is seq:
+        if msg.key_bin.len > 0:
+          # Positional removal: remove the same index (reproducing swap vs
+          # shift). Out of range -> the element is already gone here; skip.
+          let (index, shift) = msg.key_bin.from_flatty((int, bool))
+          if index < self.len:
+            self.remove_at(index, shift, op_ctx)
+        else:
+          self.unassign(item, op_ctx = op_ctx)
+      else:
+        self.unassign(item, op_ctx = op_ctx)
     elif msg.kind == TOUCH:
       self.touch(item, op_ctx = op_ctx)
     else:

@@ -12,6 +12,26 @@ proc init*[T](
     item: item, changes: changes, type_name: $Change[T], field_name: field_name
   )
 
+proc init*[T](
+    _: type Change,
+    item: T,
+    changes: set[ChangeKind],
+    index: int,
+    shift = false,
+    field_name = "",
+): Change[T] =
+  ## A positional change (see BaseChange.positional): a seq op addressed by
+  ## `index` rather than by value, so replicas apply it at the same position.
+  result = Change[T](
+    item: item,
+    changes: changes,
+    type_name: $Change[T],
+    field_name: field_name,
+    positional: true,
+    index: index,
+    shift: shift,
+  )
+
 proc init*(
     _: type OperationContext,
     source: HashSet[string] = init_hash_set[string](),

@@ -181,14 +181,59 @@ proc `[]=`*[K, V](
   self.ctx.setup_op_ctx
   self.put(key, value, touch = false, op_ctx)
 
+proc set_at*[T, O](self: Ed[T, O], index: int, value: O, op_ctx: OperationContext) =
+  ## Positional replace at `index` (T is `seq[O]`). Emits REMOVED(old) +
+  ## ADDED(new), both keyed by the index. The REMOVED+MODIFIED half fires local
+  ## watches (a replace reads as remove-then-add) but isn't sent -- publish_changes
+  ## drops REMOVED+MODIFIED; the ADDED half goes on the wire as a positional
+  ## ASSIGN so replicas replace in place instead of appending. Mirrors EdTable
+  ## `[]=`, keyed by index rather than table key.
+  privileged
+  let old = self.tracked[index]
+  self.tracked[index] = value
+  let changes = @[
+    Change.init(old, {REMOVED, MODIFIED}, index = index),
+    Change.init(value, {ADDED, MODIFIED}, index = index),
+  ]
+  self.link_or_unlink(@[changes[0]], false)
+  self.link_or_unlink(@[changes[1]], true)
+  when O isnot Ed and O is ref:
+    self.ctx.ref_count(changes, self.id)
+  self.publish_changes(changes, op_ctx)
+  self.trigger_callbacks(changes)
+
+proc remove_at*[T, O](
+    self: Ed[T, O], index: int, shift: bool, op_ctx: OperationContext
+) =
+  ## Positional removal at `index` (T is `seq[O]`). `shift` picks order-preserving
+  ## `delete` vs Nim's swap `del`; it rides the wire so the replica reproduces the
+  ## same reordering. Emits a REMOVED keyed by the index -> UNASSIGN.
+  privileged
+  let obj = self.tracked[index]
+  if shift:
+    self.tracked.delete(index)
+  else:
+    self.tracked.del(index)
+  let removed = @[Change.init(obj, {REMOVED}, index = index, shift = shift)]
+  self.link_or_unlink(removed, false)
+  when O isnot Ed and O is ref:
+    self.ctx.ref_count(removed, self.id)
+  self.publish_changes(removed, op_ctx)
+  self.trigger_callbacks(removed)
+
 proc `[]=`*[T](
     self: EdSeq[T], index: SomeOrdinal, value: T, op_ctx = OperationContext()
 ) =
   self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   assert self.valid
-  mutate(op_ctx):
-    self.tracked[index] = value
+  if index.int < self.tracked.len:
+    self.set_at(index.int, value, op_ctx)
+  else:
+    # Out of range: unreachable on the owner (Nim would defect on tracked[i]=);
+    # on a replica it means a prior op was lost or reordered so the slot isn't
+    # here yet. Append to keep the element rather than crash or drop it.
+    self.add(value, op_ctx)
 
 proc add*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
   ## Add an item to a sequence container.
@@ -233,8 +278,8 @@ proc del*[T: seq, O](
   self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   assert self.valid
-  if index < self.tracked.len:
-    remove(self, index, self.tracked[index], del, op_ctx)
+  if index.int < self.tracked.len:
+    self.remove_at(index.int, shift = false, op_ctx)
 
 proc delete*[T, O](self: Ed[T, O], value: O) =
   assert self.valid
@@ -263,10 +308,8 @@ proc delete*[K, V](self: EdTable[K, V], key: K) =
 proc delete*[T: seq, O](self: Ed[T, O], index: SomeOrdinal) =
   assert self.valid
   self.materialize_for_write
-  if index < self.tracked.len:
-    remove(
-      self, index, self.tracked[index], delete, op_ctx = OperationContext()
-    )
+  if index.int < self.tracked.len:
+    self.remove_at(index.int, shift = true, op_ctx = OperationContext())
 
 proc touch*[K, V](
     self: EdTable[K, V], pair: Pair[K, V], op_ctx: OperationContext
