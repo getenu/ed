@@ -132,6 +132,14 @@ type
     triggered_by*: seq[BaseChange]
     triggered_by_type*: string
     type_name*: string
+    # Positional seq ops (`[]=`, indexed `del`/`delete`) are addressed by index,
+    # not value: the wire carries `index` (in key_bin) so a replica replaces /
+    # removes at the same position instead of the value-based append/remove that
+    # loses order. `shift` distinguishes a removal's semantics: shift-delete
+    # (order-preserving) vs swap-del (Nim's O(1) `del`). Unset for value ops.
+    positional*: bool
+    index*: int
+    shift*: bool
 
   OperationContext = object
     source*: HashSet[string]

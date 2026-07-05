@@ -16,6 +16,16 @@ import ed/lifecycle
 
 export EdContext
 
+proc from_upstream*(self: EdContext, op_ctx: OperationContext): bool =
+  ## Whether `op_ctx` originated from (or passed through) one of our upstreams --
+  ## our data source / authority. A non-upstream op (a downstream peer's writes,
+  ## the bidirectional reverse leg) is not authoritative over our local state, so
+  ## callers use this to avoid letting a peer's message clobber a live local hold.
+  for src in op_ctx.source:
+    if src in self.upstream_ctx_ids:
+      return true
+  false
+
 proc init_metrics*(_: type EdContext, labels: varargs[string]) =
   for label in labels:
     pressure_gauge.set(0.0, label_values = [label])
