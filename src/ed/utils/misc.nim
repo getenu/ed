@@ -55,6 +55,8 @@ type
 
   ConnectionError* = object of ZenError
 
+  StoreError* = object of ZenError
+
 # Exceptions
 
 template fail*(msg: string) =

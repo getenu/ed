@@ -1,2 +1,2 @@
-import components/[subscriptions, type_registry]
-export subscriptions, type_registry
+import components/[subscriptions, type_registry, store]
+export subscriptions, type_registry, store

@@ -307,6 +307,32 @@ type
     state*: FetchState
     obj*: ref EdBase
 
+  StoreDurability* = enum
+    ## When an appended op is considered committed (docs/persistence.md) -- the
+    ## durability-ladder rungs that exist today. Quorum replication is a future
+    ## rung on the same commit path.
+    FlushPerTick  ## buffered appends, flushed to the OS once per tick (default)
+    FsyncPerTick  ## flush + fsync once per tick
+    FsyncPerOp    ## flush + fsync after every append
+
+  EdStore* = ref object
+    ## The durable store attached to an authority context: append-only JSONL log
+    ## segments + snapshot directories under `path` (docs/persistence.md). The
+    ## layout is git-shaped on purpose -- rotated segments are immutable, a
+    ## snapshot is per-object files sealed by a manifest -- so a future "an ed
+    ## project is a git repo" layer commits the directory as-is.
+    path*: string
+    epoch*: int64            ## this session's epoch (max seen + 1 at open)
+    read_only*: bool         ## a replay view: no segment, appends forbidden
+    durability*: StoreDurability
+    snapshot_every*: int     ## appended entries between auto-snapshots (0 = manual)
+    retain_snapshots*: int   ## snapshot dirs kept; covered segments pruned with them
+    segment*: File           ## active append segment (nil when read_only)
+    segment_name*: string    ## relative to `path`
+    snapshot_name*: string   ## newest snapshot dir, relative to `path` ("" = none)
+    entries_since_snapshot*: int
+    dirty*: bool             ## unflushed buffered appends
+
   EdContext* = ref object
     ## Central coordination object managing `Ed` container lifecycle, subscriptions,
     ## and message passing between threads/network.
@@ -324,6 +350,19 @@ type
     applied_lsn*: int64   # highest global LSN applied (frontier)
     op_id_counter*: int64 # next op id to assign to a write we originate
     latest_op_id*: Table[string, int64]  # object_id -> our highest op id (own-op reconciliation)
+    # Phase 2: durable log + snapshots (docs/persistence.md)
+    store*: EdStore       # nil = no persistence
+    epoch*: int64         # authority epoch, stamped onto ordered ops; bumped on
+                          # every store open so a restarted authority's ops are
+                          # distinguishable from a stale incarnation's
+    seen_epoch*: int64    # follower: highest epoch observed on a stamped op. A
+                          # higher one resets the frontier -- the restarted
+                          # authority may legitimately reissue LSNs it never
+                          # made durable
+    replaying*: bool      # a restore/replay is feeding the log back through
+                          # process_message: bypass the loopback/own-op guards
+                          # (entries carry our own id) and suppress
+                          # publish/stamp/append (nothing new is happening)
     # Materialize-on-access (partial replicas). `materialize` is wired up at
     # subscribe time (it needs fetch/tick) and called by the read accessors when
     # they touch a placeholder. In PARTIAL the call pumps I/O until the object
@@ -483,6 +522,14 @@ type
     build_message: proc(
       body: ref EdBodyBase, change: BaseChange, id: string, trace: string
     ): Message {.gcsafe.}
+
+    # The canonical CREATE for this body right now. `contents = false` skips
+    # serializing `tracked` entirely (a handle -- the LAZY push; serializing a
+    # big table just to blank it is the cost LAZY exists to avoid); `true` is
+    # the full dump regardless of LAZY, shared by publish_create (wire) and
+    # the snapshot writer (disk).
+    build_create:
+      proc(body: ref EdBodyBase, contents: bool): Message {.gcsafe.}
 
     publish_create: proc(
       sub = Subscription(),

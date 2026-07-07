@@ -11,6 +11,7 @@ import pkg/flatty
 import ed/[core, types {.all.}], ed/zens/[contexts, private, initializers {.all.}]
 import ed/components/private/global_state
 import ed/lifecycle
+import ed/components/store/log as store_log
 import ./wire {.all.}
 
 privileged
@@ -56,6 +57,13 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
   privileged
   log_defaults("ed publishing")
 
+  # A replayed DESTROY re-enters here via change_receiver; publishing it again
+  # would stamp a fresh LSN and re-append it to the log every restart. Nothing
+  # new is happening during replay -- skip. (No subscribers exist then either;
+  # restore runs before anything attaches.)
+  if self.ctx.replaying:
+    return
+
   trace "publishing destroy", ed_id = self.id
   # Build the DESTROY once and stamp it with the global LSN (authority only),
   # so every subscriber receives the same ordered op. DESTROY is ordered like
@@ -73,6 +81,8 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
   when defined(ed_trace):
     msg.trace = \"{get_stack_trace()}\n\nop:\n{op_ctx.trace}"
   self.ctx.stamp_lsn(msg)
+  if self.ctx.logs_ops:
+    self.ctx.store.append(msg, self.ctx.epoch, self.flags)
 
   let targets = self.ctx.subscribers.filter_it(it.ctx_id notin op_ctx.source)
   self.ctx.fanout(msg, op_ctx, self.flags, targets)
@@ -164,8 +174,16 @@ proc publish_changes*[T, O](
   privileged
   log_defaults("ed publishing")
   trace "publish_changes", op_ctx
-  if self.ctx.subscribers.len > 0:
-    var has_eligible = false
+  # Replay feeds logged ops back through the apply machinery; re-publishing
+  # them would re-stamp and re-append. Nothing new is happening -- skip.
+  if self.ctx.replaying:
+    return
+  if self.ctx.subscribers.len > 0 or self.ctx.logs_ops:
+    # The store counts as a permanently-eligible subscriber: a headless
+    # authority (no subscribers yet, or only the op's originator) must still
+    # build, stamp, and append its canonical ops or they'd never become
+    # durable. Only the fanout below stays gated on real subscribers.
+    var has_eligible = self.ctx.logs_ops
     for sub in self.ctx.subscribers:
       if sub.ctx_id notin op_ctx.source:
         has_eligible = true
@@ -261,6 +279,14 @@ proc publish_changes*[T, O](
         if originating:
           self.ctx.latest_op_id[msg.object_id] = out_op_id
         self.ctx.stamp_lsn(msg)
+
+      # Append between stamp and fanout: an op's durable form is exactly what
+      # fans out, and an op is never visible to peers in an order the log
+      # doesn't have. (The per-key sends above are per-subscriber lsn-0
+      # duplicates of these packed ops -- they must not be captured.)
+      if self.ctx.logs_ops:
+        for msg in msgs:
+          self.ctx.store.append(msg, self.ctx.epoch, self.flags)
 
       if self.ctx.is_authority:
         # Canonical ops originate from the authority. Re-origin the source to us

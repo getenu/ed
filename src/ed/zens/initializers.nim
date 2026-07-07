@@ -4,6 +4,7 @@ import ed/components/private/global_state
 import ed/types {.all.}, ed/zens/[operations, contexts, private]
 import ed/lifecycle
 import ed/utils/misc # ZenError
+import ed/components/store/log as store_log
 
 # `quote do` (in create_initializer) expands to code referencing `new_ident_node`,
 # so it must be in scope here. Re-exported so it also resolves at `Ed.bootstrap`
@@ -47,6 +48,15 @@ proc relay_fill*[T, O](item: Ed[T, O], op_ctx: OperationContext) =
     item.owner_id = current_owner_id
     item.ctx.owned_by.mget_or_put(current_owner_id, init_hash_set[string]()).incl(
       item.id
+    )
+  # A fill is the one place a placeholder becomes a real object, so it's the
+  # log's creation event for objects whose CREATE arrived after something
+  # referenced them. The bin carries the just-filled contents, which also
+  # covers the fill's own ASSIGN having hit the log before this CREATE (replay
+  # drops ops for unknown ids; the CREATE bin restores the same state).
+  if item.ctx.logs_ops:
+    item.ctx.store.append(
+      item.body.build_create(item.body, true), item.ctx.epoch, item.flags
     )
   item.publish_create(broadcast = true, op_ctx = op_ctx)
 
@@ -246,6 +256,30 @@ proc defaults[T, O](
       self.owner_id = current_owner_id
       ctx.owned_by.mget_or_put(current_owner_id, init_hash_set[string]()).incl(self.id)
 
+  self.body.build_create = proc(
+      body: ref EdBodyBase, contents: bool
+  ): Message {.gcsafe.} =
+    # The canonical CREATE for this body right now. `contents = false` is a
+    # handle (empty-body CREATE; the LAZY push) and skips serialization
+    # entirely. Param-based like build_message -- captures nothing, needs no
+    # release.
+    let bin =
+      if contents:
+        let self = Ed[T, O](body.ctx.resolve_proxy(body))
+        {.gcsafe.}:
+          self.tracked.to_flatty
+      else:
+        ""
+    Message(
+      kind: CREATE,
+      obj: bin,
+      flags: body.flags,
+      type_id: Ed[T, O].tid,
+      object_id: body.id,
+      owner_id: body.owner_id, # synced ownership (see EdBase.owner_id)
+      # source is set by send() based on subscription type
+    )
+
   self.body.publish_create = proc(
       sub: Subscription,
       broadcast: bool,
@@ -255,31 +289,16 @@ proc defaults[T, O](
     log_defaults "ed publishing"
     trace "publish_create", sub
 
-    {.gcsafe.}:
-      # `contents = false` sends a handle: an empty-body CREATE (id + flags,
-      # no data). Used to push LAZY containers to partial subscribers -- the
-      # receiver registers a placeholder and pulls entries per-key.
-      let bin = if contents: body.tracked.to_flatty else: ""
-    let id = body.id
-    let owner_id = body.owner_id
-    let flags = body.flags
+    # `contents = false` sends a handle: an empty-body CREATE (id + flags,
+    # no data). Used to push LAZY containers to partial subscribers -- the
+    # receiver registers a placeholder and pulls entries per-key.
+    let create_msg = body.build_create(body, contents)
 
     template send_msg(src_ctx, sub) =
-      const ed_type_id = Ed[T, O].tid
-
       # Capability filter: don't send an object to a peer that can't materialize
       # its type. Empty `capabilities` = unfiltered (same-build / no handshake).
-      if sub.capabilities.len == 0 or ed_type_id in sub.capabilities:
-        var msg = Message(
-          kind: CREATE,
-          obj: bin,
-          flags: flags,
-          type_id: ed_type_id,
-          object_id: id,
-          owner_id: owner_id,  # synced ownership (see EdBase.owner_id)
-          # source is set by send() based on subscription type
-        )
-
+      if sub.capabilities.len == 0 or create_msg.type_id in sub.capabilities:
+        var msg = create_msg
         when defined(ed_trace):
           msg.trace = get_stack_trace()
 
@@ -292,7 +311,7 @@ proc defaults[T, O](
     if broadcast:
       for sub in ctx.subscribers:
         if sub.ctx_id notin op_ctx.source and
-            not (sub.partial and id notin sub.interest):
+            not (sub.partial and create_msg.object_id notin sub.interest):
           ctx.send_msg(sub)
     ctx.tick_reactor
 
@@ -530,6 +549,12 @@ proc defaults[T, O](
   self.ctx = ctx
 
   if broadcast:
+    # The log's creation event: once per object, here rather than in
+    # publish_create (which re-fires per subscriber and would duplicate). The
+    # bin is the default value -- Ed.init(tracked) mutates *after* defaults, so
+    # initial content reaches the log as the subsequent stamped ops.
+    if ctx.logs_ops:
+      ctx.store.append(body.build_create(body, true), ctx.epoch, body.flags)
     self.publish_create(broadcast = true, op_ctx = op_ctx)
   self
 
