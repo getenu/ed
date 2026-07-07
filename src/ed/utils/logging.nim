@@ -23,7 +23,10 @@ when chronicles_enabled == "on":
   template log_defaults*(log_topics = "ed") =
     log_scope:
       topics = log_topics
-      thread_ctx = active_ctx.id
+      # A thread that only uses explicit contexts never mints the implicit
+      # thread ctx -- an unguarded active_ctx.id turns the first emitted
+      # warn/notice on it into a nil deref.
+      thread_ctx = (if active_ctx == nil: "" else: active_ctx.id)
 
 else:
   # Don't include chronicles unless it's specifically enabled.
