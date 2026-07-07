@@ -525,12 +525,18 @@ The axes worth holding in mind, each with a now/later verdict:
 ## Roadmap (order matters)
 
 > **Status:** Phase 1 is **done** and validated in Enu (branch
-> `feat/lsn-leader-ordering`, PR #10). Phase 0's forwarding partial subscriber is
-> still parked; Phases 2+ are future. Per-object `mode` (optimistic/confirmed)
-> and gap/replay buffering ended up **deferred** rather than landing in Phase 1 —
-> the implemented reconciliation is state-based forward correction with the
-> `op_id`-superseded rule (see `consistency.md`), not LWW-snap +
-> op-replay.
+> `feat/lsn-leader-ordering`, PR #10). Phase 2 is **done** (see
+> `persistence.md`): authority-side JSONL log + snapshot dirs + restart-restore
+> + `EdContext.replay` time-travel, with the git-shaped store layout. Reserve-now
+> items 1 (epoch+lsn on every op — epoch now real), 2 (first-class commit
+> point), 3 (idempotent-by-LSN replay), 4 (txn_id/commit/schema slots in the
+> log format), and 9 (op ids in entries) now have concrete homes; TypeSchema
+> content-versioning is still future (only the slots exist). Phase 0's
+> forwarding partial subscriber is still parked. Per-object `mode`
+> (optimistic/confirmed) and gap/replay buffering ended up **deferred** rather
+> than landing in Phase 1 — the implemented reconciliation is state-based
+> forward correction with the `op_id`-superseded rule (see `consistency.md`),
+> not LWW-snap + op-replay.
 
 - **Phase 0 — Plumbing (now, low risk).** Rebase onto main. Land forwarding
   partial subscriber (still parked). Defer / re-aim the schema work.
@@ -539,9 +545,11 @@ The axes worth holding in mind, each with a now/later verdict:
   reconciliation (op_id-superseded for registers, delta-dedup for collections);
   `authority` = host. Delivers eventual consistency + smooth optimistic writes.
   *Deferred from this phase:* durable log, per-object `mode`, gap/replay buffer.
-- **Phase 2 — Durable log + snapshots.** Persist the ordered stream; snapshot
-  for compaction; schema-versioned log format. Full-replica time-travel/replay
-  falls out — prototype early as a debug/replay tool to validate the design.
+- **Phase 2 — Durable log + snapshots. *(done — `persistence.md`)*** Persist
+  the ordered stream; snapshot for compaction; schema-versioned log format.
+  Full-replica time-travel/replay falls out (`EdContext.replay`). *Deferred
+  from this phase:* serving live fetch misses from the log (lands with
+  authority eviction), TypeSchema content versioning.
 - **Phase 3 — Interest-based partial sync.** Subscribe to subsets; filtered,
   LSN-tagged delivery; convert presence assertions → lazy-fetch hooks;
   materialize-on-access.

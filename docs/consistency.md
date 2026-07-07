@@ -84,6 +84,8 @@ delivery (latest canonical value per object per tick) removes optimistic flicker
 
 *Not built:* OCC/versioned writes, ack/commit callback (the `op_id` plumbing
 exists; #10), snapshot-vs-delta resync threshold, stricter delete-vs-update policy.
+The ordered stream is now also **durable** on the authority — log, snapshots,
+restart-restore, replay — see `persistence.md`.
 
 ## Transport & schema compatibility
 
