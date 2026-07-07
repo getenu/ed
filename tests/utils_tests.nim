@@ -1,6 +1,6 @@
 import std/[unittest, monotimes, tables, strutils]
 import ed
-import ed/utils/[stats, misc, typeids]
+import ed/utils/[stats, misc, typeids, crc32]
 from std/times import seconds, init_duration
 
 proc run*() =
@@ -95,6 +95,13 @@ proc run*() =
 
     # Test maybe_dump_stats (won't actually dump in test)
     maybe_dump_stats()
+
+  test "crc32 known vectors":
+    check:
+      crc32("123456789") == 0xcbf43926'u32
+      crc32("") == 0'u32
+      crc32("The quick brown fox jumps over the lazy dog") == 0x414fa339'u32
+      crc32_hex("123456789") == "cbf43926"
 
   test "type IDs":
     type
