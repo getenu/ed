@@ -16,6 +16,8 @@ import ed/[core, types {.all.}], ed/zens/[contexts, private, initializers {.all.
 import ed/components/private/global_state
 import ed/lifecycle
 import ../type_registry
+import ../store/log as store_log
+import ../store/snapshot as store_snapshot
 import ./[wire {.all.}, publish {.all.}, eviction {.all.}, paging {.all.}]
 
 privileged
@@ -803,16 +805,41 @@ proc process_message(
         fallback.incl $id
       fallback
 
-  if self.id in source:
+  if self.id in source and not self.replaying:
     # Our own id in the source set means a message looped back to us -- the
     # publish-side source filter should prevent it. Skip rather than risk
     # double-applying it, and warn so a routing regression stays visible.
+    # (Replay is the sanctioned exception: logged entries are our own ops.)
     warn "dropping message that looped back to its source",
       ctx = self.id, kind = $msg.kind, source = source.to_seq.join(",")
     return
 
   received_message_counter.inc(label_values = [self.metrics_label])
   debug "receiving", msg, topics = "networking"
+
+  # A stamped op from a newer authority epoch: the authority restarted from its
+  # store (or a successor took over). It may legitimately reissue LSNs its
+  # predecessor fanned out but never made durable, so adopt the new timeline --
+  # reset the frontier instead of stale-dropping everything the new incarnation
+  # sends (docs/persistence.md). Trusted only from an upstream (the same rule
+  # as content overwrites): epoch is a bare wire field, and letting any peer
+  # zero the frontier re-opens delta ops to double-application. Not during
+  # replay: a restored authority's own log spans epochs, but its LSNs are
+  # monotonic across them by construction.
+  if msg.lsn > 0 and msg.epoch > self.seen_epoch and not self.replaying:
+    var from_up = false
+    for src in source:
+      if src in self.upstream_ctx_ids:
+        from_up = true
+        break
+    if from_up:
+      if self.seen_epoch > 0:
+        debug "authority epoch advanced; resetting frontier",
+          seen = self.seen_epoch, epoch = msg.epoch,
+          frontier = self.applied_lsn
+        self.applied_lsn = 0
+        self.latest_op_id.clear
+      self.seen_epoch = msg.epoch
 
   # Ordered-op idempotency: a stamped op at or below our frontier was already
   # applied or superseded -- drop it. lsn == 0 (CREATE / unordered) always
@@ -831,7 +858,11 @@ proc process_message(
   #    snapping back to its own stale echoes. Our *latest* own write (op_id ==
   #    latest) is applied, so a contended register still converges to the
   #    canonical value. (The op_id-superseded rule; see consistency.md.)
-  if msg.origin == self.id:
+  # Replay bypasses this entirely: logged entries carry our own origin, but
+  # nothing was "already applied optimistically" on a fresh registry -- the
+  # delta short-circuit would silently drop every collection op we ever
+  # originated. The LSN frontier above still dedups double-covered segments.
+  if msg.origin == self.id and not self.replaying:
     let superseded =
       msg.delta or
       msg.op_id < self.latest_op_id.get_or_default(msg.object_id, 0'i64)
@@ -1158,6 +1189,15 @@ proc tick*(
     if poll == false or
         ((count > 0 or not blocking) and get_mono_time() > recv_until):
       break
+
+  # Durable-store maintenance: auto-snapshot on the ops-since-snapshot
+  # threshold, then make this tick's buffered appends durable (the per-tick
+  # commit point -- see StoreDurability).
+  if self.logs_ops:
+    if self.store.snapshot_every > 0 and
+        self.store.entries_since_snapshot >= self.store.snapshot_every:
+      self.snapshot()
+    self.store.commit
 
 proc materialize_impl(self: EdContext, id: string) {.gcsafe.} =
   ## Wired onto a context at subscribe time and called by the read accessors when

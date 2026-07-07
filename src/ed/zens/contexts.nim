@@ -13,6 +13,7 @@ import
 
 import ./private
 import ed/lifecycle
+import ed/components/store/log as store_log
 
 export EdContext
 
@@ -164,6 +165,14 @@ proc stamp_lsn*(self: EdContext, msg: var Message) =
   if self.is_authority and msg.lsn == 0 and
       msg.kind in {ASSIGN, UNASSIGN, TOUCH, DESTROY, PACKED}:
     msg.lsn = self.next_lsn
+    msg.epoch = self.epoch
+
+proc logs_ops*(self: EdContext): bool =
+  ## Whether this context appends canonical ops to a durable log right now.
+  ## Replay feeds logged ops back through the apply machinery, so it must never
+  ## publish/stamp/append -- nothing new is happening (docs/persistence.md).
+  self.is_authority and self.store != nil and not self.store.read_only and
+    not self.replaying
 
 proc `[]`*[T, O](self: EdContext, src: Ed[T, O]): Ed[T, O] =
   result = Ed[T, O](self.resolve_proxy(self.objects[src.id]))
@@ -242,14 +251,25 @@ proc tick_keepalives*(self: EdContext) {.gcsafe.} =
   self.harvest_reactor
 
 proc clear*(self: EdContext) =
-  ## Remove all objects from this context.
+  ## Remove all objects from this context. Raises `StoreError` on a
+  ## store-backed authority: a wiped registry with no messages would silently
+  ## desync the log from canonical state -- there is no CLEAR op.
+  if self.store != nil and not self.store.read_only:
+    raise StoreError.init(
+      "can't clear a store-backed authority; destroy objects instead"
+    )
   debug "Clearing EdContext"
   self.objects.clear
   self.latest_op_id.clear
   self.objects_need_packing = false
 
 proc close*(self: EdContext) =
-  ## Close network connections and cleanup resources.
+  ## Close network connections and cleanup resources. Detaches the store --
+  ## leaving it attached with its segment closed would make the next mutation
+  ## append to a nil File.
+  if ?self.store:
+    self.store.close_store
+    self.store = nil
   if ?self.reactor:
     private_access Reactor
     self.reactor.socket.close()
