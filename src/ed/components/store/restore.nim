@@ -56,13 +56,24 @@ proc load_snapshot(
     return (true, manifest, lines)
 
 proc restore_state(
-    self: EdContext, path: string, to_lsn: int64
+    self: EdContext, path: string, to_lsn: int64, allow_schema_mismatch = false
 ): tuple[max_lsn: int64, max_own_op: int64] =
   ## Snapshot + tail replay onto a fresh context, bounded by `to_lsn`
   ## (int64.high = everything). Caller sets/clears `replaying`.
   assert self.replaying
   var watermark = 0'i64
   let (found, manifest, lines) = load_snapshot(path, to_lsn)
+  if found and manifest.schema != 0 and manifest.schema != ED_SCHEMA_VERSION and
+      not allow_schema_mismatch:
+    # The store was written by a build with a different app-schema version
+    # (a persisted type changed shape). tid = hash(name) can't detect that per
+    # object, so materializing would deserialize garbage silently. Refuse
+    # loudly; `allow_schema_mismatch` is the "I know it's compatible" override.
+    raise StoreError.init(
+      "store schema version " & $manifest.schema & " != build's " &
+        $ED_SCHEMA_VERSION & " (a persisted type changed); pass " &
+        "allow_schema_mismatch = true to open anyway"
+    )
   if not found:
     # No usable snapshot means the log must reach back to genesis, or the
     # restore would silently canonize a truncated world (retention prunes
@@ -143,12 +154,14 @@ proc open_store*(
     snapshot_every = 0,
     durability = FlushPerTick,
     retain_snapshots = 2,
+    allow_schema_mismatch = false,
 ): EdStore {.discardable.} =
   ## Attach a durable store to an authority context, restoring any existing
   ## state from it first. A post-init call, before anything subscribes and
   ## before the context holds objects (mirrors `subscribe`); everything the
   ## context does afterwards is logged. The registered-type set must match the
-  ## build that wrote the store.
+  ## build that wrote the store; opening a store whose `schema` slot differs
+  ## from `ED_SCHEMA_VERSION` raises unless `allow_schema_mismatch` is set.
   do_assert self.is_authority,
     "only the authority context persists; a follower replicates from it"
   do_assert self.store == nil, "store already open"
@@ -185,7 +198,7 @@ proc open_store*(
 
   self.replaying = true
   try:
-    discard self.restore_state(path, to_lsn = int64.high)
+    discard self.restore_state(path, int64.high, allow_schema_mismatch)
   finally:
     self.replaying = false
 
@@ -207,12 +220,15 @@ proc replay*(
     path: string,
     to_lsn: int64 = int64.high,
     id = "replay-" & generate_id(),
+    allow_schema_mismatch = false,
 ): EdContext =
   ## A read-only historical view of a store as of `to_lsn` -- the time-travel
   ## debug tool. Fresh non-authority context, no segment opened, no epoch
   ## bump, no HEAD write: it can coexist with the live authority on the same
   ## store directory. Writes on the view are local-only and never persisted.
-  ## History below the retention horizon raises StoreError.
+  ## History below the retention horizon raises StoreError. A schema-version
+  ## mismatch raises unless `allow_schema_mismatch` is set (inspecting an
+  ## older-build store is a legitimate reason to override).
   let snaps = scan_snapshots(path)
   let segments = scan_segments(path)
   if to_lsn != int64.high:
@@ -230,6 +246,6 @@ proc replay*(
   result.store = EdStore(path: path, read_only: true)
   result.replaying = true
   try:
-    discard result.restore_state(path, to_lsn)
+    discard result.restore_state(path, to_lsn, allow_schema_mismatch)
   finally:
     result.replaying = false

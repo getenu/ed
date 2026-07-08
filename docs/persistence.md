@@ -164,13 +164,30 @@ CLEAR op). `ctx.close` detaches the store along with the reactor.
 Re-`init`ing a live id on a logging authority is likewise unsupported: the
 log would carry two CREATEs for one id and replay keeps the first incarnation.
 
+## Schema gate
+
+The manifest's `schema` slot carries `ED_SCHEMA_VERSION` (a manual constant in
+`store/format.nim`), and `open_store`/`replay` refuse a store whose slot differs
+from the running build's — a `StoreError`, overridable with
+`allow_schema_mismatch = true`. **Bump `ED_SCHEMA_VERSION` whenever a persisted
+type changes shape** (a field added/removed/reordered, an enum value added):
+`tid = hash($T)` is name-only, so without the bump a mismatched build would
+deserialize such a store's objects as garbage *silently* — the gate turns that
+into a clean refusal. This is the **manual** half of schema safety until
+structure-aware tids land, at which point the same slot gains automatic
+structural detection (see `decentralization-and-scaling.md` for the serializer +
+schema-evolution plan). `schema == 0` means legacy/unset and skips the check; a
+store with only a log and no snapshot yet has no manifest to gate, so the check
+engages once the first snapshot is written.
+
 ## Not built (deferred deliberately)
 
 Serving fetch/REQUEST misses from the log (the authority never evicts today —
-this lands with authority eviction); structure-aware tids / TypeSchema (the
-`schema` slot is reserved; `tid = hash($T)` still can't detect a struct/enum
-change, see `consistency.md`); the ack/commit callback (op_id plumbing ready);
-git integration itself. Known pre-existing gap surfaced by this work, not
-fixed here: with a single subscriber that originated the op, `has_eligible`
-is false and the echo never returns to the writer (a return-to-source
-violation) — capture is unaffected, the echo half is a follow-up.
+this lands with authority eviction); structure-aware tids / full TypeSchema (the
+gate above is version-level, not per-type structural — `tid = hash($T)` still
+can't detect a struct/enum change on its own, see `consistency.md`); the
+ack/commit callback (op_id plumbing ready); git integration itself. Known
+pre-existing gap surfaced by this work, not fixed here: with a single subscriber
+that originated the op, `has_eligible` is false and the echo never returns to
+the writer (a return-to-source violation) — capture is unaffected, the echo half
+is a follow-up.
