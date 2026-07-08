@@ -16,6 +16,17 @@ const
   STORE_VERSION* = 1
   CODEC_FLATTY* = "flatty"
   LOGGED_KINDS* = {CREATE, DESTROY, ASSIGN, UNASSIGN, TOUCH, PACKED}
+  ED_SCHEMA_VERSION* = 1
+    ## App-schema version stamped into every manifest's `schema` slot and gated
+    ## at open (see restore.nim). **Bump this whenever a persisted type changes
+    ## in a way that makes an older store unreadable** -- a field added / removed
+    ## / reordered, or an enum value added. `tid = hash($T)` is name-only and
+    ## can't see such a change, so a mismatched build would otherwise deserialize
+    ## garbage silently; the gate turns that into a clean refusal. This is the
+    ## manual half of schema safety until structure-aware tids land, at which
+    ## point the check gains automatic structural detection (docs/persistence.md,
+    ## decentralization-and-scaling.md). `0` in a manifest means legacy/unset ->
+    ## the gate is skipped.
 
 type
   ManifestEntry* = object
@@ -30,7 +41,7 @@ type
     lsn*: int64 ## watermark: state as of this LSN inclusive
     op_id_counter*: int64
     codec*: string
-    schema*: int ## reserved TypeSchema version (always 0 today)
+    schema*: int ## ED_SCHEMA_VERSION at write time (0 = legacy/unset)
     endian*: string
     int_bits*: int
     objects*: seq[ManifestEntry] ## registry insertion order = dependency order
@@ -54,6 +65,7 @@ proc init*(
     lsn: lsn,
     op_id_counter: op_id_counter,
     codec: CODEC_FLATTY,
+    schema: ED_SCHEMA_VERSION,
     endian: host_endian,
     int_bits: host_int_bits,
   )

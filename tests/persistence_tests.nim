@@ -485,6 +485,53 @@ proc run*() =
       check not dir_exists(path / "snapshots" / "tmp-000000000000009")
       a.destroy()
 
+    test "schema gate: matching version reopens with no false positive":
+      let path = store_dir()
+      defer:
+        remove_dir(path)
+      var a = EdContext.init(id = "p24_auth", is_authority = true)
+      a.open_store(path)
+      var value = EdValue[int].init(ctx = a, id = "p24_value")
+      value.value = 1
+      a.snapshot()
+      a.destroy()
+      # Same build -> manifest.schema == ED_SCHEMA_VERSION -> opens cleanly.
+      var b = EdContext.init(id = "p24_auth", is_authority = true)
+      b.open_store(path)
+      check EdValue[int](b["p24_value"]).value == 1
+      b.destroy()
+
+    test "schema gate: mismatched version refuses; override opens":
+      let path = store_dir()
+      defer:
+        remove_dir(path)
+      var a = EdContext.init(id = "p25_auth", is_authority = true)
+      a.open_store(path)
+      var value = EdValue[int].init(ctx = a, id = "p25_value")
+      value.value = 1
+      let snap = a.snapshot()
+      a.destroy()
+
+      # Simulate a store written by a build with a different schema version:
+      # rewrite the manifest's schema field, re-sealed so its crc stays valid.
+      let manifest_path = snap / "manifest.json"
+      let (ok, m) = parse_manifest(read_file(manifest_path))
+      check ok
+      var bumped = m
+      bumped.schema = ED_SCHEMA_VERSION + 1
+      write_file(manifest_path, to_manifest(bumped) & "\n")
+
+      var b = EdContext.init(id = "p25_auth", is_authority = true)
+      expect StoreError:
+        b.open_store(path)
+      b.destroy()
+
+      # The override opens it anyway.
+      var c = EdContext.init(id = "p25_auth", is_authority = true)
+      c.open_store(path, allow_schema_mismatch = true)
+      check EdValue[int](c["p25_value"]).value == 1
+      c.destroy()
+
     test "entry format: roundtrip, crc rejection, forward compat":
       var msg = Message(
         kind: ASSIGN,
