@@ -4,6 +4,12 @@
 > features. We are not committing to build all of this, or any of it, now.
 > Supersedes the CRDT-leaning `DISTRIBUTED_CONSISTENCY_PLAN.md` on the old
 > `comprehensive-crdt-implementation` branch.
+>
+> This doc is the **data-layer mechanics** (roles, reconciliation, partial sync).
+> The layer above it — deployment/trust/topology/scaling and the serializer +
+> schema-evolution decision, i.e. the road to distributed enu — lives in
+> `decentralization-and-scaling.md`. The durable store it references is
+> `persistence.md`.
 
 ## Goals
 
