@@ -232,19 +232,20 @@ having the registry emit that descriptor — not a reason to drop the registry.
 The top two aren't speculative — they fall directly out of the end goal. That's why
 the switch is *eventually mandatory* rather than optional.
 
-**Timing.** Cheap safety half **now**, independent of the switch: stamp a
-schema/build fingerprint into the manifest's reserved `schema` slot and have
-`open_store` refuse-or-warn on mismatch, so Phase 2 fails *clearly* instead of
-silently dropping objects. The full nim-serialization + field-schema cutover is
-triggered by the durable need — when saved worlds start breaking across updates, or
-mixed-version play becomes real — and drops flatty in one move.
+**Timing.** Cheap safety half **done** (`persistence.md`): `ED_SCHEMA_VERSION` in
+the manifest's reserved `schema` slot, and `open_store`/`replay` refuse a
+mismatched store (overridable), so a schema-incompatible store fails *clearly*
+instead of silently dropping objects. The full nim-serialization + field-schema
+cutover is triggered by the durable need — when saved worlds start breaking across
+updates, or mixed-version play becomes real — and drops flatty in one move.
 
 ## Sequenced roadmap
 
 Ordered by dependency and trigger, not calendar.
 
-1. **Now / cheap, no trigger:** manifest schema-fingerprint gate (safe-fail on
-   incompatible store); keep the reserve-now items from the plan doc honored.
+1. **Done:** manifest schema-version gate (`ED_SCHEMA_VERSION`; safe-fail on
+   incompatible store — `persistence.md`). *Ongoing:* keep the reserve-now items
+   from the plan doc honored.
 2. **Model 1 — failover / git-hosting.** Liveness detection, deterministic
    successor, frontier-rollback, git-as-log + ref-CAS host claim. Delivers the
    serverless goal; ordering + DX untouched. The next big infrastructure step.

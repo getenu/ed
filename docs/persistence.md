@@ -36,7 +36,8 @@ fields keep the log greppable), payload bins base64'd, and a `crc` field last,
 computed over the raw line prefix, so torn writes are detectable without
 canonical-JSON games. `v`/`txn`/`commit`/`schema` are reserved slots (format
 version, future atomic batches, TypeSchema version); `codec` names the payload
-encoding so a human-readable codec can slot in beside flatty later. The
+encoding so a human-readable codec can take over from flatty later (the
+single-serializer cutover — see `decentralization-and-scaling.md`). The
 manifest records platform (endianness, int width) — flatty is native-endian —
 and refuses a mismatch. Session-coupled fields (`source`, `id_mappings`)
 never persist.
@@ -183,10 +184,13 @@ engages once the first snapshot is written.
 ## Not built (deferred deliberately)
 
 Serving fetch/REQUEST misses from the log (the authority never evicts today —
-this lands with authority eviction); structure-aware tids / full TypeSchema (the
-gate above is version-level, not per-type structural — `tid = hash($T)` still
-can't detect a struct/enum change on its own, see `consistency.md`); the
-ack/commit callback (op_id plumbing ready); git integration itself. Known
+this lands with authority eviction); an opt-in `PERSIST` flag to replace the
+current persist-iff-synced rule (so a consumer marks exactly what's durable —
+needed because a synced object isn't necessarily one to save; the enu adoption
+depends on it); structure-aware tids / full TypeSchema (the gate above is
+version-level, not per-type structural — `tid = hash($T)` still can't detect a
+struct/enum change on its own, see `consistency.md`); the ack/commit callback
+(op_id plumbing ready); git integration itself. Known
 pre-existing gap surfaced by this work, not fixed here: with a single subscriber
 that originated the op, `has_eligible` is false and the echo never returns to
 the writer (a return-to-source violation) — capture is unaffected, the echo half
