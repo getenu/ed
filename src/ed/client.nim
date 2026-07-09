@@ -48,8 +48,8 @@ type EdClient* = ref object
     ## wants units render-ready; a narrow utility fetches what it touches).
   on_connect*: proc()
     ## (Re)create this client's objects after each (re)connect. Runs with
-    ## `Ed.thread_ctx` set to the fresh context. Single-threaded -- runs on
-    ## the caller's thread, so it may touch the caller's globals.
+    ## `Ed.thread_ctx` set to this client's live context. Single-threaded --
+    ## runs on the caller's thread, so it may touch the caller's globals.
   ctx*: EdContext
   prev*: EdContext
     ## The session before the current one (one generation only). Each reconnect
@@ -63,33 +63,54 @@ type EdClient* = ref object
   last_attempt: MonoTime
 
 proc reconnect*(self: EdClient): EdClient {.discardable.} =
-  ## (Re)create the context with the stable `id`, subscribe to `address`,
-  ## and run `on_connect`. Resilient: if the peer is unreachable the new
-  ## context simply has no subscribers, so a later `tick` retries. Returns
-  ## `self` so it can be chained (`EdClient(...).reconnect`).
+  ## Establish (or re-establish) this client's context, subscribe to `address`,
+  ## and run `on_connect`. Resilient: if the peer is unreachable the context
+  ## simply has no subscribers, so a later `tick` retries. Returns `self` so it
+  ## can be chained (`EdClient(...).reconnect`).
   ##
   ## `connect` is an alias; both are plain procs callable anywhere (including
   ## inside a `unittest` `test` block). Type initializers self-register at
   ## program startup (see `create_initializer`), so there's no bootstrap step.
   ## The reconnect paths (`tick`/`online`) drive this.
   ##
-  ## The context is NOT reused across reconnects: an existing object's CREATE
-  ## never re-broadcasts, so a restarted peer would never learn about this
-  ## client's objects -- they'd survive locally as ghosts whose ops the peer
-  ## skips. Same-session resync is the body-persistence/revive work, not a
-  ## client-side trick.
+  ## First connect vs reconnect -- the context handling deliberately differs:
+  ##
+  ## * FIRST connect uses the thread's context (`Ed.thread_ctx`) rather than
+  ##   minting one and clobbering it, and inherits its `id` as this client's
+  ##   stable identity. The default thread context now carries a globally-unique
+  ##   id (see `EdContext.init`), so it's safe to adopt as a network identity. A
+  ##   caller that pins an explicit `id` still wins: if it differs from the
+  ##   thread context's, a context under that id is installed as the thread
+  ##   context (keeps id-driven callers -- e.g. the MCP server -- unchanged).
+  ##
+  ## * A genuine RECONNECT (this client already has a live context) is NOT
+  ##   allowed to reuse it: an existing object's CREATE never re-broadcasts, so
+  ##   a restarted peer would never learn about this client's objects -- they'd
+  ##   survive locally as ghosts whose ops the peer skips. So a reconnect always
+  ##   mints a FRESH context under the same stable `id`; the peer recognizes and
+  ##   supersedes the prior session by that id. Same-session resync is the
+  ##   body-persistence/revive work, not a client-side trick.
+  ##
+  ## Either way `Ed.thread_ctx` ends up pointing at this client's live context,
+  ## so `on_connect` and app helpers that read it see the right one.
   result = self
-  # Mint a stable id on first use if the caller didn't supply one, so it
-  # survives reconnects (the peer recognizes and supersedes the prior
-  # session by id).
-  if self.id == "":
-    self.id = generate_id()
   self.last_attempt = get_mono_time()
-  if not self.ctx.is_nil:
+  if self.ctx.is_nil:
+    # FIRST connect: use the thread context. Honor a caller-pinned id by
+    # installing a context under it; otherwise adopt whatever the thread has.
+    if self.id != "" and Ed.thread_ctx.id != self.id:
+      Ed.thread_ctx = EdContext.init(id = self.id)
+    self.ctx = Ed.thread_ctx
+  else:
+    # RECONNECT: retire the current context and mint a fresh one under the same
+    # stable id, then point the thread at it.
     self.ctx.close
     self.prev = self.ctx
-  self.ctx = EdContext.init(buffer = false, id = self.id)
-  Ed.thread_ctx = self.ctx
+    self.ctx = EdContext.init(id = self.id)
+    Ed.thread_ctx = self.ctx
+  # A stable id survives reconnects (the peer supersedes the prior session by
+  # id); align it with the context we settled on.
+  self.id = self.ctx.id
   try:
     # subscribe sets ctx.sync_mode from `mode` (PARTIAL => blocking reads)
     self.ctx.subscribe(
