@@ -1,5 +1,5 @@
 import test_util
-import std/[unittest, atomics, os]
+import std/[unittest, atomics, os, strutils]
 import ed
 import ed/types {.all.}
 
@@ -156,6 +156,63 @@ proc run*() =
     defer:
       stop_server()
     check client.tick_until(10.seconds, client.connected)
+
+  test "first connect adopts the thread default instead of clobbering it":
+    start_server()
+    defer:
+      stop_server()
+
+    # A context the caller set up as the thread default.
+    let default_ctx = EdContext.init(id = "adopt-me")
+    Ed.thread_ctx = default_ctx
+
+    # An id-agnostic client: no explicit id.
+    let client = EdClient(address: test_address)
+    client.reconnect
+
+    # It adopted the existing thread default rather than minting a new one, and
+    # took that context's id as its stable identity. The thread default is
+    # untouched (still the same object).
+    check client.ctx == default_ctx
+    check client.id == "adopt-me"
+    check Ed.thread_ctx == default_ctx
+
+    # A genuine reconnect still mints a FRESH context under the adopted id (the
+    # adopted context becomes `prev`).
+    client.reconnect
+    check client.ctx != default_ctx
+    check client.prev == default_ctx
+    check client.id == "adopt-me"
+    check Ed.thread_ctx == client.ctx
+
+  test "a caller-pinned id wins over the thread default and is installed as it":
+    start_server()
+    defer:
+      stop_server()
+
+    # A thread default with a different id must NOT be adopted when the caller
+    # pinned a specific id -- that stays backward-compatible with id-driven
+    # callers (e.g. the MCP server). The pinned context is promoted to the
+    # thread default so on_connect/app helpers read the right context.
+    let default_ctx = EdContext.init(id = "some-other-default")
+    Ed.thread_ctx = default_ctx
+
+    let client = EdClient(id: "pinned-id", address: test_address)
+    client.reconnect
+
+    check client.ctx != default_ctx
+    check client.ctx.id == "pinned-id"
+    check client.id == "pinned-id"
+    check Ed.thread_ctx == client.ctx
+
+  test "the default context id is globally unique, not a bare thread id":
+    # A context id doubles as its identity on the wire, so two default contexts
+    # (e.g. one per process) must not collide. The `thread-<id>` prefix stays for
+    # readable logs; a unique suffix makes the whole id distinct.
+    let a = EdContext.init()
+    let b = EdContext.init()
+    check a.id != b.id
+    check a.id.starts_with("thread-")
 
 when is_main_module:
   Ed.bootstrap

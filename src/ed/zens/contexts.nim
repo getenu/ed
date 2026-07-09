@@ -73,7 +73,12 @@ proc len*(self: EdContext): int =
 
 proc init*(
     _: type EdContext,
-    id = "thread-" & $get_thread_id(),
+    # A context id doubles as this context's identity on the wire (see
+    # `subscribe`, which sends it as the subscriber's `ctx_id`), so the default
+    # must be globally unique -- a bare thread id collides across processes and
+    # isn't stable across runs. Keep the `thread-<id>` prefix for readable logs,
+    # then append a unique suffix.
+    id = "thread-" & $get_thread_id() & "-" & generate_id(),
     listen_address = "",
     blocking_recv = false,
     chan_size = 100,
@@ -127,7 +132,7 @@ proc init*(
 proc thread_ctx*(t: type Ed): EdContext =
   ## Get the current thread's `EdContext`. Creates one if it doesn't exist.
   if active_ctx == nil:
-    active_ctx = EdContext.init(id = "thread-" & $get_thread_id())
+    active_ctx = EdContext.init()
   active_ctx
 
 proc thread_ctx*(_: type EdBase): EdContext =
