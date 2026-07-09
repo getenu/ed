@@ -36,8 +36,8 @@ fields keep the log greppable), payload bins base64'd, and a `crc` field last,
 computed over the raw line prefix, so torn writes are detectable without
 canonical-JSON games. `v`/`txn`/`commit`/`schema` are reserved slots (format
 version, future atomic batches, TypeSchema version); `codec` names the payload
-encoding so a human-readable codec can take over from flatty later (the
-single-serializer cutover — see `decentralization-and-scaling.md`). The
+encoding so a schema-capable/human-readable codec can take over the durable path
+later — see `decentralization-and-scaling.md`. The
 manifest records platform (endianness, int width) — flatty is native-endian —
 and refuses a mismatch. Session-coupled fields (`source`, `id_mappings`)
 never persist.
