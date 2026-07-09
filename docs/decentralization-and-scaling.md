@@ -192,17 +192,20 @@ an object's serialized bytes, under whatever serializer):
 
 ## Serialization & schema evolution
 
-**Decision: a single serializer, and flatty retires at the cutover.** flatty is
-fine as a compact positional codec but wrong as a *durable/evolving* format
-(positional + name-hashed `tid` → a type change silently corrupts or safe-fails
-with loss). The forcing function is the end goal: git-hosted **long-lived** worlds
-outlive the code, so schema evolution moves from "nice, defer" to *eventually
-mandatory*. We adopt **nim-serialization** (already partly in the tree via
+**What's needed vs what's preferred.** A **schema-capable serializer for the
+durable path is needed**: flatty is fine as a compact positional codec but wrong as
+a *durable/evolving* format (positional + name-hashed `tid` → a type change silently
+corrupts or safe-fails with loss), and git-hosted **long-lived** worlds outlive the
+code, so schema evolution moves from "nice, defer" to *eventually mandatory*.
+**Dropping flatty entirely — one serializer for both jobs — is a preference, not a
+requirement.** We'd adopt **nim-serialization** (already partly in the tree via
 `json_serialization`; designed for "one type, many wire formats") for the durable
-path, and at that same cutover move the hot path onto it too rather than straddle
-two serializers. **Contingency (the only reason to keep a second codec):** validate
-nim-serialization's binary backend meets the voxel hot path's compactness/speed at
-cutover; only if it can't — not expected — would a compact codec survive there.
+path, and *ideally* move the hot path onto it too so there's a single codec — the
+expectation is it replaces flatty cleanly. But if it doesn't — if its binary backend
+can't match flatty on the voxel hot path, *or* if keeping flatty for the hot path and
+nim-serialization for the durable path is simply cleaner than shoehorning both jobs
+into one — then **two serializers is an acceptable outcome.** Single-serializer is the
+lean, not a constraint.
 
 **Keep and extend the type registry — it is the asset.** It does four jobs; only
 one is flatty-coupled:
@@ -252,9 +255,11 @@ Ordered by dependency and trigger, not calendar.
 3. **Scaling tier.** Spatial interest management (enu-side, substrate ready — do
    first, highest leverage) + relay tree (ed-side, hub primitive exists). Together:
    thousands of players.
-4. **Serializer cutover.** nim-serialization for durable path + hot path, flatty
-   retired, registry extended with the field schema. Triggered by schema-evolution
-   need (long-lived worlds breaking across updates / mixed-version play).
+4. **Serializer for the durable path.** nim-serialization + field schema for the
+   durable path (needed), registry extended to emit it; unify the hot path onto it
+   and retire flatty if that's clean, else keep flatty for the hot path (preference,
+   not a requirement). Triggered by the schema-evolution need (long-lived worlds
+   breaking across updates / mixed-version play).
 5. **Traffic split.** An "unordered, owner-distributed" object class so trusted
    client-owned ephemera (movement, effects) bypasses the sequencer — the big
    headroom win, safe only under cooperative trust.
