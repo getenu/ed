@@ -565,9 +565,12 @@ proc init_placeholder*[T, O](
   ## `ctx.objects` under `id` and marked `placeholder`; no CREATE goes out.
   ## Reading it triggers a fetch; the real state fills it in later.
   # `op_ctx` is only consulted by defaults' broadcast, which we skip.
-  result = Ed[T, O]().defaults(
-    ctx, id, OperationContext(), broadcast = false, placeholder = true
-  )
+  # Minted ownerless: an open `own` scope is whatever is being decoded around
+  # the reference, not the object's owner. Its CREATE brings the real one.
+  "".own:
+    result = Ed[T, O]().defaults(
+      ctx, id, OperationContext(), broadcast = false, placeholder = true
+    )
 
 proc init*(
     T: type Ed,
