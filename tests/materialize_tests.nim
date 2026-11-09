@@ -59,6 +59,35 @@ proc run*() =
       check client["child"].loaded # fill cleared the bit
       check EdValue[string](client["child"]).value == "hi"
 
+    test "a placeholder takes its owner from its own CREATE, not its parent's":
+      var authority = EdContext.init(id = "mo_auth", is_authority = true)
+      var client = EdContext.init(id = "mo_client")
+      var parent: EdSeq[EdValue[string]]
+      var child: EdValue[string]
+      "parent_owner".own:
+        parent = EdSeq[EdValue[string]].init(ctx = authority, id = "mo_parent")
+      "child_owner".own:
+        child = EdValue[string].init(ctx = authority, id = "mo_child")
+      child.value = "hi"
+      parent += child
+
+      # Fetched after subscribing, the parent's CREATE materializes in its
+      # owner's scope and mints the child's placeholder while decoding.
+      client.subscribe(authority, mode = PARTIAL_ASYNC)
+      client.tick()
+      client.fetch("mo_parent")
+      authority.tick()
+      client.tick()
+      check client["mo_parent"].owner_id == "parent_owner"
+      check "mo_child" in client
+      check client["mo_child"].owner_id == ""
+
+      client.fetch("mo_child")
+      authority.tick()
+      client.tick()
+      check client["mo_child"].loaded
+      check client["mo_child"].owner_id == "child_owner"
+
     test "reading a placeholder auto-triggers the fetch (no explicit fetch)":
       var authority = EdContext.init(id = "ma_auth", is_authority = true)
       var client = EdContext.init(id = "ma_client")
