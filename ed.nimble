@@ -1,4 +1,4 @@
-version = "0.31.1"
+version = "0.32.0"
 author = "Scott Wadden"
 description = "Nothing for now"
 license = "MIT"
