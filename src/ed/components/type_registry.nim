@@ -3,6 +3,7 @@ import std/macrocache except value
 import ed/core
 import ed/[types {.all.}, zens/contexts, zens/private]
 import ed/lifecycle
+import ed/utils/layouts
 import ./private/global_state
 
 template deref*(o: ref): untyped =
@@ -39,10 +40,12 @@ proc register_type(typ: type) =
   log_defaults
   let key = typ.type_id
   const type_name = $typ
+  const layout = typ.registered_layout_hash
 
   with_lock:
     assert key notin global_type_registry[], "Type already registered"
     global_type_name_registry[][key] = type_name
+    global_layout_registry[][key] = (layout, type_name)
 
   let stringify =
     func (self: ref RootObj): string =

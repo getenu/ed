@@ -13,6 +13,11 @@ var raw_type_registry: Table[int, RegisteredType]
 var global_type_registry* = addr raw_type_registry
 var raw_type_name_registry: Table[int, string]
 var global_type_name_registry* = addr raw_type_name_registry
+var raw_layout_registry: Table[int, tuple[layout: int, name: string]]
+var global_layout_registry* = addr raw_layout_registry
+  ## Type id -> wire layout hash (see utils/layouts), for every registered type
+  ## and every container type this build can materialize. Sent in SUBSCRIBE so
+  ## the authority can refuse a peer that disagrees about a shared type.
 var type_registry_lock*: Lock
 type_registry_lock.init_lock
 

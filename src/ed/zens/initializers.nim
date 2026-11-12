@@ -5,6 +5,7 @@ import ed/types {.all.}, ed/zens/[operations, contexts, private]
 import ed/lifecycle
 import ed/utils/misc # ZenError
 import ed/components/store/log as store_log
+import ed/utils/layouts
 
 # `quote do` (in create_initializer) expands to code referencing `new_ident_node`,
 # so it must be in scope here. Re-exported so it also resolves at `Ed.bootstrap`
@@ -60,12 +61,16 @@ proc relay_fill*[T, O](item: Ed[T, O], op_ctx: OperationContext) =
     )
   item.publish_create(broadcast = true, op_ctx = op_ctx)
 
-proc register_initializer*(ed_type_id: int, p: pointer) =
+proc register_initializer*(
+    ed_type_id: int, p: pointer, layout: int, type_name: string
+) =
   ## The single, non-generic home for the `type_initializers` global write.
   ## `subscribe` reads the table from worker threads, so it's GC-shared; the
   ## `{.cast(gcsafe).}` is the same guard `subscribe` uses.
   {.cast(gcsafe).}:
     type_initializers[ed_type_id] = p
+  with_lock:
+    global_layout_registry[][ed_type_id] = (layout, type_name)
 
 proc materialize_received*[T, O](
     bin: string,
@@ -164,10 +169,15 @@ proc create_initializer[T, O](self: Ed[T, O]) =
   ## emitted code a trivial call -- template-safe, where an inline proc literal's
   ## gensym params would break codegen inside `unittest test` blocks.
   const ed_type_id = self.type.tid
+  const layout = Ed[T, O].layout_hash
+  const type_name = $Ed[T, O]
   static:
     INITIALIZERS.add quote do:
       register_initializer(
-        ed_type_id, cast[pointer](materialize_received[T, O])
+        ed_type_id,
+        cast[pointer](materialize_received[T, O]),
+        layout,
+        type_name,
       )
 
 proc defaults[T, O](

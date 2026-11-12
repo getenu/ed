@@ -218,13 +218,21 @@ proc subscribe*(
 
   let connection = self.reactor.connect(address, port)
   # The SUBSCRIBE carries, in `obj`, the subscriber's handshake: the type-ids it
-  # can materialize (capability filter; see ref-registration.md) plus its
-  # partial-replica interest (partial flag + root ids). The authority applies all
-  # three to the subscription it creates for us.
+  # can materialize (capability filter; see ref-registration.md), its
+  # partial-replica interest (partial flag + root ids), and the wire layout of
+  # every type it knows. The authority applies the first three to the
+  # subscription it creates for us, and refuses us if a shared type's layout
+  # differs.
   let type_ids = block:
     {.gcsafe.}:
       to_seq(type_initializers.keys)
-  let handshake = (type_ids, partial, @fetch, deep).to_flatty
+  let layouts = block:
+    var layouts: seq[(int, int)]
+    with_lock:
+      for tid, entry in global_layout_registry[]:
+        layouts.add (tid, entry.layout)
+    layouts
+  let handshake = (type_ids, partial, @fetch, deep, layouts).to_flatty
   self.send(
     Subscription(
       kind: REMOTE,
@@ -251,7 +259,11 @@ proc subscribe*(
     for msg in self.reactor.messages:
       got_messages = true
       self.bytes_received += msg.data.len
-      if msg.data.starts_with("ACK:"):
+      if msg.data.starts_with("NAK:"):
+        raise SchemaMismatchError.init(
+          \"{address}:{port} refused the subscription: {msg.data[4 ..^ 1]}"
+        )
+      elif msg.data.starts_with("ACK:"):
         if bidirectional:
           let pieces = msg.data.split(":")
           ctx_id = pieces[1]
@@ -945,6 +957,25 @@ proc drop_remote_conn(self: EdContext, conn: Connection) =
       self.unsubscribe(s)
       break
 
+proc refuse_other_wire_version(self: EdContext, raw_msg: netty.Message) =
+  ## An ed peer on another wire version can't parse our packets, but a raw NAK
+  ## needs no header, so its subscribe fails with a reason instead of timing out.
+  if raw_msg.data.starts_with("ED") and not raw_msg.data.starts_with(wire_header):
+    self.reactor.send(
+      raw_msg.conn,
+      "NAK:the two builds speak different ed wire versions",
+    )
+
+proc layout_mismatches(remote: seq[(int, int)]): seq[string] {.gcsafe.} =
+  ## Names of the types both builds know whose wire layouts differ. Types only
+  ## one side knows are the capability filter's job, not a mismatch.
+  with_lock:
+    for (tid, layout) in remote:
+      if tid in global_layout_registry[]:
+        let local = global_layout_registry[][tid]
+        if local.layout != layout:
+          result.add local.name
+
 proc handle_subscribe(
     self: EdContext, msg: Message, conn: Connection
 ) {.gcsafe.} =
@@ -988,15 +1019,26 @@ proc handle_subscribe(
       old_ctx_id = sub.ctx_id, new_ctx_id = source_str
     self.unsubscribe(sub)
 
-  # Handshake (capabilities, partial, fetch ids) rides in the SUBSCRIBE `obj`.
-  # Empty (older peer) = unfiltered, full replica.
+  # Handshake (capabilities, partial, fetch ids, layouts) rides in the
+  # SUBSCRIBE `obj`. Empty = unfiltered, full replica.
   var caps: HashSet[int]
   var is_partial = false
   var interest: HashSet[string]
   var is_deep = false
   if msg.obj.len > 0:
-    let (cap_ids, p, fetch_ids, d) =
-      msg.obj.from_flatty((seq[int], bool, seq[string], bool))
+    let (cap_ids, p, fetch_ids, d, layouts) =
+      msg.obj.from_flatty((seq[int], bool, seq[string], bool, seq[(int, int)]))
+    let mismatched = layout_mismatches(layouts)
+    if mismatched.len > 0:
+      warn "refusing subscriber with a different wire layout",
+        peer = new_addr_str, ctx_id = source_str, types = mismatched
+      self.reactor.send(
+        conn,
+        "NAK:the two builds disagree about the wire layout of " &
+          mismatched.join(", "),
+      )
+      self.reactor.tick
+      return
     caps = cap_ids.to_hash_set
     is_partial = p
     is_deep = d
@@ -1152,6 +1194,7 @@ proc tick*(
           continue
         if parsed.status == Unparseable:
           self.drop_remote_conn(raw_msg.conn) # real peer -> tear down; noise -> ignore
+          self.refuse_other_wire_version(raw_msg)
           continue
         var msg = parsed.msg
         when defined(ed_debug_messages):

@@ -55,6 +55,10 @@ type
 
   ConnectionError* = object of ZenError
 
+  SchemaMismatchError* = object of ConnectionError
+    ## The authority refused our subscribe: the two builds disagree about the
+    ## wire layout of a type both use (or speak different ed wire versions).
+
   StoreError* = object of ZenError
 
 # Exceptions

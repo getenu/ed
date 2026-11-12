@@ -232,7 +232,7 @@ proc remote_body(msg: Message, no_overwrite: bool): string =
     body_msg.obj = ""
   result = body_msg.to_flatty.ed_compress
 
-const wire_header = "ED\x01"
+const wire_header = "ED\x02"
   ## Magic + wire-format version, prefixed to every remote packet. flatty is
   ## positional: bytes from an older wire format can decode *cleanly* into
   ## wrong-typed fields and blow up (or corrupt state) deep in processing -- a

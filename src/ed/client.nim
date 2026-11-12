@@ -60,6 +60,11 @@ type EdClient* = ref object
     ## Minimum gap between re-subscribe attempts while down (default 1 s).
     ## Re-subscribing tears down the context, so doing it every tick would
     ## prevent any handshake from completing; the gap lets one settle.
+  refusal*: string
+    ## Why the peer refused the last subscribe (builds that disagree on a type's
+    ## wire layout, or different ed wire versions); empty once a subscribe
+    ## succeeds. Reconnects keep retrying -- the peer may be restarted with a
+    ## matching build -- so this is how a caller learns why it isn't connected.
   last_attempt: MonoTime
 
 proc reconnect*(self: EdClient): EdClient {.discardable.} =
@@ -116,8 +121,13 @@ proc reconnect*(self: EdClient): EdClient {.discardable.} =
     self.ctx.subscribe(
       self.address, mode = self.mode, fetch = self.fetch, deep = self.deep
     )
+    self.refusal = ""
     if self.on_connect != nil:
       self.on_connect()
+  except SchemaMismatchError as e:
+    warn "EdClient subscribe refused; will retry",
+      address = self.address, msg = e.msg
+    self.refusal = e.msg
   except ConnectionError as e:
     debug "EdClient connect failed; will retry",
       address = self.address, msg = e.msg
