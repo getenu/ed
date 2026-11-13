@@ -83,6 +83,11 @@ type
                       ## `destroy_owned` cascades into them. For true child
                       ## collections (a unit's `units`) -- NOT reference
                       ## collections (a sign's owner, a selection list).
+    REJECT_STALE      ## Register writes are conditional: the authority drops a
+                      ## write made before its writer saw the latest write from
+                      ## someone else, so an override isn't undone by a write
+                      ## already in flight (docs/consistency.md). First
+                      ## committer wins, instead of last.
 
   ChangeKind* = enum
     ## Types of changes that can occur on an `Ed` container.
@@ -124,6 +129,11 @@ type
                 # the receiver drops its reverse subscription and fires the
                 # unsubscribed event. REMOTE peers learn this from the dead
                 # connection; cross-thread channels have no such signal.
+    PROGRESS   # relay -> downstream, each tick it has read further: how far its
+               # state has read the authority's order (`base_lsn`). Raises the
+               # receiver's write base for REJECT_STALE registers. A relay doesn't
+               # forward ops that change nothing it holds, so stamps alone can't
+               # tell a context below it where it is.
 
   BaseChange* = ref object of RootObj
     changes*: set[ChangeKind]
@@ -145,6 +155,7 @@ type
     source*: HashSet[string]
     origin*: string  # ctx id that originated the op (threaded for own-op dedup)
     op_id*: int64    # originator's op id (threaded so forwards preserve it)
+    base_lsn*: int64 # originator's write base (threaded so forwards preserve it)
     when defined(ed_trace):
       trace*: string
 
@@ -177,6 +188,9 @@ type
     lsn*: int64     # global sequence number from the authority (0 = unordered)
     op_id*: int64   # originator-generated id for ack/commit correlation (0 = none)
     origin*: string # ctx id that originated the op (for own-op dedup)
+    base_lsn*: int64 # writes: how far the originator had read the authority's
+                     # order when it wrote (REJECT_STALE). CREATE: how far the
+                     # sender had read, so the receiver's writes start there.
     delta*: bool    # true for collection (non-idempotent) ops, false for registers
     deep*: bool     # REQUEST only: also send the ownership closure (everything
                     # the requested id owns via owned_by, recursively)
@@ -348,6 +362,12 @@ type
     leader_id*: string    # ctx_id of the authority (own id when is_authority)
     lsn_counter*: int64   # authority-only: next global LSN to assign
     applied_lsn*: int64   # highest global LSN applied (frontier)
+    base_hint*: int64     # how far an upstream said its state had read (a
+                          # CREATE's base, a relay's PROGRESS): raises our write
+                          # base, never the frontier
+    progress_sent*: int64 # relay: the base last sent downstream as PROGRESS
+    unordered_warned*: HashSet[string] # REJECT_STALE objects we've warned have
+                                       # no authority ordering their writes
     op_id_counter*: int64 # next op id to assign to a write we originate
     latest_op_id*: Table[string, int64]  # object_id -> our highest op id (own-op reconciliation)
     # Phase 2: durable log + snapshots (docs/persistence.md)
@@ -519,6 +539,9 @@ type
     # or updated. A hub caches released keys instead of shedding them and sheds
     # the least-recently-served under memory pressure (interest-tiers stage 2).
     key_last_read*: Table[string, MonoTime]
+    # Authority: the LSN and origin of the latest register write (REJECT_STALE).
+    reg_lsn*: int64
+    reg_origin*: string
     build_message: proc(
       body: ref EdBodyBase, change: BaseChange, id: string, trace: string
     ): Message {.gcsafe.}
@@ -842,6 +865,7 @@ proc to_flatty*(s: var string, msg: Message) =
   s.to_flatty msg.lsn
   s.to_flatty msg.op_id
   s.to_flatty msg.origin
+  s.to_flatty msg.base_lsn
   s.to_flatty msg.delta
   s.to_flatty msg.deep
   s.to_flatty msg.key_bin
@@ -867,6 +891,7 @@ proc from_flatty*(s: string, i: var int, msg: var Message) =
   s.from_flatty(i, msg.lsn)
   s.from_flatty(i, msg.op_id)
   s.from_flatty(i, msg.origin)
+  s.from_flatty(i, msg.base_lsn)
   s.from_flatty(i, msg.delta)
   s.from_flatty(i, msg.deep)
   s.from_flatty(i, msg.key_bin)

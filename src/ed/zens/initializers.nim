@@ -196,6 +196,10 @@ proc defaults[T, O](
   # on the proxy forwards to it (types.nim templates). Minted here -- before
   # anything reads a forwarded field -- since object construction can no longer
   # set what are now body fields.
+  when O isnot T:
+    if REJECT_STALE in flags:
+      fail "REJECT_STALE only applies to registers (EdValue); " & $Ed[T, O] &
+        " would quietly stay last-write-wins"
   let body = EdBody[T, O](flags: flags, placeholder: placeholder)
   self.body = body
 
@@ -309,6 +313,7 @@ proc defaults[T, O](
       # its type. Empty `capabilities` = unfiltered (same-build / no handshake).
       if sub.capabilities.len == 0 or create_msg.type_id in sub.capabilities:
         var msg = create_msg
+        msg.base_lsn = src_ctx.write_base
         when defined(ed_trace):
           msg.trace = get_stack_trace()
 

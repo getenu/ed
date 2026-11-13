@@ -64,13 +64,46 @@ latest_op_id[obj]` is stale → advance frontier, skip effect (no snap-back); `o
 converges). Other-origin ops always apply (an authoritative override — a script
 teleport — is accepted and the entity re-bases). This is client-side prediction +
 server reconciliation, valid because values ship over one LSN-ordered stream.
-*Known limitation:* a write already in flight when an override lands gets a
-higher LSN, so it wins. If the writer writes again after applying the override,
-that write is based on the override and supersedes the stale one (a brief
-flicker). If the stale write was its last, the override is lost everywhere: the
-writer applies the override and then its own latest echo, and the authority
-holds the stale value too. Fixing that needs conditional writes; see "Overrides
-that stick" in `consistency-and-partial-sync-plan.md`.
+*Limitation, unless the register is `REJECT_STALE`:* a write already in flight
+when an override lands gets a higher LSN, so it wins. If the writer writes again
+after applying the override, that write is based on the override and supersedes
+the stale one (a brief flicker). If the stale write was its last, the override
+is lost everywhere: the writer applies the override and then its own latest
+echo, and the authority holds the stale value too.
+
+**Rejecting stale register writes (`REJECT_STALE`).** A conditional write
+whose condition is implicit: the writer had seen the latest write from anyone
+else. Every write (ASSIGN or TOUCH) carries `base_lsn`, how far its originator
+had read the authority's order when it wrote; forwards keep the originator's. Delivery is LSN-ordered, so a base at
+or past an op means the writer had seen it. The authority records the LSN and
+origin of each register's latest write, and drops a write from a different
+origin whose base is older: the writer hadn't seen the latest write, which is
+already on its way to it. It also resends its state to the writer, in case the
+writer's base was just behind. Writes from one origin never conflict with each
+other, so a continuously-writing body keeps flowing. The result is
+first-committer-wins for concurrent writers instead of last-writer-wins, which
+is why it's opt-in per object.
+
+A writer's base is `max(applied_lsn, base_hint)`. `base_hint` covers what
+stamps can't:
+- a CREATE carries its sender's base, so a fresh subscriber's first write
+  isn't judged stale before any ordered op reaches it;
+- a relay (a non-authority context with an upstream) doesn't forward an op that
+  changes nothing it holds, so each tick it has read further it sends its
+  downstream a `PROGRESS` with its base. Without it, a context below a relay
+  could have every write dropped.
+
+The flag must never quietly fall back to last-writer-wins, so every place it
+can't hold is loud:
+- `REJECT_STALE` on a collection fails at creation (only registers are checked);
+- a register write that would be packed fails (packed ops lose their origin and
+  base; one register write is one message, so this is a bug if it happens), and
+  an authority that receives a packed op for a `REJECT_STALE` register logs an
+  error;
+- a write from a context with no authority above it (none known from
+  subscribe, no stamp or base received) logs an error once per object. Nothing
+  orders or checks its writes, so replicas can disagree for good; what to do
+  about that is an open question in `decentralization-and-scaling.md`.
 
 **Collections** take the simpler path: an op we originated is always skipped on
 echo (it was applied optimistically; re-applying a `seq.add` would duplicate).
@@ -85,7 +118,7 @@ to restore — forward correction, a restore is just a higher-LSN op. Coalesced
 delivery (latest canonical value per object per tick) removes optimistic flicker
 *and* is the fanout/backpressure win — one mechanism.
 
-*Not built:* OCC/versioned writes, ack/commit callback (the `op_id` plumbing
+*Not built:* ack/commit callback (the `op_id` plumbing
 exists; #10), snapshot-vs-delta resync threshold, stricter delete-vs-update policy.
 The ordered stream is now also **durable** on the authority — log, snapshots,
 restart-restore, replay — see `persistence.md`.
