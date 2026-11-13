@@ -252,6 +252,18 @@ Ordered by dependency and trigger, not calendar.
 2. **Model 1 — failover / git-hosting.** Liveness detection, deterministic
    successor, frontier-rollback, git-as-log + ref-CAS host claim. Delivers the
    serverless goal; ordering + DX untouched. The next big infrastructure step.
+   Settle here what a context does without an authority, and after losing one:
+   - *No authority at all* (none configured, or peers subscribed to each other):
+     nothing orders writes, so concurrent writes can leave replicas disagreeing
+     for good. Today a `REJECT_STALE` write logs an error once per object
+     (`consistency.md`). Proposal: once verified, not just "no stamp yet", which
+     is a false alarm below a relay on the first tick, disconnect instead.
+   - *Disconnected:* writes apply locally and go nowhere. On reconnect the
+     upstream's copy of every shared object overwrites ours (only objects it
+     lacks are pushed up), so offline writes to shared objects are silently
+     lost. Read from the subscribe path, not yet tested; confirm, then decide
+     whether to replay them (as `REJECT_STALE` writes, which would then be
+     checked against what happened meanwhile) or at least say they were lost.
 3. **Scaling tier.** Spatial interest management (enu-side, substrate ready — do
    first, highest leverage) + relay tree (ed-side, hub primitive exists). Together:
    thousands of players.
