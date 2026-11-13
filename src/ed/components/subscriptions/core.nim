@@ -152,6 +152,8 @@ proc subscribe*(
   self.materialize = materialize_impl # enable materialize-on-access
   if upstream:
     self.upstream_ctx_ids.incl ctx.id
+    if self.leader_id == "":
+      self.leader_id = ctx.leader_id
   if partial:
     self.sync_mode = mode # FULL subscribes (incl. the reverse leg) don't downgrade
   self.pack_objects
@@ -264,10 +266,12 @@ proc subscribe*(
           \"{address}:{port} refused the subscription: {msg.data[4 ..^ 1]}"
         )
       elif msg.data.starts_with("ACK:"):
+        let pieces = msg.data.split(":")
+        if self.leader_id == "":
+          self.leader_id = pieces[2]
         if bidirectional:
-          let pieces = msg.data.split(":")
           ctx_id = pieces[1]
-          for id in pieces[2 ..^ 1]:
+          for id in pieces[3 ..^ 1]:
             remote_objects.incl id
 
         finished = true
@@ -313,6 +317,12 @@ proc process_message(
 proc handle_packed(self: EdContext, msg: Message, sub: Subscription) {.gcsafe.} =
   privileged
   log_defaults("ed publishing")
+  if self.is_authority and not msg.delta and msg.object_id in self and
+      REJECT_STALE in self.objects[msg.object_id].flags:
+    # Packed ops lose their origin and base, so they can't be checked. A
+    # register write is never packed; if one ever is, say so.
+    error "unchecked packed write to a REJECT_STALE register",
+      object_id = msg.object_id, origin = msg.origin
   let ops = msg.obj.from_flatty(seq[PackedMessageOperation])
   for op in ops:
     var new_msg = Message(
@@ -372,6 +382,11 @@ proc handle_create(self: EdContext, msg: Message, source: HashSet[string]) =
         materialize_it()
     else:
       materialize_it()
+  # The state an upstream sent reflects its order up to `base_lsn`, so our
+  # writes to it are based there even before any ordered op reaches us.
+  if msg.base_lsn > self.base_hint and
+      self.from_upstream(OperationContext.init(source = source)):
+    self.base_hint = msg.base_lsn
   # Safety net for paths where the initializer fills an existing object (a
   # placeholder) rather than running `defaults` -- stamp + index after the fact.
   # Keyed by owner id, so arrival order vs. the owner doesn't matter.
@@ -779,11 +794,26 @@ proc handle_op(self: EdContext, msg: Message, source: HashSet[string]) =
         self.forget_key_bytes(obj, msg.key_bin)
     elif msg.delta and msg.kind == ASSIGN:
       self.set_body_bytes(obj, obj.bytes + msg.obj.len)
+  if self.is_authority and REJECT_STALE in obj.flags and
+      msg.kind in {ASSIGN, TOUCH} and not msg.delta and
+      msg.origin != obj.reg_origin and msg.base_lsn < obj.reg_lsn:
+    # Written before its writer saw the latest write from someone else. That
+    # write is already on its way to the writer, which applies it; resend our
+    # state too, in case the writer's base was simply behind.
+    debug "dropping stale conditional write",
+      object_id = msg.object_id, origin = msg.origin, base = msg.base_lsn,
+      latest = obj.reg_lsn, latest_origin = obj.reg_origin
+    for sub in self.subscribers:
+      if sub.ctx_id in source:
+        obj.publish_create(sub, op_ctx = OperationContext.init(ctx = self))
+        break
+    return
   obj.change_receiver(
     obj,
     msg,
     op_ctx = OperationContext.init(
-      source = source, ctx = self, origin = msg.origin, op_id = msg.op_id
+      source = source, ctx = self, origin = msg.origin, op_id = msg.op_id,
+      base_lsn = msg.base_lsn,
     ),
   )
   if msg.lsn > self.applied_lsn:
@@ -900,6 +930,10 @@ proc process_message(
     self.handle_request(msg, source)
   elif msg.kind == UNSUBSCRIBE:
     self.handle_unsubscribe(source)
+  elif msg.kind == PROGRESS:
+    if msg.base_lsn > self.base_hint and
+        self.from_upstream(OperationContext.init(source = source)):
+      self.base_hint = msg.base_lsn
   elif msg.kind != BLANK:
     self.handle_op(msg, source)
   else:
@@ -1063,7 +1097,8 @@ proc handle_subscribe(
   self.pack_objects
   var objects = self.objects.keys.to_seq.join(":")
 
-  let ack_data = "ACK:" & self.id & ":" & objects
+  # ACK:<our id>:<the authority's id, or "">:<object ids...>
+  let ack_data = "ACK:" & self.id & ":" & self.leader_id & ":" & objects
   self.bytes_sent += ack_data.len
   self.reactor.send(conn, ack_data)
   sent_message_counter.inc(label_values = [self.metrics_label])
@@ -1072,6 +1107,22 @@ proc handle_subscribe(
   for msg in self.reactor.messages:
     self.bytes_received += msg.data.len
   self.remote_messages &= self.reactor.messages
+
+proc send_progress(self: EdContext) =
+  ## A relay tells the contexts below it how far its state has read the
+  ## authority's order, once it has read further. Queued behind everything it
+  ## forwarded, so a receiver's state really does reflect that far. Only a
+  ## relay needs this: an authority's subscribers get its stamps directly.
+  privileged
+  if self.is_authority or self.upstream_ctx_ids.len == 0:
+    return
+  let base = self.write_base
+  if base <= self.progress_sent:
+    return
+  self.progress_sent = base
+  for sub in self.subscribers:
+    if sub.ctx_id notin self.upstream_ctx_ids:
+      self.send(sub, Message(kind: PROGRESS, base_lsn: base))
 
 proc tick*(
     self: EdContext,
@@ -1127,6 +1178,7 @@ proc tick*(
     else:
       get_mono_time() + min_duration
 
+  self.send_progress
   self.flush_buffers
   self.flush_key_requests # send this frame's batched per-key fetches
   self.flush_key_releases # ...and its batched per-key releases (paging out)

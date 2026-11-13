@@ -27,6 +27,21 @@ proc from_upstream*(self: EdContext, op_ctx: OperationContext): bool =
       return true
   false
 
+proc authority_known*(self: EdContext): bool =
+  ## Whether an authority orders our writes: we're it, an upstream told us on
+  ## subscribe, or its stamps (or a CREATE's base) have reached us.
+  self.is_authority or self.leader_id != "" or self.applied_lsn > 0 or
+    self.base_hint > 0
+
+proc write_base*(self: EdContext): int64 =
+  ## How far this context has read the authority's order: the base stamped on
+  ## the writes it originates. Messages arrive in LSN order, so a context whose
+  ## base is at or past an op has seen it. The authority has seen everything.
+  if self.is_authority:
+    self.lsn_counter
+  else:
+    max(self.applied_lsn, self.base_hint)
+
 proc init_metrics*(_: type EdContext, labels: varargs[string]) =
   for label in labels:
     pressure_gauge.set(0.0, label_values = [label])

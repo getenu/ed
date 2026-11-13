@@ -527,10 +527,12 @@ applies it. That's fine for a handful of cases but doesn't generalize.
 Automatic retry isn't an answer on its own: without 1, a retry is just another
 write racing the same stream.
 
-**Status:** none built. Enu's intent-value workaround covers the player for
-now. Do 1 when a second case appears (platforms, physics-driven units, anything
-one side simulates while the other overrides), 2 and 3 when multiplayer games
-need confirmed moves.
+**Status:** 1 is built as the `REJECT_STALE` flag (see `consistency.md`). 2 and
+3 aren't; do them when multiplayer games need confirmed moves.
+
+Building 1 turned up a related bug, now fixed: an authority whose only
+subscriber was an op's originator didn't publish the op at all, so the
+originator never got it back and the two disagreed for good.
 
 ## CAP & database tradeoffs — reserve-now checklist
 

@@ -38,11 +38,13 @@ proc init*(
     ctx: EdContext = nil,
     origin = "",
     op_id: int64 = 0,
+    base_lsn: int64 = 0,
 ): OperationContext =
   result = OperationContext()
   result.source = source
   result.origin = origin
   result.op_id = op_id
+  result.base_lsn = base_lsn
   if ?ctx:
     result.source.incl ctx.id
   when defined(ed_trace):

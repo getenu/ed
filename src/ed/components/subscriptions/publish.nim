@@ -243,6 +243,8 @@ proc publish_changes*[T, O](
       let originating = op_ctx.op_id == 0
       let out_op_id =
         if originating: self.ctx.next_op_id else: op_ctx.op_id
+      let out_base =
+        if originating: self.ctx.write_base else: op_ctx.base_lsn
 
       # Per-key interest (LAZY tables): a partial subscriber without
       # whole-object interest still receives ops for keys it has requested --
@@ -269,7 +271,24 @@ proc publish_changes*[T, O](
               var keyed = msg
               keyed.origin = out_origin
               keyed.op_id = out_op_id
+              keyed.base_lsn = out_base
               self.ctx.send(sub, keyed, op_ctx, self.flags)
+
+      when O is T:
+        if REJECT_STALE in self.flags:
+          # Packed ops lose their origin and base, so the authority couldn't
+          # check them. One register write is one message; more is a bug.
+          if msgs.len > 1:
+            fail "a REJECT_STALE register write produced " & $msgs.len &
+              " messages; packing it would bypass the check"
+          if originating and not self.ctx.authority_known and
+              id notin self.ctx.unordered_warned:
+            # Nothing orders our writes, so nothing can check them: the flag
+            # does nothing here. Say so once per object.
+            self.ctx.unordered_warned.incl id
+            error "REJECT_STALE register written with no authority to order it; " &
+              "nothing orders or checks its writes, so replicas can disagree",
+              object_id = id, ctx = self.ctx.id
 
       msgs = pack_messages(msgs)
 
@@ -278,9 +297,14 @@ proc publish_changes*[T, O](
       for msg in msgs.mitems:
         msg.origin = out_origin
         msg.op_id = out_op_id
+        msg.base_lsn = out_base
         if originating:
           self.ctx.latest_op_id[msg.object_id] = out_op_id
         self.ctx.stamp_lsn(msg)
+        if self.ctx.is_authority and msg.kind in {ASSIGN, TOUCH} and
+            not msg.delta:
+          obj.reg_lsn = msg.lsn
+          obj.reg_origin = out_origin
 
       # Append between stamp and fanout: an op's durable form is exactly what
       # fans out, and an op is never visible to peers in an order the log
