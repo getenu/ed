@@ -182,8 +182,10 @@ proc publish_changes*[T, O](
     # The store counts as a permanently-eligible subscriber: a headless
     # authority (no subscribers yet, or only the op's originator) must still
     # build, stamp, and append its canonical ops or they'd never become
-    # durable. Only the fanout below stays gated on real subscribers.
-    var has_eligible = self.ctx.logs_ops
+    # durable. Only the fanout below stays gated on real subscribers. An
+    # authority always has someone to send to: an op's originator gets it back
+    # (return-to-source), or it never learns the op's place in the order.
+    var has_eligible = self.ctx.logs_ops or self.ctx.is_authority
     for sub in self.ctx.subscribers:
       if sub.ctx_id notin op_ctx.source:
         has_eligible = true

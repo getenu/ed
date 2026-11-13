@@ -2,6 +2,11 @@ import std/unittest
 import ed
 import ed/zens/contexts
 
+proc settle(ctxs: varargs[EdContext]) =
+  for _ in 1 .. 4:
+    for ctx in ctxs:
+      ctx.tick()
+
 proc run*() =
   suite "lsn leader stamping":
     test "authority is designated via init":
@@ -224,3 +229,22 @@ proc run*() =
       follower.tick()
       check "lsn_obj_d" notin follower
       check follower.applied_lsn > before  # DESTROY is a stamped, ordered op
+
+    test "a lone writer gets its op back, and converges with an override":
+      # The authority's only subscriber is the op's originator, which must still
+      # get its op back (return-to-source) or the two disagree for good. Here
+      # the follower's write is ordered after the authority's override, so
+      # both settle on the write (see "conditional registers" for the fix).
+      var leader = EdContext.init(id = "cond_leader_a", is_authority = true)
+      var follower = EdContext.init(id = "cond_follower_a")
+      follower.subscribe(leader)
+      var obj = EdValue[int].init(ctx = leader, id = "cond_obj_a")
+      follower.tick()
+      let fobj = EdValue[int](follower["cond_obj_a"])
+
+      fobj.value = 1
+      follower.tick() # sent, not yet ordered
+      obj.value = 100
+      settle(leader, follower)
+      check obj.value == 1
+      check fobj.value == 1
