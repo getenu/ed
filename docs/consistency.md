@@ -110,9 +110,10 @@ echo (it was applied optimistically; re-applying a `seq.add` would duplicate).
 There's no whole-value snap-back for element-level adds/removes, so no `op_id`
 comparison is needed; the `delta` flag distinguishes the two paths.
 
-**Frontier & delete/restore.** Receivers track a per-object last-applied LSN
-(coalesced/snapshot delivery skips intermediate LSNs, so a single contiguous
-counter doesn't fit). Optimistic deletes forward to the authority; if canonical
+**Frontier & delete/restore.** Receivers track one global frontier,
+`applied_lsn`, the highest LSN applied; an op at or below it is a no-op.
+Coalesced and filtered delivery skip LSNs, so it's a high-water mark, not a
+contiguous count. There's no per-object frontier. Optimistic deletes forward to the authority; if canonical
 says deleted it confirms with an ordered DESTROY, if alive it sends a create/state
 to restore — forward correction, a restore is just a higher-LSN op. Coalesced
 delivery (latest canonical value per object per tick) removes optimistic flicker
@@ -153,9 +154,15 @@ existing type, changes neither the name nor the tid** — an old peer deserializ
 happily and reads garbage, silently. Bumping the envelope version does not catch
 this.
 
-*Not built (the real gap):* structure-aware tids (hash field layout + enum
-members, so a structural change → unknown type → safe failure) and/or
-`TypeSchema`-on-wire (graceful cross-version evolution + durable-log reads);
+**Since 0.32, the wire catches structural changes at subscribe.** SUBSCRIBE
+carries a compile-time structural hash of each registered type and container
+(`utils/layouts.nim`); the authority compares the types both sides know and
+refuses a mismatch with a `NAK`, so a mixed-build peer fails at connect instead
+of reading garbage. The tid itself is still name-only.
+
+*Not built:* the same structural check for the durable store (its gate is still
+the manual `ED_SCHEMA_VERSION`, `persistence.md`), and `TypeSchema`-on-wire
+(graceful cross-version evolution, rather than refusal, + durable-log reads);
 range-checked enum deserialization; a session nonce in SUBSCRIBE/ACK (rejects
 same-version wrong-session traffic); relaying unknown types at the authority (it
 can stamp an LSN and forward opaque bytes without understanding the type); a

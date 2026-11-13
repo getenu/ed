@@ -106,8 +106,8 @@ downstream interest in a key sheds its own copy and chains the release upstream.
 ## Notes
 
 - Builds on the relaxed validation (a replica already tolerates ops for objects it
-  doesn't hold) and the per-object reconciliation frontier (delivery is already
-  per-object). See `consistency.md`.
+  doesn't hold) and the frontier, which tolerates the LSNs a filtered stream
+  skips. See `consistency.md`.
 
 ## Eviction & interest tiers
 

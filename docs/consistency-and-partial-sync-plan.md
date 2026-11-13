@@ -59,6 +59,12 @@ not code.
 
 ## Model: per-object authority + per-object mode
 
+> **Status:** proposed, not built. What shipped is one authority per context
+> tree (`is_authority`), state-based forward correction with the op_id rule,
+> and per-object policy as `EdFlags` (`REJECT_STALE`) rather than an
+> `{authority, mode}` record. There's no `authority_of(obj)` and no `mode`.
+> `consistency.md` describes what's built.
+
 Everything reduces to a little per-object metadata, alongside the existing
 `EdFlags`:
 
@@ -163,10 +169,10 @@ snapshots, sliding back toward CRDT-grade complexity.
   retention.
 - **Access-tracking overhead for eviction** — pervasive instrumentation on the
   read hot path (`value` getter, `[]`, iteration). Needs measurement.
-- **Presence assertions are the #1 code obstacle.** `change_receiver` does
-  `assert object_id in self.ctx`; `process_message` requires resident objects.
-  Partial/lazy sync means an op can legitimately reference a non-resident
-  object. Every such site must become a **lazy-fetch-or-defer hook**.
+- **Presence assertions were the #1 code obstacle** *(resolved)*.
+  `change_receiver` asserted `object_id in self.ctx`, and `process_message`
+  required resident objects. They became placeholders and log-and-skip
+  (`partial-replicas.md`).
 
 ## Where the schema work fits
 
@@ -586,22 +592,30 @@ The axes worth holding in mind, each with a now/later verdict:
 
 ## Roadmap (order matters)
 
-> **Status:** Phase 1 is **done** and validated in Enu (branch
-> `feat/lsn-leader-ordering`, PR #10). Phase 2 is **done** (see
-> `persistence.md`): authority-side JSONL log + snapshot dirs + restart-restore
-> + `EdContext.replay` time-travel, with the git-shaped store layout. Reserve-now
-> items 1 (epoch+lsn on every op — epoch now real), 2 (first-class commit
-> point), 3 (idempotent-by-LSN replay), 4 (txn_id/commit/schema slots in the
-> log format), and 9 (op ids in entries) now have concrete homes; TypeSchema
-> content-versioning is still future (only the slots exist). Phase 0's
-> forwarding partial subscriber is still parked. Per-object `mode`
-> (optimistic/confirmed) and gap/replay buffering ended up **deferred** rather
-> than landing in Phase 1 — the implemented reconciliation is state-based
-> forward correction with the `op_id`-superseded rule (see `consistency.md`),
-> not LWW-snap + op-replay.
+> **Status:** Phases 0–4 are **done**. Phase 1 (ordering) is validated in
+> Enu. Phase 2 (`persistence.md`): authority-side JSONL log + snapshot dirs +
+> restart-restore + `EdContext.replay` time-travel, with the git-shaped store
+> layout; nothing in Enu uses the store yet. Phases 0, 3 and 4
+> (`partial-replicas.md`): partial subscribers, placeholders, fetch, per-key
+> paging, request chaining through hubs, eviction, and live/cache interest
+> tiers; Enu's client workers run as partial replicas. Reserve-now items 1
+> (epoch+lsn on every op — epoch now real), 2 (first-class commit point), 3
+> (idempotent-by-LSN replay), 4 (txn_id/commit/schema slots in the log format),
+> and 9 (op ids in entries) have concrete homes; 7 (`authority_of`) was never
+> built. TypeSchema content-versioning is still future (only the slots exist).
+> Per-object `mode` (optimistic/confirmed) and gap/replay buffering were
+> **deferred** — the implemented reconciliation is state-based forward
+> correction with the `op_id`-superseded rule (see `consistency.md`), not
+> LWW-snap + op-replay. Since then: wire-layout refusal at subscribe (0.32) and
+> `REJECT_STALE` registers ("Overrides that stick").
+>
+> Enu has changed a lot since this doc's July revision (the Unit → Thing rename,
+> per-player state, voxel frames, bakes), so the Enu inventory below is dated.
+> Revisit it, and this doc's structure, in the next data pass.
 
-- **Phase 0 — Plumbing (now, low risk).** Rebase onto main. Land forwarding
-  partial subscriber (still parked). Defer / re-aim the schema work.
+- **Phase 0 — Plumbing. *(done)*** Forwarding through partial hubs landed as
+  request chaining (`partial-replicas.md`). The schema work was re-aimed at
+  the durable path (`decentralization-and-scaling.md`).
 - **Phase 1 — Keystone: global LSN + sequencer. *(done)*** Worker (leader) stamps
   monotonic LSNs; ordered apply + dedup + frontier; return-to-source;
   reconciliation (op_id-superseded for registers, delta-dedup for collections);
@@ -612,11 +626,13 @@ The axes worth holding in mind, each with a now/later verdict:
   Full-replica time-travel/replay falls out (`EdContext.replay`). *Deferred
   from this phase:* serving live fetch misses from the log (lands with
   authority eviction), TypeSchema content versioning.
-- **Phase 3 — Interest-based partial sync.** Subscribe to subsets; filtered,
-  LSN-tagged delivery; convert presence assertions → lazy-fetch hooks;
-  materialize-on-access.
-- **Phase 4 — Eviction.** Access tracking + TTL/LRU + unsubscribe. Safe only
-  because Phases 1–2 give a durable backing; re-access re-materializes.
+- **Phase 3 — Interest-based partial sync. *(done — `partial-replicas.md`)***
+  Subscribe to subsets; filtered, LSN-tagged delivery; presence assertions →
+  placeholders; materialize-on-access; per-key paging for big tables.
+- **Phase 4 — Eviction. *(done — `partial-replicas.md`)*** Byte-budgeted LRU
+  on partial replicas, with live/cache interest tiers. Only partial replicas
+  evict; the authority doesn't (serving its misses from the log is deferred
+  with authority eviction).
 - **Phase 5 — Transactions (future).** Atomic LSN batches / commit records at
   the authority; each client applies the slice touching its objects.
 - **Phase 6 — Per-object authority / p2p (future).** Generalize `authority`

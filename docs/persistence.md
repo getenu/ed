@@ -174,12 +174,14 @@ from the running build's — a `StoreError`, overridable with
 type changes shape** (a field added/removed/reordered, an enum value added):
 `tid = hash($T)` is name-only, so without the bump a mismatched build would
 deserialize such a store's objects as garbage *silently* — the gate turns that
-into a clean refusal. This is the **manual** half of schema safety until
-structure-aware tids land, at which point the same slot gains automatic
-structural detection (see `decentralization-and-scaling.md` for the serializer +
-schema-evolution plan). `schema == 0` means legacy/unset and skips the check; a
-store with only a log and no snapshot yet has no manifest to gate, so the check
-engages once the first snapshot is written.
+into a clean refusal. This is the **manual** half of schema safety. The wire has
+had automatic structural detection since 0.32 (per-type layout hashes in
+SUBSCRIBE, `consistency.md`); recording those hashes in the manifest would give
+the store the same, and retire the manual bump (see
+`decentralization-and-scaling.md` for the serializer + schema-evolution plan).
+`schema == 0` means legacy/unset and skips the check; a store with only a log
+and no snapshot yet has no manifest to gate, so the check engages once the first
+snapshot is written.
 
 ## Not built (deferred deliberately)
 
@@ -187,11 +189,8 @@ Serving fetch/REQUEST misses from the log (the authority never evicts today —
 this lands with authority eviction); an opt-in `PERSIST` flag to replace the
 current persist-iff-synced rule (so a consumer marks exactly what's durable —
 needed because a synced object isn't necessarily one to save; the enu adoption
-depends on it); structure-aware tids / full TypeSchema (the gate above is
-version-level, not per-type structural — `tid = hash($T)` still can't detect a
-struct/enum change on its own, see `consistency.md`); the ack/commit callback
-(op_id plumbing ready); git integration itself. Known
-pre-existing gap surfaced by this work, not fixed here: with a single subscriber
-that originated the op, `has_eligible` is false and the echo never returns to
-the writer (a return-to-source violation) — capture is unaffected, the echo half
-is a follow-up.
+depends on it); structural detection for the store (the gate above is
+version-level; the wire's per-type layout hashes aren't recorded in the
+manifest yet) and full TypeSchema; the ack/commit callback
+(op_id plumbing ready); git integration itself. Nothing in enu uses the store
+yet (`enu/docs/notes/durable-persistence.md` is the adoption plan).
