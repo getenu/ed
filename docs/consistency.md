@@ -64,10 +64,13 @@ latest_op_id[obj]` is stale → advance frontier, skip effect (no snap-back); `o
 converges). Other-origin ops always apply (an authoritative override — a script
 teleport — is accepted and the entity re-bases). This is client-side prediction +
 server reconciliation, valid because values ship over one LSN-ordered stream.
-*Accepted limitation:* a write already in flight when an override lands gets a
-higher LSN, so observers briefly see the stale value before the writer's re-based
-write supersedes it (self-correcting; eliminating it needs OCC / conditional
-writes — deferred).
+*Known limitation:* a write already in flight when an override lands gets a
+higher LSN, so it wins. If the writer writes again after applying the override,
+that write is based on the override and supersedes the stale one (a brief
+flicker). If the stale write was its last, the override is lost everywhere: the
+writer applies the override and then its own latest echo, and the authority
+holds the stale value too. Fixing that needs conditional writes; see "Overrides
+that stick" in `consistency-and-partial-sync-plan.md`.
 
 **Collections** take the simpler path: an op we originated is always skipped on
 echo (it was applied optimistically; re-applying a `seq.add` would duplicate).

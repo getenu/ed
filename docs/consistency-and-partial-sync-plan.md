@@ -478,6 +478,60 @@ Design notes:
 - API shape is open (a handle returned from the setter? `set(x, on_commit=...)`?
   a per-object `track_commits`?) — see open questions.
 
+## Overrides that stick ("no really, I mean it")
+
+**The problem (seen in Enu, getenu/enu#50).** One context writes a register
+continuously (Godot's main thread writes the player body's transform every
+physics frame), and another occasionally overrides it (a script teleports the
+player from the worker, which is the authority). A write the main thread made
+before it saw the teleport reaches the authority after it, so it's ordered
+after the teleport and the authority applies it. The main thread receives the
+teleport and its own stale write in the same batch, its stale write is its
+latest, so the op_id rule applies it (and coalescing skips the teleport). The
+teleport is lost everywhere, consistently. A trace showed it with the teleport
+at LSN 2483 and the stale writes at 2489–2491.
+
+The "self-correcting" note in `consistency.md` assumes the writer writes again
+after seeing the override and so re-bases. That's only true if its latest write
+was made after the override arrived. When its last write is the stale one, it
+never sees the override at all. It isn't a coalescing bug: without coalescing
+the writer would apply the override and then its own write straight after.
+
+Enu works around it today with an intent value, the way `boost` does: the
+worker touches `teleport_value`, and the main thread, which owns the body,
+applies it. That's fine for a handful of cases but doesn't generalize.
+
+**Ways to make an override stick**, in the order we'd likely want them:
+
+1. **Conditional (stale-based) register writes — the general fix.** A write
+   carries the LSN of the latest op it had seen for that object (its base). The
+   authority drops a register write whose base is older than the latest write
+   to the object from a *different* origin, and sends the writer the canonical
+   value (it re-bases, as it would after any correction). Writes from the same
+   origin never conflict with each other, so a continuously-writing body keeps
+   working. This is OCC on one object, with "first committer wins" for
+   concurrent writes from different origins. That changes today's semantics
+   ("later writer in the authority's order wins", `lsn_tests`), so it should be
+   a per-object policy (e.g. `mode`-level, or a flag on the Ed) and not the
+   default for collections. Small on the wire: one LSN per op, which the
+   receiver already tracks per object.
+2. **Commit callbacks** (above, open question #10): the writer learns
+   confirmed-as-is vs corrected-to(X). Doesn't prevent a loss, but nothing is
+   lost silently, and tests can wait on a commit instead of sleeping.
+3. **Typed commands to an object's owner** (cross-context mutation/RPC): a
+   one-shot, acknowledged message for actions rather than values ("boost",
+   "teleport and zero velocity", "play a sound"), replacing the
+   touch-a-dummy-value pattern. Builds on 2 for the ack, and on per-object
+   ownership for routing.
+
+Automatic retry isn't an answer on its own: without 1, a retry is just another
+write racing the same stream.
+
+**Status:** none built. Enu's intent-value workaround covers the player for
+now. Do 1 when a second case appears (platforms, physics-driven units, anything
+one side simulates while the other overrides), 2 and 3 when multiplayer games
+need confirmed moves.
+
 ## CAP & database tradeoffs — reserve-now checklist
 
 The axes worth holding in mind, each with a now/later verdict:
