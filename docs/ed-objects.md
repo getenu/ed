@@ -91,7 +91,9 @@ read on main. All four become Ed fields. Everything else on `Build`, plus
 state and becomes `{.ignore.}`. `Thing.disabled` appears unused.
 
 ed's own identity (`EdRef.id`) is the exception. It has to reach the receiver, so
-it rides the CREATE envelope rather than the general field copy.
+it's marked `{.ed_identity.}`, the one plain field `stringify` keeps. (Built:
+`stringify` now clears every other plain field, and `revive` only relinks Ed
+fields.)
 
 ### Registration and accessors
 

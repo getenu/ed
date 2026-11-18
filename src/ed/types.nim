@@ -2,6 +2,9 @@ import ed/[deps]
 import pkg/[serialization, json_serialization]
 
 template ed_ignore*() {.pragma.}
+template ed_identity*() {.pragma.}
+  ## The one kind of plain field that travels: an object's identity (`EdRef.id`).
+  ## Every other plain field stays on its own side (docs/ed-objects.md).
 template ed_accessor*() {.pragma.}
 template ed_flags*(flags: untyped) {.pragma.}
   ## On a field `{.ed.}` rewrote: the flags its Ed is created with, when they
@@ -55,7 +58,7 @@ type
     ## registry can clean up `ref_pool` when ORC reclaims the instance, keeping the
     ## pool's non-owning (cursor) hold from dangling -- the subtype's own default
     ## destructor stays intact (only the trivial `RefHandle` gets a custom one).
-    id*: string
+    id* {.ed_identity.}: string
       ## The ref's identity (sync identity rides on it via `ref_id` = tid:id).
       ## Lives on the base so runtime code (the `destroy` method, `own` scopes,
       ## ownership) can use it without knowing the concrete type.

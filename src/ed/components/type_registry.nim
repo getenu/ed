@@ -64,7 +64,9 @@ proc register_type(typ: type) =
           dest = nil
         elif (src is proc):
           dest = nil
-        elif src.has_custom_pragma(ed_ignore):
+        elif not src.has_custom_pragma(ed_identity):
+          # A plain field stays on its own side: only Ed fields sync, and only
+          # the identity travels with them.
           dest = dest.type.default
       {.no_side_effect.}:
         result = flatty.to_flatty(clone[])
@@ -88,10 +90,10 @@ proc register_type(typ: type) =
   let revive =
     func (existing: ref RootObj, incoming: ref RootObj) =
       # Converge a held instance to a freshly-parsed reincarnation without
-      # replacing it. `incoming`'s Ed fields are already resolved/relinked by
-      # `parse`; copy them and the synced scalars onto `existing`, but LEAVE
-      # main-side refs / `ed_ignore` state untouched (the consumer depends on
-      # them -- e.g. a godot `node`). Mirrors `stringify`'s field handling.
+      # replacing it: relink its Ed fields to the incoming ones (already
+      # resolved by `parse`). Nothing else syncs, so nothing else is copied --
+      # this side's refs (e.g. a godot `node`) and plain fields stay as they
+      # are.
       let src = typ(incoming)
       let dest = typ(existing)
       for s, d in fields(src[], dest[]):
@@ -102,16 +104,11 @@ proc register_type(typ: type) =
           # incoming placeholder that hasn't materialized here yet.
           if ?s and (not ?d or d.id != s.id):
             d = s
-        elif s is ref:
-          discard # preserve the existing main-side reference (e.g. a node)
-        elif s is ptr:
-          discard
-        elif (s is proc):
-          discard
-        elif s.has_custom_pragma(ed_ignore):
-          discard # preserve existing local/never-synced state
         else:
-          d = s # converge a synced scalar to the new incarnation's value
+          # Refs, procs and plain fields belong to this side and are left as
+          # they are: a plain field never syncs, so the incoming copy's value
+          # is just its default (see stringify).
+          discard
 
   with_lock:
     global_type_registry[][key] =
