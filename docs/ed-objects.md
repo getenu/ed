@@ -148,8 +148,11 @@ edit t.xform:            # several changes, one read and one write
   depth, `t.size := 5` included, and has no other meaning in Nim or ed, so it can
   give its own error when nothing synced is involved.
 - **`edit`** takes an accessor (`edit t.xform:`) or an Ed (`edit t.xform_value:`)
-  and replaces enu's `value:` template. Like that template it runs the body
-  through `std/with`, so fields are written unqualified.
+  and replaces enu's `value:` template. Fields are written unqualified: an
+  assignment whose target starts with one of the value's fields (`origin.x = 10`,
+  `scale += 1`) goes to the copy. Locals and calls in the body are left alone.
+  (`std/with`, which enu's `value:` uses, can't take a path like `origin.x`, and
+  passes the copy to every call in the body, `echo` included.)
 - Together they replace enu's hand-written `origin=` and `basis=` on
   `EdValue[Transform]`.
 
@@ -215,10 +218,6 @@ Separate from the field rules, but found alongside them:
   field's flags. A field left uncreated is nil and crashes on first read.
 - **Indexes in paths.** `t.items[2] += 1` and `:=` through an index inside a
   synced value need `nnkBracketExpr` in the walk.
-- **`edit` and statement calls.** `std/with` passes the copy as the first argument
-  to every top-level call in the body, so a debugging `echo x` inside `edit`
-  becomes `echo(copy, x)`. An explicit name (`edit t.xform as x:`) avoids it, at
-  the cost of verbosity.
 - **`+=` next to other libraries.** A non-generic `+=` in another library still
   wins, but a generic one taking a non-`var` left side of the same type could be
   ambiguous with ed's. Test against enu's dependencies before shipping.
