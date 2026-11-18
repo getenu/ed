@@ -2,6 +2,10 @@ import ed/[deps]
 import pkg/[serialization, json_serialization]
 
 template ed_ignore*() {.pragma.}
+template ed_accessor*() {.pragma.}
+  ## On a getter `Ed.register` generated for a synced field: lets the field
+  ## sugar (`changes`, `+=`, `:=`, `edit`) tell a synced field from any other
+  ## call.
   ## Mark a field to be ignored during `Ed` serialization.
 
 type

@@ -28,3 +28,6 @@ export types, zens, components, utils, lifecycle
 
 import ed/client
 export client
+
+import ed/objects
+export objects

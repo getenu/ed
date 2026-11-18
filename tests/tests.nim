@@ -3,7 +3,7 @@ import
   object_tests, utils_tests, validation_tests, error_handling_tests, memory_tests,
   lsn_tests, client_tests, partial_tests, capability_tests, materialize_tests,
   lifetime_tests, ctx_teardown_tests, wire_hardening_tests,
-  seq_positional_tests, persistence_tests, layout_tests
+  seq_positional_tests, persistence_tests, layout_tests, objects_tests
 
 Ed.bootstrap
 
@@ -27,3 +27,4 @@ wire_hardening_tests.run()
 seq_positional_tests.run()
 persistence_tests.run()
 layout_tests.run()
+objects_tests.run()

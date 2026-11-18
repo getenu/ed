@@ -201,7 +201,7 @@ macro build_accessors(T: type, public: bool): untyped =
             created_procs.incl(id)
 
             var accessors = quote:
-              proc `getter`(self: `type_sym`): `value_type` =
+              proc `getter`(self: `type_sym`): `value_type` {.ed_accessor.} =
                 value(self.`sym`)
 
               proc `setter`(self: `type_sym`, value: `value_type`) =
