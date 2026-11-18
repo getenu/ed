@@ -19,7 +19,7 @@ proc serve_key_wants(self: EdContext, object_id: string) =
   let obj = self.objects[object_id]
   var done: seq[string]
   for key_bin, waiters in self.pending_key_wants[object_id]:
-    let reply = obj.publish_key(obj, key_bin)
+    let reply = obj.ops.publish_key(obj, key_bin)
     if reply.found:
       for waiter in waiters:
         # Handle-first (see the REQUEST handler): the waiter may not hold the

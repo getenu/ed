@@ -561,7 +561,7 @@ proc handle_release_keys(
         # follow set, so their ops stop streaming as well.
         if msg.object_id in self:
           let obj = self.objects[msg.object_id]
-          let reply = obj.publish_key(obj, key_bin)
+          let reply = obj.ops.publish_key(obj, key_bin)
           for nested_id in reply.nested:
             s.interest.excl nested_id
       if s.key_interest[msg.object_id].len == 0:
@@ -595,8 +595,8 @@ proc handle_release_keys(
       if not still_wanted:
         if msg.object_id in self:
           let obj = self.objects[msg.object_id]
-          if obj.evict_key != nil:
-            let evicted = obj.evict_key(obj, key_bin)
+          if obj.ops != nil:
+            let evicted = obj.ops.evict_key(obj, key_bin)
             self.drop_nested_bodies(evicted.nested)
         self.pending_key_releases.mget_or_put(msg.object_id, @[]).add key_bin
   if not retracted:
@@ -608,9 +608,9 @@ proc handle_release_keys(
     if from_upstream:
       if msg.object_id in self:
         let obj = self.objects[msg.object_id]
-        if obj.evict_key != nil:
+        if obj.ops != nil:
           for key_bin in keys:
-            let evicted = obj.evict_key(obj, key_bin)
+            let evicted = obj.ops.evict_key(obj, key_bin)
             self.drop_nested_bodies(evicted.nested)
       if not self.is_authority:
         # Relay to our own subscribers (downstream clones); the accumulated
@@ -675,7 +675,7 @@ proc handle_request(self: EdContext, msg: Message, source: HashSet[string]) =
         if not obj.placeholder:
           obj.publish_create(s, contents = false)
         for key_bin in msg.obj.from_flatty(seq[string]):
-          let reply = obj.publish_key(obj, key_bin)
+          let reply = obj.ops.publish_key(obj, key_bin)
           if reply.found:
             if self.has_budget: # recency only feeds the cache LRU
               obj.key_last_read[key_bin] = get_mono_time() # served -> in-view
@@ -808,7 +808,7 @@ proc handle_op(self: EdContext, msg: Message, source: HashSet[string]) =
         obj.publish_create(sub, op_ctx = OperationContext.init(ctx = self))
         break
     return
-  obj.change_receiver(
+  obj.ops.change_receiver(
     obj,
     msg,
     op_ctx = OperationContext.init(

@@ -226,7 +226,7 @@ proc publish_changes*[T, O](
               \"{get_stack_trace()}\n\nop:\n{op_ctx.trace}"
             else:
               ""
-          msgs.add obj.build_message(obj, change, id, trace)
+          msgs.add obj.ops.build_message(obj, change, id, trace)
 
       # Tag each op with its origin (the original writer) so writers can dedup
       # their own returned delta ops. Forwards preserve the incoming origin;

@@ -76,21 +76,12 @@ proc forget_key_bytes*(self: EdContext, body: ref EdBodyBase, key_bin: string) =
 # --- proxy/ref reaping + closures --------------------------------------------
 
 proc release_closures*(body: ref EdBodyBase) =
-  ## Break the body's self-capturing closures. mint/untrack_zid/sweep_gen capture
-  ## the body; `publish_create` captures both the body *and* its context (it
-  ## reads `ctx.subscribers` / `ctx.send` / `ctx.tick_reactor`), so leaving it set
-  ## pins the whole context -- the object<->context cycle the cursor backref was
-  ## meant to break, reintroduced through the closure environment. ORC does not
-  ## collect closure cycles, so an unreleased body leaks itself and its context.
-  ## (build_message/change_receiver/publish_key/evict_key take `body` as a
-  ## parameter and reach ctx via `body.ctx` -- they capture nothing, so they need
-  ## no release.) Every caller removes the body from `objects` right after, so the
-  ## body is leaving the registry and these will not be invoked again.
+  ## Mark the body as leaving the registry: every caller removes it from
+  ## `objects` right after. mint, untrack_zid, sweep_gen and publish_create then
+  ## no longer run on it. (The sync procs capture nothing -- see BodyOps -- so
+  ## there's no cycle to break; the name is from when they did.)
   privileged
-  body.mint = nil
-  body.untrack_zid = nil
-  body.sweep_gen = nil
-  body.publish_create = nil
+  body.released = true
 
 proc drop_nested_bodies*(self: EdContext, nested: seq[string]) =
   ## Unregister the nested container bodies an evicted entry carried (a paged-
@@ -159,8 +150,8 @@ proc prune_dead_proxies*(self: EdContext) =
         # The dead proxy's callbacks die with it -- registered through it,
         # cleaned when it goes (the sentinel model). Deterministic: next
         # prune, not cycle-collector cadence.
-        if body.sweep_gen != nil:
-          for zid in body.sweep_gen(gen):
+        if body.ops != nil and not body.released:
+          for zid in body.ops.sweep_gen(body, gen):
             self.close_index.del(zid)
 
 proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
@@ -173,8 +164,8 @@ proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
   self.prune_dead_proxies
   if body.proxy != nil:
     return body.proxy
-  if body.mint != nil:
-    return body.mint()
+  if body.ops != nil and not body.released:
+    return body.ops.mint(body)
   # A registered body always carries its typed `mint` (wired in `defaults`), so
   # one of the branches above returns. Reaching here means a released or
   # malformed body slipped into an identity read -- a bug, surfaced rather than

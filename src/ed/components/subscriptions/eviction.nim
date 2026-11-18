@@ -201,8 +201,8 @@ proc evict_sweep*(self: EdContext) =
     let (_, id, key_bin) = key_heap.pop
     debug "evicting key (pressure)", object_id = id
     let obj = self.objects[id]
-    if obj != nil and obj.evict_key != nil:
-      let evicted = obj.evict_key(obj, key_bin) # evict_key -> forget_key_bytes
+    if obj != nil and obj.ops != nil:
+      let evicted = obj.ops.evict_key(obj, key_bin) # evict_key -> forget_key_bytes
       self.drop_nested_bodies(evicted.nested)    # ...clears key_last_read too
     self.pending_key_releases.mget_or_put(id, @[]).add key_bin # retract upstream
 
