@@ -15,7 +15,7 @@
 ##   ...
 ## ```
 
-import std/[macros, strutils]
+import std/[macros, strutils, sequtils]
 import ed/types
 import ed/components/subscriptions/watch
 
@@ -51,24 +51,60 @@ proc with_name(name, new_name: NimNode): NimNode =
   else:
     new_name
 
+const
+  scope_pragmas = ["local", "remote", "unsynced"]
+  flag_pragmas = ["owns_members", "reject_stale"]
+
+proc field_flags(pragmas: seq[NimNode], at: NimNode): NimNode =
+  ## The flags a field's pragmas ask for, as a set literal, or nil for the
+  ## default (`SYNC_LOCAL`, `SYNC_REMOTE`).
+  var scope = ""
+  var extra: seq[string]
+  for p in pragmas:
+    let name = p.str_val
+    if name in scope_pragmas:
+      if scope != "":
+        error("a field takes one of `local`, `remote` and `unsynced`", at)
+      scope = name
+    elif name in flag_pragmas:
+      extra.add name
+  if scope == "" and extra.len == 0:
+    return nil
+  result = newNimNode(nnkCurly)
+  case scope
+  of "": result.add ident"SYNC_LOCAL", ident"SYNC_REMOTE"
+  of "local": result.add ident"SYNC_LOCAL"
+  of "remote": result.add ident"SYNC_REMOTE"
+  else: discard # unsynced
+  for name in extra:
+    result.add ident(name.to_upper_ascii)
+
 proc rewrite_field(name: NimNode, field_type, default: NimNode): NimNode =
   ## One field of an `{.ed.}` object, rewritten.
   var name = name
-  var pragmas = newNimNode(nnkPragma)
-  var ignored = false
+  var pragmas = newNimNode(nnkPragma) # passed through to the new field
+  var ours: seq[NimNode]              # ignore and the flag pragmas
   if name.kind == nnkPragmaExpr:
     for p in name[1]:
-      if p.kind == nnkIdent and p.eq_ident("ignore"):
-        ignored = true
+      if p.kind == nnkIdent and
+          (p.eq_ident("ignore") or p.str_val in scope_pragmas or
+            p.str_val in flag_pragmas):
+        ours.add p
       else:
         pragmas.add p
     name = name[0]
+  let ignored = ours.any_it(it.eq_ident("ignore"))
   if ignored:
+    if ours.len > 1:
+      error("an `{.ignore.}` field isn't an Ed, so it takes no sync pragmas", name)
     pragmas.add ident"ed_ignore"
     let named =
       if pragmas.len > 0: nnkPragmaExpr.new_tree(name, pragmas) else: name
     return nnkIdentDefs.new_tree(named, field_type, default)
 
+  let flags = ours.field_flags(name)
+  if not flags.is_nil:
+    pragmas.add nnkExprColonExpr.new_tree(ident"ed_flags", flags)
   let container = field_type.container_type
   let (new_name, new_type) =
     if not container.is_nil:

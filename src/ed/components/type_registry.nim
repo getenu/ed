@@ -168,6 +168,8 @@ macro build_accessors(T: type, public: bool): untyped =
 
       for ident in field_defs:
         var ident = ident
+        if ident.kind == nnk_pragma_expr:
+          ident = ident[0]
         if ident.kind == nnk_postfix:
           ident = ident[1]
 

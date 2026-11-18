@@ -2,8 +2,13 @@ import std/[unittest, macros]
 import ed
 import ./objects_tests_types
 
+# A context of our own: one left by an earlier test may have a subscriber
+# nobody ticks, and creating a gadget's fields would fill its channel.
+let objects_ctx = EdContext.init(id = "objects_tests")
+
 proc gadget(): Gadget =
-  Gadget().init_ed_fields
+  Ed.thread_ctx = objects_ctx
+  Gadget().init_ed_fields(ctx = objects_ctx)
 
 proc run*() =
   test "{.ed.} fields become Ed fields; ignored ones stay plain":
@@ -87,6 +92,7 @@ proc run*() =
     check g.xform.scale == 4.0
 
   test "plain variables and Ed containers keep their own +=":
+    Ed.thread_ctx = objects_ctx
     var f = 1.0
     f += 2
     var s = "a"
@@ -112,3 +118,31 @@ proc run*() =
       notes.add "set scale"
     check g.xform.scale == 3.0
     check notes == @["set scale"]
+
+  test "field pragmas set the Ed's flags":
+    let g = gadget()
+    check g.size_value.flags == {SYNC_LOCAL, SYNC_REMOTE}
+    check g.note_value.flags == {SYNC_LOCAL}
+    check g.beacon_value.flags == {SYNC_REMOTE}
+    check g.scratch_value.flags == {}
+    check g.gadgets.flags == {SYNC_LOCAL, SYNC_REMOTE, OWNS_MEMBERS}
+    check g.pos_value.flags == {SYNC_LOCAL, SYNC_REMOTE, REJECT_STALE}
+
+  test "an unsynced field is still an Ed: watched, +=, :=":
+    let g = gadget()
+    var seen = 0
+    g.scratch.changes:
+      if added:
+        inc seen
+    g.scratch += 2
+    g.scratch := 5
+    check g.scratch == 5
+    check seen == 2
+
+  test "init_ed_fields leaves a field that already exists":
+    Ed.thread_ctx = objects_ctx
+    var g = Gadget()
+    g.size_value = EdValue[float].init(flags = {SYNC_LOCAL}, ctx = objects_ctx)
+    g.init_ed_fields(ctx = objects_ctx)
+    check g.size_value.flags == {SYNC_LOCAL}
+    check g.count_value.flags == {SYNC_LOCAL, SYNC_REMOTE}

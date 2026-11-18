@@ -3,6 +3,9 @@ import pkg/[serialization, json_serialization]
 
 template ed_ignore*() {.pragma.}
 template ed_accessor*() {.pragma.}
+template ed_flags*(flags: untyped) {.pragma.}
+  ## On a field `{.ed.}` rewrote: the flags its Ed is created with, when they
+  ## aren't the default. Read by `init_ed_fields`.
   ## On a getter `Ed.register` generated for a synced field: lets the field
   ## sugar (`changes`, `+=`, `:=`, `edit`) tell a synced field from any other
   ## call.
