@@ -1,4 +1,4 @@
-import std/[unittest, macros]
+import std/[unittest, macros, tables]
 import ed
 import ./objects_tests_types
 
@@ -175,4 +175,28 @@ proc run*() =
     holder.value = w
     settle()
     check copy.note == "the receiver's"
+    Ed.thread_ctx = objects_ctx
+
+  test "paths can index into a field's value":
+    let g = gadget()
+    g.grid = Grid(cells: @[1, 2, 3], rows: @[Vec(), Vec()], names: {"a": 1}.to_table)
+    var writes = 0
+    g.grid.changes:
+      if added:
+        inc writes
+    var calls = 0
+    proc second(): int =
+      inc calls
+      1
+    g.grid.cells[second()] += 10
+    g.grid.rows[1].x := 4
+    g.grid.names["a"] += 1
+    edit g.grid:
+      cells[0] = 7
+      rows[0].y = 2
+    check g.grid.cells == @[7, 12, 3]
+    check g.grid.rows == @[Vec(x: 0, y: 2), Vec(x: 4, y: 0)]
+    check g.grid.names["a"] == 2
+    check calls == 1
+    check writes == 4
     Ed.thread_ctx = objects_ctx

@@ -164,21 +164,33 @@ proc is_ed_accessor(call: NimNode): bool =
     if p.kind == nnkSym and p.eq_ident("ed_accessor"):
       return true
 
+proc is_index_call(node: NimNode): bool =
+  node.kind in {nnkCall, nnkCommand} and node.len >= 3 and
+    node[0].kind == nnkSym and node[0].str_val == "[]"
+
 proc synced_root(target: NimNode): tuple[root: NimNode, path: seq[NimNode]] =
-  ## Walk `owner.field.a.b` down to the accessor call for `field`; `path` is
-  ## the parts below it (`a`, `b`). `root` is nil if there's no synced field.
+  ## Walk `owner.field.a[i].b` down to the accessor call for `field`; `path` is
+  ## the parts below it: an ident for a field, an `nnkBracket` of indexes for
+  ## an index. `root` is nil if there's no synced field.
   var node = target
   while true:
     if node.is_ed_accessor:
       return (node, result.path)
     case node.kind
     of nnkDotExpr:
-      result.path.insert node[1], 0
+      result.path.insert ident(node[1].str_val), 0
+      node = node[0]
+    of nnkBracketExpr:
+      result.path.insert nnkBracket.new_tree(node[1 ..^ 1]), 0
       node = node[0]
     of nnkHiddenDeref, nnkHiddenAddr, nnkHiddenStdConv, nnkHiddenSubConv:
       node = node[0]
     else:
-      return (nil, @[])
+      if node.is_index_call:
+        result.path.insert nnkBracket.new_tree(node[2 ..^ 1]), 0
+        node = node[1]
+      else:
+        return (nil, @[])
 
 proc ed_field(accessor: NimNode): NimNode =
   ## `scale(owner)` -> `owner.scale_value`
@@ -190,7 +202,7 @@ proc setter_of(accessor: NimNode): NimNode =
 proc write_back(target, value: NimNode, op: string): NimNode =
   ## Read the synced field under `target`, set (or `op`-combine) the part
   ## `target` names, write the field back: one write. nil if `target` has no
-  ## synced field under it.
+  ## synced field under it. Each index is evaluated once.
   let (root, path) = target.synced_root
   if root.is_nil:
     return nil
@@ -198,15 +210,26 @@ proc write_back(target, value: NimNode, op: string): NimNode =
   let setter = root.setter_of
   let owner = root[1]
   let copy = gensym(nskVar, "copy")
+  var indexes = new_stmt_list()
   var part = copy
   for p in path:
-    part = nnkDotExpr.new_tree(part, ident(p.str_val))
+    if p.kind == nnkBracket:
+      var access = nnkBracketExpr.new_tree(part)
+      for index in p:
+        let name = gensym(nskLet, "index")
+        indexes.add nnkLetSection.new_tree(
+          nnkIdentDefs.new_tree(name, new_empty_node(), index))
+        access.add name
+      part = access
+    else:
+      part = nnkDotExpr.new_tree(part, p)
   let new_value =
     if op == "": value
     else: newCall(nnkAccQuoted.new_tree(ident(op)), part, value)
   result = quote do:
     block:
       let obj = `owner`
+      `indexes`
       var `copy` = `getter`(obj)
       `part` = `new_value`
       `setter`(obj, `copy`)

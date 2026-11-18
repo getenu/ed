@@ -1,3 +1,4 @@
+import std/tables
 import ed
 
 type
@@ -7,6 +8,11 @@ type
   Xform* = object
     origin*: Vec
     scale*: float
+
+  Grid* = object
+    cells*: seq[int]
+    rows*: seq[Vec]
+    names*: Table[string, int]
 
   Gadget* {.ed.} = ref object of EdRef
     size*: float
@@ -20,6 +26,7 @@ type
     scratch* {.unsynced.}: int
     gadgets* {.owns_members.}: seq[Gadget]
     pos* {.reject_stale.}: Vec
+    grid*: Grid
 
 Ed.register(Gadget)
 
