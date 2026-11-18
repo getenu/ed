@@ -499,6 +499,67 @@ type
       dump_at*: MonoTime
       counts*: array[MessageKind, int]
 
+  BodyOps* = object
+    ## The sync procs for one Ed type, built once per type in `defaults` and
+    ## shared by all its bodies. Each takes the body as a parameter and captures
+    ## nothing, so a body pays one pointer for them rather than a proc field
+    ## each.
+    build_message*: proc(
+      body: ref EdBodyBase, change: BaseChange, id: string, trace: string
+    ): Message {.gcsafe.}
+
+    # The canonical CREATE for this body right now. `contents = false` skips
+    # serializing `tracked` entirely (a handle -- the LAZY push; serializing a
+    # big table just to blank it is the cost LAZY exists to avoid); `true` is
+    # the full dump regardless of LAZY, shared by publish_create (wire) and
+    # the snapshot writer (disk).
+    build_create*:
+      proc(body: ref EdBodyBase, contents: bool): Message {.gcsafe.}
+
+    publish_create_impl*: proc(
+      body: ref EdBodyBase,
+      sub = Subscription(),
+      broadcast = false,
+      op_ctx = OperationContext(),
+      contents = true, # false = handle only (empty-body CREATE; LAZY push)
+    ) {.gcsafe.}
+
+    change_receiver*:
+      proc(body: ref EdBodyBase, msg: Message, op_ctx: OperationContext) {.gcsafe.}
+
+    # Per-key fetch (partial EdTable). Given a serialized key, build the ADD op
+    # carrying that key's current value, so a partial subscriber can pull one
+    # entry without the whole table. `found = false` if the key isn't present.
+    # `nested` lists Ed containers inside the value (a chunk's delta seq) -- the
+    # server publishes those *before* the entry so the receiver links them
+    # (per-key deep, one round trip). nil for non-table containers.
+    publish_key*:
+      proc(
+        body: ref EdBodyBase, key_bin: string
+      ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.}
+
+    # Per-key eviction (paging). Given a serialized key, drop the entry locally
+    # -- fires REMOVED callbacks, no publish -- and report whether it was present
+    # plus the ids of Ed containers nested in its value (so the caller can shed
+    # interest / relay them). The local half of `release` and the receiving half
+    # of a RELEASE eviction notice. nil for non-table containers.
+    evict_key*:
+      proc(
+        body: ref EdBodyBase, key_bin: string
+      ): tuple[found: bool, nested: seq[string]] {.gcsafe.}
+
+    # Typed proxy factory, wired in `defaults` (the only place the concrete
+    # Ed[T, O] is known). Mints over this body, sets the backref + handle.
+    mint*: proc(body: ref EdBodyBase): ref EdBase {.gcsafe.}
+    # Typed context-level untrack (see EdContext.close_index): untracks `zid`
+    # on the live proxy, or no-ops -- a dead proxy already took its callbacks
+    # with it. Captures only the body (the mint pattern).
+    untrack_zid*: proc(body: ref EdBodyBase, zid: EID) {.gcsafe.}
+    # Sweep callbacks registered through a now-dead proxy generation; returns
+    # the swept zids so the context can clear its close_index. Typed work
+    # behind an untyped hook (the publish_key pattern).
+    sweep_gen*: proc(body: ref EdBodyBase, gen: int): seq[EID] {.gcsafe.}
+
   EdBodyBase* = object of RootObj
     ## Registry-side state of a container -- the *body* of the proxy/body split
     ## (docs/proxy-body.md). Carries the data and everything the wire needs; the
@@ -542,48 +603,12 @@ type
     # Authority: the LSN and origin of the latest register write (REJECT_STALE).
     reg_lsn*: int64
     reg_origin*: string
-    build_message: proc(
-      body: ref EdBodyBase, change: BaseChange, id: string, trace: string
-    ): Message {.gcsafe.}
-
-    # The canonical CREATE for this body right now. `contents = false` skips
-    # serializing `tracked` entirely (a handle -- the LAZY push; serializing a
-    # big table just to blank it is the cost LAZY exists to avoid); `true` is
-    # the full dump regardless of LAZY, shared by publish_create (wire) and
-    # the snapshot writer (disk).
-    build_create:
-      proc(body: ref EdBodyBase, contents: bool): Message {.gcsafe.}
-
-    publish_create: proc(
-      sub = Subscription(),
-      broadcast = false,
-      op_ctx = OperationContext(),
-      contents = true, # false = handle only (empty-body CREATE; LAZY push)
-    ) {.gcsafe.}
-
-    change_receiver:
-      proc(body: ref EdBodyBase, msg: Message, op_ctx: OperationContext) {.gcsafe.}
-
-    # Per-key fetch (partial EdTable). Given a serialized key, build the ADD op
-    # carrying that key's current value, so a partial subscriber can pull one
-    # entry without the whole table. `found = false` if the key isn't present.
-    # `nested` lists Ed containers inside the value (a chunk's delta seq) -- the
-    # server publishes those *before* the entry so the receiver links them
-    # (per-key deep, one round trip). nil for non-table containers.
-    publish_key:
-      proc(
-        body: ref EdBodyBase, key_bin: string
-      ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.}
-
-    # Per-key eviction (paging). Given a serialized key, drop the entry locally
-    # -- fires REMOVED callbacks, no publish -- and report whether it was present
-    # plus the ids of Ed containers nested in its value (so the caller can shed
-    # interest / relay them). The local half of `release` and the receiving half
-    # of a RELEASE eviction notice. nil for non-table containers.
-    evict_key:
-      proc(
-        body: ref EdBodyBase, key_bin: string
-      ): tuple[found: bool, nested: seq[string]] {.gcsafe.}
+    # The type's sync procs, shared by every body of the type (see BodyOps).
+    # nil for a serialization husk, which never syncs.
+    ops*: ptr BodyOps
+    # Set by release_closures: the body is leaving the registry, so mint,
+    # untrack_zid, sweep_gen and publish_create must no longer run on it.
+    released*: bool
 
     # Back-reference to the owning context. `{.cursor.}` (non-owning): the
     # context owns its objects via `objects*` (a strong OrderedTable), so this
@@ -602,17 +627,6 @@ type
     # (the RefHandle discipline, applied to containers).
     proxy {.cursor.}: ref EdBase
     proxy_gen: int
-    # Typed proxy factory, wired in `defaults` (the only place the concrete
-    # Ed[T, O] is known). Mints over this body, sets the backref + handle.
-    mint: proc(): ref EdBase {.gcsafe.}
-    # Typed context-level untrack (see EdContext.close_index): untracks `zid`
-    # on the live proxy, or no-ops -- a dead proxy already took its callbacks
-    # with it. Captures only the body (the mint pattern).
-    untrack_zid: proc(zid: EID) {.gcsafe.}
-    # Sweep callbacks registered through a now-dead proxy generation; returns
-    # the swept zids so the context can clear its close_index. Typed work
-    # behind an untyped hook (the publish_key pattern).
-    sweep_gen: proc(gen: int): seq[EID] {.gcsafe.}
 
   ChangeCallback[O] = proc(
     changes: seq[Change[O]], it: ref EdBase
@@ -635,7 +649,9 @@ type
     # pruned, its callbacks sweep with it -- deterministic next-tick cleanup.
     callback_gens: Table[EID, int]
     link_eid: EID
-    paused_eids: set[EID]
+    paused_eids: seq[EID]
+      ## Usually empty, and a few at most: a seq costs nothing until used, where
+      ## `set[EID]` was an 8 KB bitmap inline in every body.
 
   ProxyHandle* = ref object
     ## Per-proxy registry-cleanup handle (the container twin of `RefHandle`).
@@ -722,7 +738,16 @@ proc init_husk*[T, O](_: typedesc[Ed[T, O]], id: string): Ed[T, O] =
 proc build_message*(
     self: ref EdBase, slf: ref EdBase, change: BaseChange, id, trace: string
 ): Message {.gcsafe.} =
-  self.body.build_message(slf.body, change, id, trace)
+  self.body.ops.build_message(slf.body, change, id, trace)
+
+proc publish_create*(
+    body: ref EdBodyBase,
+    sub = Subscription(),
+    broadcast = false,
+    op_ctx = OperationContext(),
+    contents = true,
+) {.gcsafe.} =
+  body.ops.publish_create_impl(body, sub, broadcast, op_ctx, contents)
 
 proc publish_create*(
     self: ref EdBase,
@@ -736,17 +761,17 @@ proc publish_create*(
 proc change_receiver*(
     self: ref EdBase, slf: ref EdBase, msg: Message, op_ctx: OperationContext
 ) {.gcsafe.} =
-  self.body.change_receiver(slf.body, msg, op_ctx)
+  self.body.ops.change_receiver(slf.body, msg, op_ctx)
 
 proc publish_key*(
     self: ref EdBase, slf: ref EdBase, key_bin: string
 ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.} =
-  self.body.publish_key(slf.body, key_bin)
+  self.body.ops.publish_key(slf.body, key_bin)
 
 proc evict_key*(
     self: ref EdBase, slf: ref EdBase, key_bin: string
 ): tuple[found: bool, nested: seq[string]] {.gcsafe.} =
-  self.body.evict_key(slf.body, key_bin)
+  self.body.ops.evict_key(slf.body, key_bin)
 
 var next_ctx_uid*: Atomic[int]
   ## Global source of `EdContext.uid`. Must be process-wide: the dead-handle
@@ -900,3 +925,12 @@ proc from_flatty*(s: string, i: var int, msg: var Message) =
     s.from_flatty(i, msg.trace)
     s.from_flatty(i, msg.id)
     s.from_flatty(i, msg.debug)
+
+proc pause_eid*(eids: var seq[EID], eid: EID) =
+  if eid notin eids:
+    eids.add eid
+
+proc resume_eid*(eids: var seq[EID], eid: EID) =
+  let at = eids.find(eid)
+  if at >= 0:
+    eids.del at

@@ -103,7 +103,7 @@ proc snapshot*(self: EdContext): string {.discardable.} =
       # not contain, or snapshot != replay(log).
       continue
     inc idx
-    var msg = body.build_create(body, true)
+    var msg = body.ops.build_create(body, true)
     msg.epoch = store.epoch
     let line = msg.to_entry_line
     let file = object_file(idx, id)

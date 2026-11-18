@@ -27,8 +27,8 @@ proc untrack*(ctx: EdContext, zid: EID) =
     ctx.close_index.del(zid)
     if object_id in ctx.objects and ctx.objects[object_id] != nil:
       let body = ctx.objects[object_id]
-      if body.untrack_zid != nil:
-        body.untrack_zid(zid)
+      if body.ops != nil and not body.released:
+        body.ops.untrack_zid(body, zid)
   else:
     debug "No close index entry for zid", zid = zid
 
@@ -405,27 +405,27 @@ proc pause_changes*(self: Ed, eids: varargs[EID]) =
   assert self.valid
   if eids.len == 0:
     for eid in self.typed_body.changed_callbacks.keys:
-      self.typed_body.paused_eids.incl(eid)
+      self.typed_body.paused_eids.pause_eid(eid)
   else:
     for eid in eids:
-      self.typed_body.paused_eids.incl(eid)
+      self.typed_body.paused_eids.pause_eid(eid)
 
 proc resume_changes*(self: Ed, eids: varargs[EID]) =
   ## Resume change callbacks. Pass specific EIDs or none to resume all.
   privileged
   assert self.valid
   if eids.len == 0:
-    self.typed_body.paused_eids = {}
+    self.typed_body.paused_eids = @[]
   else:
     for eid in eids:
-      self.typed_body.paused_eids.excl(eid)
+      self.typed_body.paused_eids.resume_eid(eid)
 
 template pause_impl(self: Ed, eids: untyped, body: untyped) =
   privileged
 
   let previous = self.typed_body.paused_eids
   for eid in eids:
-    self.typed_body.paused_eids.incl(eid)
+    self.typed_body.paused_eids.pause_eid(eid)
   try:
     body
   finally:
@@ -518,8 +518,8 @@ proc destroy_owned*(ctx: EdContext, owner_id: string) =
     for id in owned:
       if id in ctx.objects and ?ctx.objects[id]:
         let obj = ctx.objects[id]
-        if not obj.change_receiver.is_nil:
-          obj.change_receiver(obj, Message(kind: DESTROY), OperationContext())
+        if obj.ops != nil:
+          obj.ops.change_receiver(obj, Message(kind: DESTROY), OperationContext())
     ctx.owned_by.del(owner_id)
 
 method destroy*(self: EdRef) {.base, gcsafe.} =

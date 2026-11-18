@@ -57,7 +57,7 @@ proc relay_fill*[T, O](item: Ed[T, O], op_ctx: OperationContext) =
   # drops ops for unknown ids; the CREATE bin restores the same state).
   if item.ctx.logs_ops:
     item.ctx.store.append(
-      item.body.build_create(item.body, true), item.ctx.epoch, item.flags
+      item.body.ops.build_create(item.body, true), item.ctx.epoch, item.flags
     )
   item.publish_create(broadcast = true, op_ctx = op_ctx)
 
@@ -180,62 +180,24 @@ proc create_initializer[T, O](self: Ed[T, O]) =
         type_name,
       )
 
-proc defaults[T, O](
-    self: Ed[T, O],
-    ctx: EdContext,
-    id: string,
-    op_ctx: OperationContext,
-    broadcast = true,
-    flags = DEFAULT_FLAGS,
-    placeholder = false,
-): Ed[T, O] =
+proc make_body_ops[T, O](): BodyOps =
+  ## Ed[T, O]'s sync procs. They take the body as a parameter and capture
+  ## nothing: a capture would cost every object a closure environment and pin
+  ## its body (and context) in a cycle ORC doesn't collect.
   privileged
-  log_defaults
-
-  # The proxy/body split: the body carries the data + sync state; field access
-  # on the proxy forwards to it (types.nim templates). Minted here -- before
-  # anything reads a forwarded field -- since object construction can no longer
-  # set what are now body fields.
-  when O isnot T:
-    if REJECT_STALE in flags:
-      fail "REJECT_STALE only applies to registers (EdValue); " & $Ed[T, O] &
-        " would quietly stay last-write-wins"
-  let body = EdBody[T, O](flags: flags, placeholder: placeholder)
-  self.body = body
-
-  create_initializer(self)
-
-  # Register the Ed type name for debugging
-  const ed_type_id = Ed[T, O].tid
-  const ed_type_name = $Ed[T, O]
-  {.gcsafe.}:
-    if ed_type_id notin global_type_name_registry[]:
-      global_type_name_registry[][ed_type_id] = ed_type_name
-
-  self.id =
-    if id == "":
-      generate_id()
-    else:
-      id
-
-  debug "creating zen object", id = self.id
-
-  if self.id in ctx.objects and not ?ctx.objects[self.id]:
-    ctx.pack_objects
-  # The registry owns the body; the proxy is reachable through the backref +
-  # mint (resolve_proxy). `ctx_uid` by value so the handle's destructor never
-  # dereferences the context.
-  ctx.objects[self.id] = body
-  let ctx_uid = ctx.uid
-  body.mint = proc(): ref EdBase {.gcsafe.} =
+  result.mint = proc(base: ref EdBodyBase): ref EdBase {.gcsafe.} =
+    let body = EdBody[T, O](base)
     let proxy = Ed[T, O](body: body)
     inc body.proxy_gen
     proxy.proxy_handle = ProxyHandle(
-      ctx_uid: ctx_uid, object_id: body.id, gen: body.proxy_gen
+      ctx_uid: (if body.ctx != nil: body.ctx.uid else: 0),
+      object_id: body.id,
+      gen: body.proxy_gen,
     )
     body.proxy = proxy
     proxy
-  body.untrack_zid = proc(zid: EID) {.gcsafe.} =
+  result.untrack_zid = proc(base: ref EdBodyBase, zid: EID) {.gcsafe.} =
+    let body = EdBody[T, O](base)
     # Context-level untrack: only meaningful while a proxy is live -- a dead
     # proxy's callbacks died with it. Prune first so the backref read is safe.
     if body.ctx != nil:
@@ -249,28 +211,15 @@ proc defaults[T, O](
         callback(@[Change.init(O, {CLOSED})], body.proxy)
       body.changed_callbacks.del(zid)
       body.callback_gens.del(zid)
-  body.sweep_gen = proc(gen: int): seq[EID] {.gcsafe.} =
+  result.sweep_gen = proc(base: ref EdBodyBase, gen: int): seq[EID] {.gcsafe.} =
+    let body = EdBody[T, O](base)
     for zid, g in tables.pairs(body.callback_gens):
       if g == gen:
         result.add zid
     for zid in result:
       body.changed_callbacks.del(zid)
       body.callback_gens.del(zid)
-  body.proxy_gen = 1
-  body.proxy = self
-  self.proxy_handle =
-    ProxyHandle(ctx_uid: ctx_uid, object_id: self.id, gen: 1)
-
-  # If created inside an `own` scope, record the owner: bake its id into the
-  # container and index it, so the owner's `destroy_owned` can tear this down in
-  # any context (container teardown is ownership-driven; the lifetime carries
-  # callbacks). No scope open -> unowned.
-  {.gcsafe.}:
-    if current_owner_id.len > 0:
-      self.owner_id = current_owner_id
-      ctx.owned_by.mget_or_put(current_owner_id, init_hash_set[string]()).incl(self.id)
-
-  self.body.build_create = proc(
+  result.build_create = proc(
       body: ref EdBodyBase, contents: bool
   ): Message {.gcsafe.} =
     # The canonical CREATE for this body right now. `contents = false` is a
@@ -294,19 +243,21 @@ proc defaults[T, O](
       # source is set by send() based on subscription type
     )
 
-  self.body.publish_create = proc(
+  result.publish_create_impl = proc(
+      body: ref EdBodyBase,
       sub: Subscription,
       broadcast: bool,
       op_ctx = OperationContext(),
       contents = true,
-  ) =
+  ) {.gcsafe.} =
     log_defaults "ed publishing"
     trace "publish_create", sub
+    let ctx = body.ctx
 
     # `contents = false` sends a handle: an empty-body CREATE (id + flags,
     # no data). Used to push LAZY containers to partial subscribers -- the
     # receiver registers a placeholder and pulls entries per-key.
-    let create_msg = body.build_create(body, contents)
+    let create_msg = body.ops.build_create(body, contents)
 
     template send_msg(src_ctx, sub) =
       # Capability filter: don't send an object to a peer that can't materialize
@@ -330,9 +281,9 @@ proc defaults[T, O](
           ctx.send_msg(sub)
     ctx.tick_reactor
 
-  self.body.build_message = proc(
+  result.build_message = proc(
       body: ref EdBodyBase, change: BaseChange, id, trace: string
-  ): Message =
+  ): Message {.gcsafe.} =
     var msg = Message(object_id: id, type_id: Ed[T, O].tid)
     # Collections (change object O differs from tracked T) are delta /
     # non-idempotent ops; registers (O is T) are whole-value and idempotent.
@@ -392,9 +343,9 @@ proc defaults[T, O](
         msg.key_bin = (change.index, change.shift).to_flatty
     result = msg
 
-  self.body.change_receiver = proc(
+  result.change_receiver = proc(
       body: ref EdBodyBase, msg: Message, op_ctx: OperationContext
-  ) =
+  ) {.gcsafe.} =
     # Resolve (minting if none is live) the typed proxy: assign/unassign and
     # callback triggering run through it. A fresh mint simply has no app
     # callbacks to fire.
@@ -495,7 +446,7 @@ proc defaults[T, O](
     else:
       fail "Can't handle message " & $msg.kind
 
-  self.body.publish_key = proc(
+  result.publish_key = proc(
       body: ref EdBodyBase, key_bin: string
   ): tuple[found: bool, msg: Message, nested: seq[string]] {.gcsafe.} =
     # Per-key fetch: build the ADD op for one entry so a partial subscriber can
@@ -529,7 +480,7 @@ proc defaults[T, O](
     else:
       discard
 
-  self.body.evict_key = proc(
+  result.evict_key = proc(
       body: ref EdBodyBase, key_bin: string
   ): tuple[found: bool, nested: seq[string]] {.gcsafe.} =
     # Per-key eviction: drop the entry locally (REMOVED callbacks fire so
@@ -560,6 +511,76 @@ proc defaults[T, O](
     else:
       discard
 
+proc body_ops[T, O](): ptr BodyOps =
+  ## The type's one shared table. A `{.global.}` is filled at module init,
+  ## before any thread starts, and only read after; that's what makes the read
+  ## safe from any thread.
+  var ops {.global.} = make_body_ops[T, O]()
+  {.cast(gcsafe).}:
+    result = addr ops
+
+proc defaults[T, O](
+    self: Ed[T, O],
+    ctx: EdContext,
+    id: string,
+    op_ctx: OperationContext,
+    broadcast = true,
+    flags = DEFAULT_FLAGS,
+    placeholder = false,
+): Ed[T, O] =
+  privileged
+  log_defaults
+
+  # The proxy/body split: the body carries the data + sync state; field access
+  # on the proxy forwards to it (types.nim templates). Minted here -- before
+  # anything reads a forwarded field -- since object construction can no longer
+  # set what are now body fields.
+  when O isnot T:
+    if REJECT_STALE in flags:
+      fail "REJECT_STALE only applies to registers (EdValue); " & $Ed[T, O] &
+        " would quietly stay last-write-wins"
+  let body = EdBody[T, O](flags: flags, placeholder: placeholder)
+  self.body = body
+
+  create_initializer(self)
+
+  # Register the Ed type name for debugging
+  const ed_type_id = Ed[T, O].tid
+  const ed_type_name = $Ed[T, O]
+  {.gcsafe.}:
+    if ed_type_id notin global_type_name_registry[]:
+      global_type_name_registry[][ed_type_id] = ed_type_name
+
+  self.id =
+    if id == "":
+      generate_id()
+    else:
+      id
+
+  debug "creating zen object", id = self.id
+
+  if self.id in ctx.objects and not ?ctx.objects[self.id]:
+    ctx.pack_objects
+  # The registry owns the body; the proxy is reachable through the backref +
+  # mint (resolve_proxy). `ctx_uid` by value so the handle's destructor never
+  # dereferences the context.
+  ctx.objects[self.id] = body
+  let ctx_uid = ctx.uid
+  body.ops = body_ops[T, O]()
+  body.proxy_gen = 1
+  body.proxy = self
+  self.proxy_handle =
+    ProxyHandle(ctx_uid: ctx_uid, object_id: self.id, gen: 1)
+
+  # If created inside an `own` scope, record the owner: bake its id into the
+  # container and index it, so the owner's `destroy_owned` can tear this down in
+  # any context (container teardown is ownership-driven; the lifetime carries
+  # callbacks). No scope open -> unowned.
+  {.gcsafe.}:
+    if current_owner_id.len > 0:
+      self.owner_id = current_owner_id
+      ctx.owned_by.mget_or_put(current_owner_id, init_hash_set[string]()).incl(self.id)
+
   assert self.ctx == nil
   self.ctx = ctx
 
@@ -569,7 +590,7 @@ proc defaults[T, O](
     # bin is the default value -- Ed.init(tracked) mutates *after* defaults, so
     # initial content reaches the log as the subsequent stamped ops.
     if ctx.logs_ops:
-      ctx.store.append(body.build_create(body, true), ctx.epoch, body.flags)
+      ctx.store.append(body.ops.build_create(body, true), ctx.epoch, body.flags)
     self.publish_create(broadcast = true, op_ctx = op_ctx)
   self
 
