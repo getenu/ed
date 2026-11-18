@@ -757,11 +757,18 @@ proc init*[T, O](
 proc init_ed_fields*[T: object or ref](
     self: T, flags = DEFAULT_FLAGS, ctx = ctx()
 ): T {.discardable.} =
-  ## Initialize all `Ed` fields on an object. Call after creating an object with `Ed` fields.
+  ## Create every `Ed` field of an object that doesn't exist yet. A field
+  ## declared with flags of its own (`{.ed.}`'s field pragmas) gets those;
+  ## the rest get `flags`. A field that already exists is left as it is, so a
+  ## subtype can create a field first, with other flags.
   result = self
-  for field in fields(self.deref):
+  for name, field in field_pairs(self.deref):
     when field is Ed:
-      field.init(ctx = ctx, flags = flags)
+      if field.is_nil:
+        when field.has_custom_pragma(ed_flags):
+          field.init(ctx = ctx, flags = field.get_custom_pragma_val(ed_flags))
+        else:
+          field.init(ctx = ctx, flags = flags)
 
 proc init_from*[T: object or ref](
     _: type T, src: T, ctx = ctx()

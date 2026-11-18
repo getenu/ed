@@ -58,8 +58,24 @@ Ed.register(Thing)
 - The `{.ed.}` pragma rewrites the fields. It names each hidden Ed field
   `<name>_value`, enu's existing convention, so code that names `scale_value`
   keeps compiling while enu migrates type by type.
-- Per-field Ed flags (`REJECT_STALE`, sync scope) move from constructor calls to
-  field pragmas.
+- Ed flags move from constructor calls to field pragmas. With none, a field
+  syncs to other threads and the network (`SYNC_LOCAL`, `SYNC_REMOTE`).
+
+  | Pragma | Flags |
+  |---|---|
+  | `{.local.}` | `SYNC_LOCAL` only: other threads, not the network |
+  | `{.remote.}` | `SYNC_REMOTE` only |
+  | `{.unsynced.}` | none: still an Ed you can watch and write with `+=`, `:=` and `edit`, but it never leaves this context |
+  | `{.owns_members.}` | adds `OWNS_MEMBERS` (destroying the object destroys the members) |
+  | `{.reject_stale.}` | adds `REJECT_STALE` |
+
+  Two scope pragmas on one field, or any of these on an `{.ignore.}` field, is a
+  compile error. The macro reads these itself, so ed exports no symbols with
+  these names.
+- Flags are set when a field is created and travel in its CREATE, so they can't
+  change afterwards. `init_ed_fields` creates every Ed field that doesn't exist
+  yet with its declared flags. A subtype that needs different flags on an
+  inherited field creates that field first; `init_ed_fields` leaves it alone.
 
 ### No plain synced fields
 
