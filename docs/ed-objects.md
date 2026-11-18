@@ -139,7 +139,9 @@ s.changes:`) is a compile error.
   ed's own container `+=` is unaffected.
 - The macro walks the left side down to an accessor call and rewrites it to read,
   change the copy, and write back as one write. That covers parts of a field too:
-  `t.xform.origin.x += 3` is one write, which watchers see once.
+  `t.xform.origin.x += 3` is one write, which watchers see once. Paths can index
+  into the value (`t.grid.cells[i] += 1`, `t.grid.names["a"] := 2`); each index
+  is evaluated once.
 - Converters and literals work as in plain Nim: `t.size += 2` on a float field
   works, and so does an `int` variable when an `int`-to-`float` converter is in
   scope.
@@ -234,8 +236,6 @@ Separate from the field rules, but found alongside them:
 - **Constructors.** Hidden Ed fields can't be set with `Thing(scale: 1.0)`, so
   constructors have to be generated, in the right ownership scope and with each
   field's flags. A field left uncreated is nil and crashes on first read.
-- **Indexes in paths.** `t.items[2] += 1` and `:=` through an index inside a
-  synced value need `nnkBracketExpr` in the walk.
 - **`+=` next to other libraries.** A non-generic `+=` in another library still
   wins, but a generic one taking a non-`var` left side of the same type could be
   ambiguous with ed's. Test against enu's dependencies before shipping.
