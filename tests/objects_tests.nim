@@ -146,3 +146,33 @@ proc run*() =
     g.init_ed_fields(ctx = objects_ctx)
     check g.size_value.flags == {SYNC_LOCAL}
     check g.count_value.flags == {SYNC_LOCAL, SYNC_REMOTE}
+
+  test "plain fields stay on their own side, at creation and after":
+    var ctx1 = EdContext.init(id = "plain_sender")
+    var ctx2 = EdContext.init(id = "plain_receiver")
+    ctx2.subscribe(ctx1)
+    Ed.thread_ctx = ctx1
+    proc settle() =
+      for _ in 0 ..< 5:
+        ctx1.tick(blocking = false)
+        ctx2.tick(blocking = false)
+    settle()
+
+    var src = EdSeq[Widget].init(ctx = ctx1)
+    var w = Widget(id: "plain_widget", note: "the sender's").init_ed_fields(ctx = ctx1)
+    w.name = "bob"
+    src += w
+    settle()
+
+    let copy = EdSeq[Widget](ctx2[src])[0]
+    check copy.note == ""             # not sent
+    check copy.name_value.value == "bob" # the Ed field is
+    copy.note = "the receiver's"
+
+    # the same object arriving again inside another value (as opening enu's
+    # editor sends a build) leaves the receiver's plain field alone
+    var holder = EdValue[Widget].init(ctx = ctx1)
+    holder.value = w
+    settle()
+    check copy.note == "the receiver's"
+    Ed.thread_ctx = objects_ctx

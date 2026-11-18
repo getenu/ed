@@ -22,3 +22,9 @@ type
     pos* {.reject_stale.}: Vec
 
 Ed.register(Gadget)
+
+type Widget* = ref object of EdRef
+  note*: string                   # a plain field: stays on its own side
+  name_value*: EdValue[string]
+
+Ed.register(Widget)
