@@ -384,6 +384,15 @@ proc run*() =
       obj.value = 1
       check "cond_obj_i" in b.unordered_warned
 
+    test "a new register's start value isn't a write to warn about":
+      var a = EdContext.init(id = "cond_a_k")
+      var b = EdContext.init(id = "cond_b_k")
+      b.subscribe(a)
+      var obj = EdValue[int].init(5, ctx = b, id = "cond_obj_k", flags = flags)
+      check "cond_obj_k" notin b.unordered_warned
+      obj.value = 6
+      check "cond_obj_k" in b.unordered_warned
+
     test "a writer below a relay isn't stuck behind a write that changed nothing":
       # Another context writes the value the relay already holds, so the relay
       # forwards nothing. The writer must still learn it's past that write, or

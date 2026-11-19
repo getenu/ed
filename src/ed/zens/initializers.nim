@@ -630,7 +630,9 @@ proc init*[T: ref | object | tuple | array | SomeOrdinal | SomeNumber | string |
   ctx.setup_op_ctx
   var self = Ed[T, T]().defaults(ctx, id, op_ctx, flags = flags)
 
-  mutate(op_ctx):
+  var initial_ctx = op_ctx
+  initial_ctx.initial = true
+  mutate(initial_ctx):
     self.tracked = tracked
   result = self
 

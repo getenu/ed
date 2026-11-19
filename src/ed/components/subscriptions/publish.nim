@@ -281,10 +281,12 @@ proc publish_changes*[T, O](
           if msgs.len > 1:
             fail "a REJECT_STALE register write produced " & $msgs.len &
               " messages; packing it would bypass the check"
-          if originating and not self.ctx.authority_known and
-              id notin self.ctx.unordered_warned:
+          if originating and not op_ctx.initial and
+              not self.ctx.authority_known and id notin self.ctx.unordered_warned:
             # Nothing orders our writes, so nothing can check them: the flag
-            # does nothing here. Say so once per object.
+            # does nothing here. Say so once per object. A new object's start
+            # value can't be raced (nothing else has it yet), so it doesn't
+            # count: enu's client creates its player before connecting.
             self.ctx.unordered_warned.incl id
             error "REJECT_STALE register written with no authority to order it; " &
               "nothing orders or checks its writes, so replicas can disagree",

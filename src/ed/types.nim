@@ -173,6 +173,9 @@ type
     origin*: string  # ctx id that originated the op (threaded for own-op dedup)
     op_id*: int64    # originator's op id (threaded so forwards preserve it)
     base_lsn*: int64 # originator's write base (threaded so forwards preserve it)
+    initial*: bool
+      # the write giving a new Ed its start value: nothing else has the
+      # object yet, so nothing can race it
     when defined(ed_trace):
       trace*: string
 
