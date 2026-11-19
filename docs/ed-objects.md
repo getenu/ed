@@ -176,6 +176,49 @@ edit t.xform:            # several changes, one read and one write
 - Together they replace enu's hand-written `origin=` and `basis=` on
   `EdValue[Transform]`.
 
+### Constructing
+
+Hidden Ed fields can't be set with `Thing(scale: 1.0)`, and an Ed field left
+uncreated is nil and crashes on first read. So `Ed.register(T)` generates a
+constructor:
+
+```nim
+proc init*(_: type Ed, T: type Bot, id = "bot_" & generate_id(),
+           start_transform = Transform.init, speed = 0.0, ...,
+           ctx = ctx(), flags: tuple = ()): Bot
+```
+
+- One parameter per field, Ed and plain (refs included: `parent`, `clone_of`),
+  base type first, in declaration order, so the first few can be passed
+  positionally. A field named `ctx` or `flags` is a compile error.
+- `id` defaults to the type's name in snake case plus a generated id.
+- It runs inside the object's ownership scope, creates every Ed field with its
+  declared flags, and passes each value with the field's CREATE (not a create
+  and then a write). Defaults come from the declaration (`scale*: float = 1.0`
+  in an `{.ed.}` type) or the value type's default.
+- It works for types not declared with `{.ed.}` too: a `scale_value` field
+  becomes a `scale` parameter, a container keeps its name, and flags come from
+  an `{.ed_flags: {...}.}` pragma on the field, or the default.
+- `flags = (transform: DEFAULT_FLAGS + {REJECT_STALE})` replaces one field's
+  flags for this object; a name that isn't an Ed field of the type is a compile
+  error. It's the only generic parameter, so the rest stay plain types. Anything
+  stranger is built by hand: construct the object with those Ed fields filled,
+  inside `id.own:`, then call `init_ed_fields`, which creates only what's
+  missing.
+
+`Ed.register(T, constructor = true)` (the default) also generates `T.init`,
+forwarding to `Ed.init(T, ...)`. A type with setup of its own passes
+`constructor = false` and writes its own `T.init`, which calls `Ed.init(T, ...)`
+and then does the setup. No hook or method is involved, and the hand-written
+`init` owns its signature (parameter names, overloads, subtype defaults like a
+bot's `speed = 1.0`).
+
+To free `Ed.init(T, ...)` for this, `Ed.init(SomeType)` (an empty container of
+the kind a type implies) is removed, and `ed(value)` takes `id`, `ctx` and
+`flags` and picks the container kind from the value (a seq makes an `EdSeq`, a
+set an `EdSet`, a Table an `EdTable`). `EdValue[T].init(value)` and the other
+typed forms are unchanged.
+
 ## Rejected
 
 - **Getters that return the `EdValue`, with a converter to the value.** Comparing
@@ -196,6 +239,15 @@ edit t.xform:            # several changes, one read and one write
 - **A blanket `+=` macro or a term-rewriting template.** The first is ambiguous with
   system's and ed's overloads; the second never fires, because Nim rewrites only
   after type-checking and the expression fails first.
+- **A constructor named `create`, or `Ed.new(T, ...)`.** ed would take a name
+  from every registered type, and `system.create` exists. With `constructor =
+  false` a type keeps `init` for itself.
+- **A `setup` method called by the generated constructor.** It needs manual
+  `procCall` chaining, and a forgotten chain silently skips the parent's setup.
+- **Moving types into their own modules with `{.cyclic.}` imports.** Types cross
+  a cycle, but procs a macro generates (accessors, constructors) don't take part
+  in the cycle's phases: whether a module sees another's accessors depends on
+  which one was imported first (tested with Nim 2.4.0).
 - **A guard whose destructor writes back.** Nim destroyed the temporary at the end
   of the enclosing proc, not the statement, so the guard wrote its old copy back
   over later writes.
@@ -233,9 +285,6 @@ Separate from the field rules, but found alongside them:
   (`Ed[int]` a value, `Ed[seq[int]]` an `EdSeq`) works, matching what `ed(value)`
   already does. Taking the name `Ed` for it needs the two-parameter core renamed,
   and a check that `Ed.register`, `Ed.bootstrap` and `Ed.thread_ctx` still work.
-- **Constructors.** Hidden Ed fields can't be set with `Thing(scale: 1.0)`, so
-  constructors have to be generated, in the right ownership scope and with each
-  field's flags. A field left uncreated is nil and crashes on first read.
 - **`+=` next to other libraries.** A non-generic `+=` in another library still
   wins, but a generic one taking a non-`var` left side of the same type could be
   ambiguous with ed's. Test against enu's dependencies before shipping.

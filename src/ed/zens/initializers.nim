@@ -619,28 +619,6 @@ proc init*(
   ctx.setup_op_ctx
   T().defaults(ctx, id, op_ctx, flags = flags)
 
-proc init*(
-    _: type,
-    T: type[string],
-    flags = DEFAULT_FLAGS,
-    ctx = ctx(),
-    id = "",
-    op_ctx = OperationContext(),
-): Ed[string, string] =
-  ctx.setup_op_ctx
-  result = Ed[string, string]().defaults(ctx, id, op_ctx, flags = flags)
-
-proc init*(
-    _: type Ed,
-    T: type[ref | object | array | SomeOrdinal | SomeNumber],
-    flags = DEFAULT_FLAGS,
-    ctx = ctx(),
-    id = "",
-    op_ctx = OperationContext(),
-): Ed[T, T] =
-  ctx.setup_op_ctx
-  result = Ed[T, T]().defaults(ctx, id, op_ctx, flags = flags)
-
 proc init*[T: ref | object | tuple | array | SomeOrdinal | SomeNumber | string | ptr](
     _: type Ed,
     tracked: T,
@@ -701,50 +679,6 @@ proc init*[O](
     self.tracked = tracked
   result = self
 
-proc init*[O](
-    _: type Ed,
-    T: type seq[O],
-    flags = DEFAULT_FLAGS,
-    ctx = ctx(),
-    id = "",
-    op_ctx = OperationContext(),
-): Ed[seq[O], O] =
-  ctx.setup_op_ctx
-  result = Ed[seq[O], O]().defaults(ctx, id, op_ctx, flags = flags)
-
-proc init*[O](
-    _: type Ed,
-    T: type set[O],
-    flags = DEFAULT_FLAGS,
-    ctx = ctx(),
-    id = "",
-    op_ctx = OperationContext(),
-): Ed[set[O], O] =
-  ctx.setup_op_ctx
-  result = Ed[set[O], O]().defaults(ctx, id, op_ctx, flags = flags)
-
-proc init*[K, V](
-    _: type Ed,
-    T: type Table[K, V],
-    flags = DEFAULT_FLAGS,
-    ctx = ctx(),
-    id = "",
-    op_ctx = OperationContext(),
-): Ed[Table[K, V], Pair[K, V]] =
-  ctx.setup_op_ctx
-  result = Ed[Table[K, V], Pair[K, V]]().defaults(ctx, id, op_ctx, flags = flags)
-
-proc init*(
-    _: type Ed,
-    K, V: type,
-    flags = DEFAULT_FLAGS,
-    ctx = ctx(),
-    id = "",
-    op_ctx = OperationContext(),
-): EdTable[K, V] =
-  ctx.setup_op_ctx
-  result = EdTable[K, V]().defaults(ctx, id, op_ctx, flags = flags)
-
 proc init*[T, O](
     self: var Ed[T, O],
     flags = DEFAULT_FLAGS,
@@ -779,10 +713,44 @@ proc init_from*[T: object or ref](
     when dest is Ed:
       dest = ctx[src]
 
-proc ed*[T](value: T): EdValue[T] =
-  ## Convenience constructor for `EdValue`. Creates an `Ed` container holding the given value.
+proc ed*[T: ref | object | tuple | array | SomeOrdinal | SomeNumber | string | ptr](
+    value: T,
+    flags = DEFAULT_FLAGS,
+    ctx = ctx(),
+    id = "",
+    op_ctx = OperationContext(),
+): EdValue[T] =
+  ## An Ed holding `value`. The kind follows the value: this one makes an
+  ## `EdValue`; a seq, set or Table makes an `EdSeq`, `EdSet` or `EdTable`.
   ## Example: `let name = ed("hello")`
-  result = EdValue[T].init(value)
+  EdValue[T].init(value, flags = flags, ctx = ctx, id = id, op_ctx = op_ctx)
+
+proc ed*[O](
+    value: seq[O],
+    flags = DEFAULT_FLAGS,
+    ctx = ctx(),
+    id = "",
+    op_ctx = OperationContext(),
+): EdSeq[O] =
+  EdSeq[O].init(value, flags = flags, ctx = ctx, id = id, op_ctx = op_ctx)
+
+proc ed*[O](
+    value: set[O],
+    flags = DEFAULT_FLAGS,
+    ctx = ctx(),
+    id = "",
+    op_ctx = OperationContext(),
+): EdSet[O] =
+  EdSet[O].init(value, flags = flags, ctx = ctx, id = id, op_ctx = op_ctx)
+
+proc ed*[K, V](
+    value: Table[K, V],
+    flags = DEFAULT_FLAGS,
+    ctx = ctx(),
+    id = "",
+    op_ctx = OperationContext(),
+): EdTable[K, V] =
+  EdTable[K, V].init(value, flags = flags, ctx = ctx, id = id, op_ctx = op_ctx)
 
 macro bootstrap*(_: type Ed): untyped =
   ## Emit the per-type registrations collected at compile time. Expanded by

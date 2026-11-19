@@ -94,7 +94,7 @@ proc run*() =
       Flag3
       Flag4
 
-    var s = Ed.init({Flag1, Flag2})
+    var s = ed({Flag1, Flag2})
 
     check:
       Flag2 in s
@@ -190,7 +190,7 @@ proc run*() =
       Flag2
       Flag3
 
-    var a = Ed.init({Flag1, Flag3})
+    var a = ed({Flag1, Flag3})
 
   test "table literals":
     var a = EdTable[int, EdSeq[string]].init
@@ -617,7 +617,7 @@ proc run*() =
       ctx3.subscribe(ctx2, bidirectional = false)
       Ed.thread_ctx = ctx1
       check ctx3.len == ctx1.len
-      src.values += Ed.init("", ctx = ctx1)
+      src.values += ed("", ctx = ctx1)
       check ctx1.len != ctx2.len and ctx1.len != ctx3.len
       ctx2.tick
       check ctx1.len == ctx2.len and ctx1.len != ctx3.len
@@ -628,7 +628,7 @@ proc run*() =
 
   test "delete":
     local_and_remote:
-      var a = Ed.init("", ctx = ctx1)
+      var a = ed("", ctx = ctx1)
       check ctx1.len == 1
       ctx2.tick
       check ctx1.len == 1
