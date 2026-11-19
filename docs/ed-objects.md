@@ -71,7 +71,12 @@ Ed.register(Thing)
 
   Two scope pragmas on one field, or any of these on an `{.ignore.}` field, is a
   compile error. The macro reads these itself, so ed exports no symbols with
-  these names.
+  these names, and outside an `{.ed.}` type they're Nim's `invalid pragma`.
+- `{.id: expr.}` gives a field's Ed a fixed id instead of a generated one, for
+  an Ed another context finds by name (enu's `root_things` and `config`). The
+  constructor evaluates `expr` with the object's `id` in scope, so
+  `{.id: id & ":config".}` gives each object its own; a bare literal is shared
+  by every object of the type, so it suits one object per context.
 - Flags are set when a field is created and travel in its CREATE, so they can't
   change afterwards. `init_ed_fields` creates every Ed field that doesn't exist
   yet with its declared flags. A subtype that needs different flags on an
@@ -199,8 +204,9 @@ proc init*(_: type Ed, T: type Bot, id = "bot_" & generate_id(),
   and then a write). Defaults come from the declaration (`scale*: float = 1.0`
   in an `{.ed.}` type) or the value type's default.
 - It works for types not declared with `{.ed.}` too: a `scale_value` field
-  becomes a `scale` parameter, a container keeps its name, and flags come from
-  an `{.ed_flags: {...}.}` pragma on the field, or the default.
+  becomes a `scale` parameter, a container keeps its name, and flags and a
+  fixed id come from `{.ed_flags: {...}.}` and `{.ed_id: expr.}` pragmas on
+  the field (what `{.ed.}` rewrites its own pragmas to).
 - `ed_flags = (transform: DEFAULT_FLAGS + {REJECT_STALE})` replaces one field's
   flags for this object; a name that isn't an Ed field of the type is a compile
   error. It's the only generic parameter, so the rest stay plain types. Anything

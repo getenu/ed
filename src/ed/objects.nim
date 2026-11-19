@@ -84,9 +84,12 @@ proc rewrite_field(name: NimNode, field_type, default: NimNode): NimNode =
   var name = name
   var pragmas = newNimNode(nnkPragma) # passed through to the new field
   var ours: seq[NimNode]              # ignore and the flag pragmas
+  var fixed_id: NimNode               # `{.id: ...}`
   if name.kind == nnkPragmaExpr:
     for p in name[1]:
-      if p.kind == nnkIdent and
+      if p.kind == nnkExprColonExpr and p[0].eq_ident("id"):
+        fixed_id = p[1]
+      elif p.kind == nnkIdent and
           (p.eq_ident("ignore") or p.str_val in scope_pragmas or
             p.str_val in flag_pragmas):
         ours.add p
@@ -95,7 +98,7 @@ proc rewrite_field(name: NimNode, field_type, default: NimNode): NimNode =
     name = name[0]
   let ignored = ours.any_it(it.eq_ident("ignore"))
   if ignored:
-    if ours.len > 1:
+    if ours.len > 1 or not fixed_id.is_nil:
       error("an `{.ignore.}` field isn't an Ed, so it takes no sync pragmas", name)
     pragmas.add ident"ed_ignore"
     let named =
@@ -105,6 +108,8 @@ proc rewrite_field(name: NimNode, field_type, default: NimNode): NimNode =
   let flags = ours.field_flags(name)
   if not flags.is_nil:
     pragmas.add nnkExprColonExpr.new_tree(ident"ed_flags", flags)
+  if not fixed_id.is_nil:
+    pragmas.add nnkExprColonExpr.new_tree(ident"ed_id", fixed_id)
   var default = default
   if default.kind != nnkEmpty:
     # the field's type becomes the Ed, so its default moves to the constructor

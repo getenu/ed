@@ -2,20 +2,24 @@ import ed/[deps]
 import pkg/[serialization, json_serialization]
 
 template ed_ignore*() {.pragma.}
+  ## Mark a field to be ignored during `Ed` serialization.
 template ed_identity*() {.pragma.}
   ## The one kind of plain field that travels: an object's identity (`EdRef.id`).
   ## Every other plain field stays on its own side (docs/ed-objects.md).
 template ed_accessor*() {.pragma.}
-template ed_flags*(flags: untyped) {.pragma.}
-template ed_default*(value: untyped) {.pragma.}
-  ## On a field `{.ed.}` rewrote: the default its constructor parameter takes
-  ## (the `= value` written on the field).
-  ## On a field `{.ed.}` rewrote: the flags its Ed is created with, when they
-  ## aren't the default. Read by `init_ed_fields`.
   ## On a getter `Ed.register` generated for a synced field: lets the field
   ## sugar (`changes`, `+=`, `:=`, `edit`) tell a synced field from any other
   ## call.
-  ## Mark a field to be ignored during `Ed` serialization.
+template ed_flags*(flags: untyped) {.pragma.}
+  ## On a field `{.ed.}` rewrote: the flags its Ed is created with, when they
+  ## aren't the default. Read by `init_ed_fields`.
+template ed_default*(value: untyped) {.pragma.}
+  ## On a field `{.ed.}` rewrote: the default its constructor parameter takes
+  ## (the `= value` written on the field).
+template ed_id*(id: untyped) {.pragma.}
+  ## On a field `{.ed.}` rewrote: the id its Ed is created with, instead of a
+  ## generated one. The generated constructor evaluates it with the object's
+  ## own `id` in scope, so `{.id: id & ":config".}` stays unique per object.
 
 type
   EID* = uint16

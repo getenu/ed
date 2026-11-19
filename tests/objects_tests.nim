@@ -244,3 +244,16 @@ proc run*() =
     check d.id.starts_with("derived_")
     let parent = Ed.init(Derived)
     check Ed.init(Derived, owner = parent).owner == parent
+
+  test "{.id: ...} gives a field a fixed id":
+    Ed.thread_ctx = objects_ctx
+    let s = Settings.init(id = "settings_one", level_name = "town")
+    check s.level_name_value.id == "settings_level_name"
+    check s.level_name_value.flags == {SYNC_LOCAL}
+    check s.level_name == "town"
+    check s.parts.id == "settings_one:parts"
+    check s.scale_value.id != ""
+    check s.scale_value.id != "settings_one:parts"
+    let h = Settings(id: "settings_hand").init_ed_fields(ctx = objects_ctx)
+    check h.parts.id == "settings_hand:parts"
+    check h.level_name_value.flags == {SYNC_LOCAL}

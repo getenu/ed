@@ -269,7 +269,7 @@ macro build_constructor(T: type, public: bool, constructor: bool): untyped =
   ## `Ed.init(T, ...)`, and `T.init(...)` forwarding to it when `constructor`:
   ## one parameter per field, base type first; see docs/ed-objects.md.
   type Field = object
-    name, param, param_type, field_type, default, flags: NimNode
+    name, param, param_type, field_type, default, flags, fixed_id: NimNode
     is_ed: bool
 
   var levels: seq[seq[Field]]
@@ -308,6 +308,7 @@ macro build_constructor(T: type, public: bool, constructor: bool): untyped =
           let flags = pragmas.pragma_value("ed_flags")
           field.flags =
             if flags.is_nil: ident"DEFAULT_FLAGS" else: flags
+          field.fixed_id = pragmas.pragma_value("ed_id")
         else:
           field.param = ident(name)
           field.param_type = type_def
@@ -358,11 +359,14 @@ macro build_constructor(T: type, public: bool, constructor: bool): untyped =
       let param = f.param
       let declared = f.flags
       let field_type = f.field_type
+      let field_id =
+        if f.fixed_id.is_nil: new_lit("") else: f.fixed_id.copy_nim_tree
       creates.add quote do:
         `res`.`field` = `field_type`.init(
           `param`,
           flags = (when compiles(`flags`.`param`): `flags`.`param` else: `declared`),
           ctx = `ctx`,
+          id = `field_id`,
         )
     else:
       construct.add nnk_expr_colon_expr.new_tree(f.name, f.param)

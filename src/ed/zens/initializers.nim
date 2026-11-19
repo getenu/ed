@@ -699,10 +699,16 @@ proc init_ed_fields*[T: object or ref](
   for name, field in field_pairs(self.deref):
     when field is Ed:
       if field.is_nil:
+        template field_id(): string =
+          when field.has_custom_pragma(ed_id):
+            let id {.inject, used.} = self.id
+            field.get_custom_pragma_val(ed_id)
+          else:
+            ""
         when field.has_custom_pragma(ed_flags):
-          field.init(ctx = ctx, flags = field.get_custom_pragma_val(ed_flags))
+          field.init(ctx = ctx, flags = field.get_custom_pragma_val(ed_flags), id = field_id())
         else:
-          field.init(ctx = ctx, flags = flags)
+          field.init(ctx = ctx, flags = flags, id = field_id())
 
 proc init_from*[T: object or ref](
     _: type T, src: T, ctx = ctx()

@@ -50,3 +50,10 @@ proc init*(_: type Derived, level: int): Derived =
   ## hand-written: its own signature, then its own setup
   result = Ed.init(Derived, level = level * 10)
   result.marks += 1
+
+type Settings* {.ed.} = ref object of EdRef
+  level_name* {.id: "settings_level_name", local.}: string
+  parts* {.id: id & ":parts".}: seq[int]
+  scale*: float
+
+Ed.register(Settings)
