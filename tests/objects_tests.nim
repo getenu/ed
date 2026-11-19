@@ -200,3 +200,15 @@ proc run*() =
     check calls == 1
     check writes == 4
     Ed.thread_ctx = objects_ctx
+
+  test "ed picks the container kind from the value":
+    Ed.thread_ctx = objects_ctx
+    check ed(1.5) is EdValue[float]
+    check ed(@[1, 2]) is EdSeq[int]
+    check ed({'a', 'b'}) is EdSet[char]
+    check ed({"a": 1}.to_table) is EdTable[string, int]
+    let local = ed(3, flags = {SYNC_LOCAL}, id = "ed_kind_local")
+    check local.flags == {SYNC_LOCAL}
+    check local.id == "ed_kind_local"
+    check local.value == 3
+    check not compiles(Ed.init(int))

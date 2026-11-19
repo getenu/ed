@@ -49,7 +49,7 @@ proc run*() =
       callback = proc() =
         ctx.tick
 
-    var a = Ed.init("", id = "t1")
+    var a = ed("", id = "t1")
     ctx.tick(blocking = true)
     global_lock.acquire()
     worker_thread.create_thread(start_worker, ctx)

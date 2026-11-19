@@ -67,10 +67,10 @@ proc run*() =
       ctx4 = EdContext.init(id = "ctx4")
 
     var
-      a = Ed.init(@["a1", "a2"], id = "test2", ctx = ctx1)
-      b = Ed.init(@["b1", "b2"], id = "test2", ctx = ctx2)
-      c = Ed.init(@["c1", "c2"], id = "test2", ctx = ctx3)
-      d = Ed.init(@["d1", "d2"], id = "test2", ctx = ctx4)
+      a = ed(@["a1", "a2"], id = "test2", ctx = ctx1)
+      b = ed(@["b1", "b2"], id = "test2", ctx = ctx2)
+      c = ed(@["c1", "c2"], id = "test2", ctx = ctx3)
+      d = ed(@["d1", "d2"], id = "test2", ctx = ctx4)
 
     d.changes:
       if added:
@@ -121,10 +121,10 @@ proc run*() =
       ctx4 = EdContext.init(id = "ctx4")
 
     var
-      a = Ed.init(@["a1", "a2"], id = "test2", ctx = ctx1)
-      b = Ed.init(@["b1", "b2"], id = "test2", ctx = ctx2)
-      c = Ed.init(@["c1", "c2"], id = "test2", ctx = ctx3)
-      d = Ed.init(@["d1", "d2"], id = "test2", ctx = ctx4)
+      a = ed(@["a1", "a2"], id = "test2", ctx = ctx1)
+      b = ed(@["b1", "b2"], id = "test2", ctx = ctx2)
+      c = ed(@["c1", "c2"], id = "test2", ctx = ctx3)
+      d = ed(@["d1", "d2"], id = "test2", ctx = ctx4)
 
     d.changes:
       if added:
@@ -170,7 +170,7 @@ proc run*() =
 
     # Create Vector3 value and verify it creates EdValue not EdSeq
     var vec = Vector3([1.0, 2.0, 3.0])
-    var v1 = Ed.init(vec, id = "vector", ctx = ctx1)
+    var v1 = ed(vec, id = "vector", ctx = ctx1)
     
     # Verify type - this ensures our fix worked
     check v1 is EdValue[Vector3]
