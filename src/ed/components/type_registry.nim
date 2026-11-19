@@ -222,11 +222,192 @@ template build_accessors*(
 ): untyped =
   build_accessors(T, public)
 
-macro register*(_: type Ed, typ: type, public = true): untyped =
+proc snake_case(name: string): string =
+  for i, c in name:
+    if c.is_upper_ascii:
+      if i > 0 and not name[i - 1].is_upper_ascii:
+        result.add '_'
+      result.add c.to_lower_ascii
+    else:
+      result.add c
+
+proc tracked_type(field_type: NimNode): NimNode =
+  ## The value type an Ed field holds: `EdSeq[X]` holds a `seq[X]`. Aliases
+  ## of Ed types are followed to their declaration.
+  var t = field_type
+  for _ in 0 .. 16:
+    if t.kind == nnk_bracket_expr and t[0].kind in {nnk_sym, nnk_ident}:
+      case t[0].str_val
+      of "EdValue", "Ed":
+        return t[1]
+      of "EdSeq":
+        return nnk_bracket_expr.new_tree(ident"seq", t[1])
+      of "EdSet":
+        return nnk_bracket_expr.new_tree(ident"set", t[1])
+      of "EdTable":
+        return nnk_bracket_expr.new_tree(bind_sym"Table", t[1], t[2])
+      else:
+        discard
+    if t.kind == nnk_sym:
+      let impl = t.get_impl
+      if impl.kind == nnk_type_def and impl[1].kind == nnk_empty:
+        t = impl[2]
+        continue
+    break
+  error("can't tell what value type the Ed field `" & field_type.repr & "` holds",
+    field_type)
+
+proc pragma_value(pragmas: NimNode, name: string): NimNode =
+  ## The value of `{.name: value.}` among a field's pragmas, or nil.
+  if pragmas.is_nil:
+    return nil
+  for p in pragmas:
+    if p.kind == nnk_expr_colon_expr and p[0].eq_ident(name):
+      return p[1]
+
+macro build_constructor(T: type, public: bool, constructor: bool): untyped =
+  ## `Ed.init(T, ...)`, and `T.init(...)` forwarding to it when `constructor`:
+  ## one parameter per field, base type first; see docs/ed-objects.md.
+  type Field = object
+    name, param, param_type, field_type, default, flags: NimNode
+    is_ed: bool
+
+  var levels: seq[seq[Field]]
+  var type_sym = T
+  while type_sym.kind != nnk_empty and type_sym != bind_sym("EdRef") and
+      type_sym != bind_sym("RootObj") and type_sym != bind_sym("RootRef"):
+    let type_impl = type_sym.get_impl
+    var level: seq[Field]
+    for def in type_impl[2][0][2]:
+      var def_count = def.len - 1
+      let default = def[^1]
+      if default.kind == nnk_empty:
+        dec def_count
+      let type_def = def[def_count]
+      for ident in def[0 ..< def_count]:
+        var ident = ident
+        var pragmas: NimNode
+        if ident.kind == nnk_pragma_expr:
+          pragmas = ident[1]
+          ident = ident[0]
+        if ident.kind == nnk_postfix:
+          ident = ident[1]
+        let name = ident.str_val
+        var field = Field(name: ident(name), field_type: type_def, is_ed: is_zen(type_def))
+        if field.is_ed:
+          let param =
+            if name.ends_with("_value"): name[0 ..^ 7]
+            elif name.to_lower.ends_with("value"): name[0 ..^ 6]
+            else: name
+          field.param = ident(param)
+          field.param_type = type_def.tracked_type
+          let declared = pragmas.pragma_value("ed_default")
+          field.default =
+            if declared.is_nil: new_dot_expr(field.param_type.copy_nim_tree, ident"default")
+            else: declared
+          let flags = pragmas.pragma_value("ed_flags")
+          field.flags =
+            if flags.is_nil: ident"DEFAULT_FLAGS" else: flags
+        else:
+          field.param = ident(name)
+          field.param_type = type_def
+          field.default =
+            if default.kind == nnk_empty: new_dot_expr(type_def.copy_nim_tree, ident"default")
+            else: default
+        if field.param.str_val in ["ed_ctx", "ed_flags", "id"]:
+          error("`" & name & "` would collide with the constructor's `" &
+            field.param.str_val & "` parameter", ident)
+        level.add field
+    levels.insert level, 0
+    type_sym =
+      if type_impl[2][0][1].kind == nnk_of_inherit: type_impl[2][0][1][0]
+      else: new_empty_node()
+
+  var fields: seq[Field]
+  for level in levels:
+    fields.add level
+
+  let type_name = T.str_val
+  let id_prefix = type_name.snake_case & "_"
+  let ctor_type = ident"ed_constructed_type"
+  let flags = ident"ed_flags"
+  let ctx = ident"ed_ctx"
+
+  proc params(): seq[NimNode] =
+    result.add T
+    result.add nnk_ident_defs.new_tree(
+      ident"id", new_empty_node(),
+      infix(new_lit(id_prefix), "&", new_call(ident"generate_id")))
+    for f in fields:
+      result.add nnk_ident_defs.new_tree(f.param, f.param_type, f.default)
+    result.add nnk_ident_defs.new_tree(ctx, bind_sym"EdContext", new_dot_expr(ident"Ed", ident"thread_ctx"))
+    result.add nnk_ident_defs.new_tree(flags, new_nim_node(nnk_tuple_class_ty), nnk_tuple_constr.new_tree)
+
+  var ed_names = nnk_bracket.new_tree
+  for f in fields:
+    if f.is_ed:
+      ed_names.add new_lit(f.param.str_val)
+
+  var construct = nnk_obj_constr.new_tree(T)
+  construct.add nnk_expr_colon_expr.new_tree(ident"id", ident"id")
+  var creates = new_stmt_list()
+  let res = ident"result"
+  for f in fields:
+    if f.is_ed:
+      let field = f.name
+      let param = f.param
+      let declared = f.flags
+      let field_type = f.field_type
+      creates.add quote do:
+        `res`.`field` = `field_type`.init(
+          `param`,
+          flags = (when compiles(`flags`.`param`): `flags`.`param` else: `declared`),
+          ctx = `ctx`,
+        )
+    else:
+      construct.add nnk_expr_colon_expr.new_tree(f.name, f.param)
+
+  let no_field = new_lit(type_name & " has no Ed field named `")
+  let id_param = ident"id"
+  var body = quote do:
+    for name, _ in `flags`.field_pairs:
+      when name notin `ed_names`:
+        {.error: `no_field` & name & "`".}
+    `id_param`.own:
+      `res` = `construct`
+      `creates`
+
+  var ed_params = params()
+  ed_params.insert nnk_ident_defs.new_tree(
+    ident"_", nnk_command.new_tree(ident"type", ident"Ed"), new_empty_node()), 1
+  ed_params.insert nnk_ident_defs.new_tree(
+    ctor_type, nnk_command.new_tree(ident"type", T), new_empty_node()), 2
+  result = new_stmt_list()
+  var ed_init = new_proc(
+    if public.bool_val: postfix(ident"init", "*") else: ident"init",
+    ed_params, body)
+  result.add ed_init
+
+  if constructor.bool_val:
+    var t_params = params()
+    t_params.insert nnk_ident_defs.new_tree(
+      ident"_", nnk_command.new_tree(ident"type", T), new_empty_node()), 1
+    var forward = new_call(new_dot_expr(ident"Ed", ident"init"), T)
+    forward.add nnk_expr_eq_expr.new_tree(ident"id", ident"id")
+    for f in fields:
+      forward.add nnk_expr_eq_expr.new_tree(f.param, f.param)
+    forward.add nnk_expr_eq_expr.new_tree(ctx, ctx)
+    forward.add nnk_expr_eq_expr.new_tree(flags, flags)
+    result.add new_proc(
+      if public.bool_val: postfix(ident"init", "*") else: ident"init",
+      t_params, forward)
+
+macro register*(_: type Ed, typ: type, public = true, constructor = true): untyped =
   result = new_stmt_list()
   result.add quote do:
     register_type(`typ`)
     Ed.build_accessors(`typ`, `public`)
+    build_constructor(`typ`, `public`, `constructor`)
 
 proc ref_id*[T: ref RootObj](value: T): string {.inline.} =
   $value.type_id & ":" & $value.id

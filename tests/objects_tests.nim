@@ -1,4 +1,4 @@
-import std/[unittest, macros, tables]
+import std/[unittest, macros, tables, strutils]
 import ed
 import ./objects_tests_types
 
@@ -8,7 +8,7 @@ let objects_ctx = EdContext.init(id = "objects_tests")
 
 proc gadget(): Gadget =
   Ed.thread_ctx = objects_ctx
-  Gadget().init_ed_fields(ctx = objects_ctx)
+  Gadget.init(ed_ctx = objects_ctx)
 
 proc run*() =
   test "{.ed.} fields become Ed fields; ignored ones stay plain":
@@ -212,3 +212,35 @@ proc run*() =
     check local.id == "ed_kind_local"
     check local.value == 3
     check not compiles(Ed.init(int))
+
+  test "generated constructors":
+    Ed.thread_ctx = objects_ctx
+    let g = Gadget.init(id = "gadget_ctor", label = "bob", parts = @[1, 2])
+    check g.id == "gadget_ctor"
+    check g.size == 1.5                     # the declared default
+    check g.label == "bob"
+    check g.parts.value == @[1, 2]
+    check g.note_value.flags == {SYNC_LOCAL} # declared flags
+    check g.cache == ""
+    check Gadget.init.id.starts_with("gadget_")
+
+    let o = Gadget.init(ed_flags = (size: {SYNC_LOCAL}))
+    check o.size_value.flags == {SYNC_LOCAL}
+    check o.count_value.flags == {SYNC_LOCAL, SYNC_REMOTE}
+    check not compiles(Gadget.init(ed_flags = (sise: {SYNC_LOCAL})))
+
+    # base fields first, so the first few can be positional
+    let p = Gadget.init("gadget_positional", 2.5, 3)
+    check p.size == 2.5
+    check p.count == 3
+
+  test "constructor = false: a hand-written init calls Ed.init":
+    Ed.thread_ctx = objects_ctx
+    let d = Derived.init(level = 2)
+    check d.level == 20
+    check d.name == "base"
+    check d.marks.value == @[1]
+    check d.marks.flags == {SYNC_LOCAL}
+    check d.id.starts_with("derived_")
+    let parent = Ed.init(Derived)
+    check Ed.init(Derived, owner = parent).owner == parent
