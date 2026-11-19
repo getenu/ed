@@ -79,7 +79,9 @@ Ed.register(Thing)
   by every object of the type, so it suits one object per context.
 - Flags are set when a field is created and travel in its CREATE, so they can't
   change afterwards. `init_ed_fields` creates every Ed field that doesn't exist
-  yet with its declared flags. A subtype that needs different flags on an
+  yet with its declared flags, id and default, so a type without a generated
+  constructor (one that isn't an `EdRef`, like enu's `GameState`) can be
+  built with `T(plain fields).init_ed_fields`. A subtype that needs different flags on an
   inherited field creates that field first; `init_ed_fields` leaves it alone.
 
 ### No plain synced fields

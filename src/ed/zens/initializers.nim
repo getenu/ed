@@ -691,9 +691,9 @@ proc init*[T, O](
 proc init_ed_fields*[T: object or ref](
     self: T, flags = DEFAULT_FLAGS, ctx = ctx()
 ): T {.discardable.} =
-  ## Create every `Ed` field of an object that doesn't exist yet. A field
-  ## declared with flags of its own (`{.ed.}`'s field pragmas) gets those;
-  ## the rest get `flags`. A field that already exists is left as it is, so a
+  ## Create every `Ed` field of an object that doesn't exist yet, with the
+  ## id and default it was declared with (`{.ed.}`'s field pragmas). A field
+  ## declared with flags of its own gets those; the rest get `flags`. A field that already exists is left as it is, so a
   ## subtype can create a field first, with other flags.
   result = self
   for name, field in field_pairs(self.deref):
@@ -701,14 +701,22 @@ proc init_ed_fields*[T: object or ref](
       if field.is_nil:
         template field_id(): string =
           when field.has_custom_pragma(ed_id):
-            let id {.inject, used.} = self.id
+            when compiles(self.deref.id):
+              let id {.inject, used.} = self.deref.id
             field.get_custom_pragma_val(ed_id)
           else:
             ""
-        when field.has_custom_pragma(ed_flags):
-          field.init(ctx = ctx, flags = field.get_custom_pragma_val(ed_flags), id = field_id())
+        template field_flags(): untyped =
+          when field.has_custom_pragma(ed_flags):
+            field.get_custom_pragma_val(ed_flags)
+          else:
+            flags
+        when field.has_custom_pragma(ed_default):
+          field = typeof(field).init(
+            field.get_custom_pragma_val(ed_default),
+            ctx = ctx, flags = field_flags(), id = field_id())
         else:
-          field.init(ctx = ctx, flags = flags, id = field_id())
+          field.init(ctx = ctx, flags = field_flags(), id = field_id())
 
 proc init_from*[T: object or ref](
     _: type T, src: T, ctx = ctx()

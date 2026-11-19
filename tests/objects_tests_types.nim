@@ -57,3 +57,15 @@ type Settings* {.ed.} = ref object of EdRef
   scale*: float
 
 Ed.register(Settings)
+
+type Defaults* {.ed.} = ref object of EdRef
+  xform*: Xform = Xform(scale: 2)
+  code*: int = -1
+  names*: seq[string] = @["a"]
+  plain* {.ignore.}: int = 7
+
+Ed.register(Defaults)
+
+type Root* {.ed.} = ref object
+  things* {.id: "root_tests_things".}: seq[int]
+  count*: int = 3

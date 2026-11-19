@@ -279,12 +279,9 @@ macro build_constructor(T: type, public: bool, constructor: bool): untyped =
     let type_impl = type_sym.get_impl
     var level: seq[Field]
     for def in type_impl[2][0][2]:
-      var def_count = def.len - 1
       let default = def[^1]
-      if default.kind == nnk_empty:
-        dec def_count
-      let type_def = def[def_count]
-      for ident in def[0 ..< def_count]:
+      let type_def = def[^2]
+      for ident in def[0 ..^ 3]:
         var ident = ident
         var pragmas: NimNode
         if ident.kind == nnk_pragma_expr:

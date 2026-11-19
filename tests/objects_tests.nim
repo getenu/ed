@@ -257,3 +257,20 @@ proc run*() =
     let h = Settings(id: "settings_hand").init_ed_fields(ctx = objects_ctx)
     check h.parts.id == "settings_hand:parts"
     check h.level_name_value.flags == {SYNC_LOCAL}
+
+  test "init_ed_fields creates fields with their declared defaults":
+    Ed.thread_ctx = objects_ctx
+    let d = Defaults().init_ed_fields(ctx = objects_ctx)
+    check d.xform.scale == 2.0
+    check d.code == -1
+    check d.names.value == @["a"]
+    check d.plain == 7
+    let c = Defaults.init
+    check c.plain == 7
+    check c.code == -1
+
+  test "init_ed_fields on an object that isn't an EdRef":
+    Ed.thread_ctx = objects_ctx
+    let r = Root().init_ed_fields(ctx = objects_ctx)
+    check r.things.id == "root_tests_things"
+    check r.count_value.value == 3
