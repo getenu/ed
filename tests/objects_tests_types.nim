@@ -15,7 +15,7 @@ type
     names*: Table[string, int]
 
   Gadget* {.ed.} = ref object of EdRef
-    size*: float
+    size*: float = 1.5
     count*: int
     label*: string
     xform*: Xform
@@ -35,3 +35,18 @@ type Widget* = ref object of EdRef
   name_value*: EdValue[string]
 
 Ed.register(Widget)
+
+type
+  Base* {.ed.} = ref object of EdRef
+    name*: string = "base"
+    owner* {.ignore.}: Base
+  Derived* {.ed.} = ref object of Base
+    level*: int
+    marks* {.local.}: seq[int]
+
+Ed.register(Derived, constructor = false)
+
+proc init*(_: type Derived, level: int): Derived =
+  ## hand-written: its own signature, then its own setup
+  result = Ed.init(Derived, level = level * 10)
+  result.marks += 1

@@ -105,6 +105,11 @@ proc rewrite_field(name: NimNode, field_type, default: NimNode): NimNode =
   let flags = ours.field_flags(name)
   if not flags.is_nil:
     pragmas.add nnkExprColonExpr.new_tree(ident"ed_flags", flags)
+  var default = default
+  if default.kind != nnkEmpty:
+    # the field's type becomes the Ed, so its default moves to the constructor
+    pragmas.add nnkExprColonExpr.new_tree(ident"ed_default", default)
+    default = newEmptyNode()
   let container = field_type.container_type
   let (new_name, new_type) =
     if not container.is_nil:

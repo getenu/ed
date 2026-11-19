@@ -185,12 +185,14 @@ constructor:
 ```nim
 proc init*(_: type Ed, T: type Bot, id = "bot_" & generate_id(),
            start_transform = Transform.init, speed = 0.0, ...,
-           ctx = ctx(), flags: tuple = ()): Bot
+           ed_ctx = Ed.thread_ctx, ed_flags: tuple = ()): Bot
 ```
 
 - One parameter per field, Ed and plain (refs included: `parent`, `clone_of`),
   base type first, in declaration order, so the first few can be passed
-  positionally. A field named `ctx` or `flags` is a compile error.
+  positionally. The parameters ed adds are prefixed (`ed_ctx`, `ed_flags`) so they
+  don't take names from your fields; a field named `ed_ctx` or `ed_flags` is a
+  compile error.
 - `id` defaults to the type's name in snake case plus a generated id.
 - It runs inside the object's ownership scope, creates every Ed field with its
   declared flags, and passes each value with the field's CREATE (not a create
@@ -199,7 +201,7 @@ proc init*(_: type Ed, T: type Bot, id = "bot_" & generate_id(),
 - It works for types not declared with `{.ed.}` too: a `scale_value` field
   becomes a `scale` parameter, a container keeps its name, and flags come from
   an `{.ed_flags: {...}.}` pragma on the field, or the default.
-- `flags = (transform: DEFAULT_FLAGS + {REJECT_STALE})` replaces one field's
+- `ed_flags = (transform: DEFAULT_FLAGS + {REJECT_STALE})` replaces one field's
   flags for this object; a name that isn't an Ed field of the type is a compile
   error. It's the only generic parameter, so the rest stay plain types. Anything
   stranger is built by hand: construct the object with those Ed fields filled,
