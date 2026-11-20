@@ -27,9 +27,9 @@ proc run*() =
       echo ast_to_str(body)
       echo "Expected ", expected_count, " changes. Got ", change_count
 
-  template assert_changes[T, O](self: Ed[T, O], expect, body: untyped) =
+  template assert_changes(self: Ed, expect, body: untyped) =
     var expectations = expect.to_deque
-    self.track proc(changes: seq[Change[O]]) {.gcsafe.} =
+    self.track proc(changes: seq[Change[typeof(expect[0][1])]]) {.gcsafe.} =
       for change in changes:
         let expectation = expectations.pop_first()
         if not (
@@ -158,7 +158,7 @@ proc run*() =
 
   test "seqs":
     var
-      s = EdSeq[string].init
+      s = Ed[seq[string]].init
       added_items {.threadvar.}: seq[string]
       removed_items {.threadvar.}: seq[string]
 
@@ -193,15 +193,15 @@ proc run*() =
     var a = ed({Flag1, Flag3})
 
   test "table literals":
-    var a = EdTable[int, EdSeq[string]].init
+    var a = Ed[Table[int, Ed[seq[string]]]].init
     a.track proc(changes, _: auto) {.gcsafe.} =
       discard
-    a[1] = EdSeq[string].init(@["nim"])
-    a[5] = EdSeq[string].init(@["vin", "rw"])
+    a[1] = Ed[seq[string]].init(@["nim"])
+    a[5] = Ed[seq[string]].init(@["vin", "rw"])
     a.clear
 
   test "touch table":
-    var a = EdTable[string, string].init
+    var a = Ed[Table[string, string]].init
     let zid = a.count_changes
 
     1.changes:
@@ -213,17 +213,17 @@ proc run*() =
     a.untrack_all
 
   test "primitive_table":
-    var a = EdTable[int, int].init
+    var a = Ed[Table[int, int]].init
     a[1] = 2
 
   test "nested":
-    var a = EdTable[int, EdSeq[int]].init
-    a[1] = EdSeq[int].init(@[1, 2])
+    var a = Ed[Table[int, Ed[seq[int]]]].init
+    a[1] = Ed[seq[int]].init(@[1, 2])
     a[1] += 3
 
   test "nested_2":
-    var a = EdTable[int, EdSeq[int]].init({1: EdSeq[int].init(@[1])}.to_table)
-    a[1] = EdSeq[int].init(@[1, 2])
+    var a = Ed[Table[int, Ed[seq[int]]]].init({1: Ed[seq[int]].init(@[1])}.to_table)
+    a[1] = Ed[seq[int]].init(@[1, 2])
     a[1] += 3
 
   test "nested_changes":
@@ -232,15 +232,15 @@ proc run*() =
       Flag1
       Flag2
 
-    let inner_seq = EdSeq[EdSet[Flags]].init(
-      @[EdSet[Flags].init({Flag1}, flags = flags), EdSet[Flags].init({Flag2}, flags = flags)],
+    let inner_seq = Ed[seq[Ed[set[Flags]]]].init(
+      @[Ed[set[Flags]].init({Flag1}, flags = flags), Ed[set[Flags]].init({Flag2}, flags = flags)],
       flags = flags
     )
-    let inner_table = EdTable[int, EdSeq[EdSet[Flags]]].init(
+    let inner_table = Ed[Table[int, Ed[seq[Ed[set[Flags]]]]]].init(
       {1: inner_seq}.to_table,
       flags = flags
     )
-    let buffers = EdTable[int, EdTable[int, EdSeq[EdSet[Flags]]]].init(
+    let buffers = Ed[Table[int, Ed[Table[int, Ed[seq[Ed[set[Flags]]]]]]]].init(
       {1: inner_table}.to_table,
       flags = flags
     )
@@ -258,9 +258,9 @@ proc run*() =
     1.changes:
       buffers[1][1][0] -= {Flag1, Flag2}
     1.changes:
-      buffers[1][1] += EdSet[Flags].init({Flag1, Flag2}, flags = flags)
+      buffers[1][1] += Ed[set[Flags]].init({Flag1, Flag2}, flags = flags)
     1.changes:
-      buffers[1][1] = EdSeq[EdSet[Flags]].init(@[EdSet[Flags].init({Flag1}, flags = flags)], flags = flags)
+      buffers[1][1] = Ed[seq[Ed[set[Flags]]]].init(@[Ed[set[Flags]].init({Flag1}, flags = flags)], flags = flags)
 
     # unlink
     buffers[1][1][0].clear
@@ -277,11 +277,11 @@ proc run*() =
       # Added and Removed changes
     buffers.untrack(id)
 
-    let new_inner_seq = EdSeq[EdSet[Flags]].init(
-      @[EdSet[Flags].init({Flag1}, flags = flags)],
+    let new_inner_seq = Ed[seq[Ed[set[Flags]]]].init(
+      @[Ed[set[Flags]].init({Flag1}, flags = flags)],
       flags = flags
     )
-    let new_inner_table = EdTable[int, EdSeq[EdSet[Flags]]].init(
+    let new_inner_table = Ed[Table[int, Ed[seq[Ed[set[Flags]]]]]].init(
       {1: new_inner_seq}.to_table,
       flags = flags
     )
@@ -324,11 +324,10 @@ proc run*() =
       buffers.del(1)
     check 1 notin buffers
 
-  test "comparable aliases":
-    var a = EdTable[int, string].init(id = "1")
-    var b = Ed[Table[int, string], Pair[int, string]].init(id = "1")
-    var c = EdTable[string, int].init(id = "2")
-    check b is EdTable[int, string]
+  test "comparable containers":
+    var a = Ed[Table[int, string]].init(id = "1")
+    var b = Ed[Table[int, string]].init(id = "1")
+    var c = Ed[Table[string, int]].init(id = "2")
     check a == b
     when compiles(a == c):
       check false, &"{a.type} and {b.type} shouldn't be comparable"
@@ -338,11 +337,11 @@ proc run*() =
       Flag1
       Flag2
 
-    var a = EdSeq[int].init
-    var b = EdSet[TestFlag].init
+    var a = Ed[seq[int]].init
+    var b = Ed[set[TestFlag]].init
     check:
-      a is Ed[seq[int], int]
-      b is Ed[set[TestFlag], TestFlag]
+      a is Ed[seq[int]]
+      b is Ed[set[TestFlag]]
 
   test "nested_triggers":
     type
@@ -353,15 +352,15 @@ proc run*() =
       Unit = ref object of RootRef
         id: int
         parent: Unit
-        units: Ed[seq[Unit], Unit]
-        flags: EdSet[UnitFlags]
+        units: Ed[seq[Unit]]
+        flags: Ed[set[UnitFlags]]
 
     proc init(
         _: type Unit, id = 0, flags = {TRACK_CHILDREN, SYNC_LOCAL, SYNC_REMOTE}
     ): Unit =
       result = Unit(id: id)
-      result.units = EdSeq[Unit].init(flags = flags)
-      result.flags = EdSet[UnitFlags].init(flags = flags)
+      result.units = Ed[seq[Unit]].init(flags = flags)
+      result.flags = Ed[set[UnitFlags]].init(flags = flags)
 
     var a = Unit.init
     var id = a.units.count_changes
@@ -404,7 +403,7 @@ proc run*() =
     a.units.untrack(id)
 
   test "primitives":
-    let a = EdValue[int].init
+    let a = Ed[int].init
     a.assert_changes {
       REMOVED: 0,
       ADDED: 5,
@@ -442,7 +441,7 @@ proc run*() =
       a.value = r3
 
   test "pausing":
-    var s = EdValue[string].init
+    var s = Ed[string].init
     let zid = s.count_changes
     2.changes:
       s.value = "one"
@@ -482,7 +481,7 @@ proc run*() =
     # regression is a test failure, not a latent compile error on first use.
     # Relative checks (a set may emit >1 change) -- what matters is that pause
     # stops the increments and resume restarts them, for both per-eid and all.
-    var s = EdValue[string].init
+    var s = Ed[string].init
     var calls = 0
     let zid = s.track proc(c: seq[Change[string]]) {.gcsafe.} =
       calls.inc
@@ -523,9 +522,9 @@ proc run*() =
 
   test "init_props":
     type Model = ref object
-      list: EdSeq[int]
+      list: Ed[seq[int]]
       field: string
-      ed_field: EdValue[string]
+      ed_field: Ed[string]
 
     proc init(_: type Model): Model =
       result = Model()
@@ -540,20 +539,20 @@ proc run*() =
       Thing = ref object of EdRef
 
       Tree = ref object
-        zen: EdValue[string]
-        things: EdSeq[Thing]
-        values: EdSeq[EdValue[string]]
+        zen: Ed[string]
+        things: Ed[seq[Thing]]
+        values: Ed[seq[Ed[string]]]
 
       Container = ref object
-        thing1: EdValue[Thing]
-        thing2: EdValue[Thing]
+        thing1: Ed[Thing]
+        thing2: Ed[Thing]
 
     Ed.register(Thing, false)
 
     local_and_remote:
-      var s1 = EdValue[string].init(ctx = ctx1)
+      var s1 = Ed[string].init(ctx = ctx1)
       ctx2.tick
-      var s2 = EdValue[string](ctx2[s1])
+      var s2 = Ed[string](ctx2[s1])
       check s2.ctx != nil
 
       s1.value = "sync me"
@@ -606,7 +605,7 @@ proc run*() =
 
       check remote_container.thing1.value.id == container.thing1.value.id
       check remote_container.thing1.value == remote_container.thing2.value
-      var s3 = EdValue[string].init(ctx = ctx1)
+      var s3 = Ed[string].init(ctx = ctx1)
       src.values += s3
       s3.value = "hi"
       ctx2.tick
@@ -641,19 +640,19 @@ proc run*() =
       check ctx2.len == 0
 
   test "sync nested":
-    type Unit = ref object of EdRef
-      units: EdSeq[Unit]
-      code: EdValue[string]
+    type NestedUnit = ref object of EdRef
+      units: Ed[seq[NestedUnit]]
+      code: Ed[string]
 
-    Ed.register(Unit, false)
+    Ed.register(NestedUnit, false)
     local_and_remote:
-      var u1 = Unit(id: "1")
-      var u2 = Unit(id: "2")
+      var u1 = NestedUnit(id: "1")
+      var u2 = NestedUnit(id: "2")
       u1.init_ed_fields
       u2.init_ed_fields
       ctx2.tick
 
-      var ru1 = Unit.init_from(u1, ctx = ctx2)
+      var ru1 = NestedUnit.init_from(u1, ctx = ctx2)
 
       u1.units += u2
       ctx2.tick
@@ -661,12 +660,12 @@ proc run*() =
 
   test "zentable of tables":
     type Shared = ref object of EdRef
-      edits: EdTable[int, Table[string, string]]
+      edits: Ed[Table[int, Table[string, string]]]
 
     Ed.register(Shared, false)
 
     local_and_remote:
-      var container: EdValue[Shared]
+      var container: Ed[Shared]
       container.init
 
       var shared = Shared(id: "1")
@@ -691,10 +690,10 @@ proc run*() =
   test "zentable of zentables":
     type Block = ref object of RootObj
       id: string
-      chunks: EdTable[int, EdTable[string, string]]
+      chunks: Ed[Table[int, Ed[Table[string, string]]]]
 
     local_and_remote:
-      var container: EdValue[Block]
+      var container: Ed[Block]
       container.init
 
       var shared = Block(id: "2")
@@ -703,7 +702,7 @@ proc run*() =
       ctx2.tick
       var shared2 = Block.init_from(shared, ctx = ctx2)
 
-      shared.chunks[1] = EdTable[string, string].init
+      shared.chunks[1] = Ed[Table[string, string]].init
       shared.chunks[1]["hello"] = "world"
       Ed.thread_ctx = ctx2
       ctx2.tick
@@ -730,13 +729,13 @@ proc run*() =
     Ed.register(RefType, false)
 
     local_and_remote:
-      var src = EdSeq[RefType].init
+      var src = Ed[seq[RefType]].init
       var obj = RefType(id: "1")
       let id = obj.ref_id
 
       src += obj
       ctx2.tick
-      var dest = EdSeq[RefType](ctx2[src])
+      var dest = Ed[seq[RefType]](ctx2[src])
 
       private_access EdContext
       private_access CountedRef
@@ -789,9 +788,9 @@ proc run*() =
 
     local_and_remote:
       let msg = "hello world"
-      var src = EdSet[Flags].init
+      var src = Ed[set[Flags]].init
       ctx2.tick
-      var dest = EdSet[Flags](ctx2[src])
+      var dest = Ed[set[Flags]](ctx2[src])
       src += One
       ctx2.tick
       check dest.value == {One}
@@ -802,7 +801,7 @@ proc run*() =
   test "seq of tuples":
     local_and_remote:
       let val = ("hello", 1)
-      let z = EdSeq[val.type].init
+      let z = Ed[seq[val.type]].init
       ctx2.tick
       z += val
       ctx2.tick
@@ -817,10 +816,10 @@ proc run*() =
 
     local_and_remote:
       let a = RefType(id: "a")
-      var src = EdValue[ptr RefType].init
+      var src = Ed[ptr RefType].init
 
       ctx2.tick
-      var dest = EdValue[ptr RefType](ctx2[src])
+      var dest = Ed[ptr RefType](ctx2[src])
 
       src.value = unsafe_addr(a)
       ctx2.tick
@@ -841,10 +840,10 @@ proc run*() =
 
     local_and_remote:
       let a = Query(target: RefType3(id: "b"), other: "hello")
-      var src = EdValue[Query].init
+      var src = Ed[Query].init
 
       ctx2.tick
-      var dest = EdValue[Query](ctx2[src])
+      var dest = Ed[Query](ctx2[src])
 
       src.value = a
       ctx2.tick
@@ -862,10 +861,10 @@ proc run*() =
 
       SyncUnit = ref object of EdRef
         parent: SyncUnit
-        units: EdSeq[SyncUnit]
+        units: Ed[seq[SyncUnit]]
 
       State = ref object
-        units: EdSeq[SyncUnit]
+        units: Ed[seq[SyncUnit]]
         active: SyncUnit
 
     Ed.register(SyncUnit, false)

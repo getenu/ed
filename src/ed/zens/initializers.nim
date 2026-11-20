@@ -16,7 +16,7 @@ export new_ident_node
 {.pop.}
 
 # Per-type registration statements collected at compile time (one per
-# instantiated `Ed[T,O]`), emitted by `Ed.bootstrap`. Each is a trivial call --
+# instantiated `EdContainer[T,O]`), emitted by `Ed.bootstrap`. Each is a trivial call --
 # `register_initializer(tid, cast[pointer](materialize_received[T,O]))` -- that
 # references a NAMED top-level proc, never an inline proc literal. That's what
 # lets `Ed.bootstrap` (hence `connect`) expand inside a `unittest test` block: an
@@ -24,14 +24,14 @@ export new_ident_node
 # expanded inside a template.
 const INITIALIZERS = CacheSeq"INITIALIZERS"
 
-# Materializers keyed by `Ed[T,O].tid`, stored as raw code pointers (subscribe
+# Materializers keyed by `EdContainer[T,O].tid`, stored as raw code pointers (subscribe
 # casts back to CreateInitializer).
 var type_initializers: Table[int, pointer]
 
 proc ctx(): EdContext =
   Ed.thread_ctx
 
-proc relay_fill*[T, O](item: Ed[T, O], op_ctx: OperationContext) =
+proc relay_fill*[T](item: Ed[T], op_ctx: OperationContext) =
   ## Re-broadcast a just-filled placeholder to our own subscribers: they hold
   ## the same id as a placeholder (minted from the same inline ref), and the
   ## relayed CREATE fills theirs and clears their flag -- `loaded` then means
@@ -91,7 +91,7 @@ proc materialize_received*[T, O](
       let item = Ed.init(value, ctx = ctx, id = id, flags = flags, op_ctx)
       ctx.set_body_bytes(item.body, bin.len) # evictor accounting
     elif not ctx.subscribing:
-      let item = Ed[T, O](ctx[id])
+      let item = Ed[T](ctx[id])
       if not item.placeholder and not ctx.from_upstream(op_ctx):
         # A CREATE for an object we already hold *materialized*, arriving from a
         # non-upstream -- e.g. the bidirectional reverse leg (a peer pushing its
@@ -119,10 +119,10 @@ proc materialize_received*[T, O](
     else:
       let existed = id in ctx
       if not existed:
-        discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
+        discard Ed[T].init(ctx = ctx, id = id, flags = flags, op_ctx)
 
       let initializer = proc() =
-        let item = Ed[T, O](ctx[id])
+        let item = Ed[T](ctx[id])
         if existed and not item.placeholder and not ctx.from_upstream(op_ctx):
           # Pre-existing materialized object with a non-upstream CREATE: don't
           # clobber live local content (getenu/ed#28). An upstream CREATE still
@@ -144,23 +144,24 @@ proc materialize_received*[T, O](
           relay_fill(item, op_ctx)
       ctx.value_initializers.add(initializer)
   elif id notin ctx:
-    discard Ed[T, O].init(ctx = ctx, id = id, flags = flags, op_ctx)
+    discard Ed[T].init(ctx = ctx, id = id, flags = flags, op_ctx)
     if LAZY in flags:
       # A LAZY container's empty-body CREATE is a *handle*, not a fill:
       # contents arrive per-key (request/release). Placeholder keeps
       # `loaded` false; touch skips LAZY, so reads never materialize the
       # whole table by accident.
-      Ed[T, O](ctx[id]).placeholder = true
+      Ed[T](ctx[id]).placeholder = true
   else:
     # Empty-body CREATE for an object we were holding as a placeholder:
     # it exists for real now, just with no value yet. LAZY excepted -- its
     # empty-body CREATE is a handle push and says nothing about contents.
     if LAZY notin flags:
-      Ed[T, O](ctx[id]).placeholder = false
+      Ed[T](ctx[id]).placeholder = false
 
-proc create_initializer[T, O](self: Ed[T, O]) =
+proc create_initializer[T](self: Ed[T]) =
+  type O = item_type(T)
   ## Collect this concrete type's registration at COMPILE TIME (the `static`
-  ## block runs when `Ed[T, O]` is instantiated). The runtime body is empty, so
+  ## block runs when `EdContainer[T, O]` is instantiated). The runtime body is empty, so
   ## this proc -- and its caller `defaults`/`init` -- stay gcsafe. `Ed.bootstrap`
   ## emits the collected statements at its call site.
   ##
@@ -169,8 +170,8 @@ proc create_initializer[T, O](self: Ed[T, O]) =
   ## emitted code a trivial call -- template-safe, where an inline proc literal's
   ## gensym params would break codegen inside `unittest test` blocks.
   const ed_type_id = self.type.tid
-  const layout = Ed[T, O].layout_hash
-  const type_name = $Ed[T, O]
+  const layout = EdContainer[T, O].layout_hash
+  const type_name = $Ed[T]
   static:
     INITIALIZERS.add quote do:
       register_initializer(
@@ -181,13 +182,13 @@ proc create_initializer[T, O](self: Ed[T, O]) =
       )
 
 proc make_body_ops[T, O](): BodyOps =
-  ## Ed[T, O]'s sync procs. They take the body as a parameter and capture
+  ## EdContainer[T, O]'s sync procs. They take the body as a parameter and capture
   ## nothing: a capture would cost every object a closure environment and pin
   ## its body (and context) in a cycle ORC doesn't collect.
   privileged
   result.mint = proc(base: ref EdBodyBase): ref EdBase {.gcsafe.} =
     let body = EdBody[T, O](base)
-    let proxy = Ed[T, O](body: body)
+    let proxy = Ed[T](body: body)
     inc body.proxy_gen
     proxy.proxy_handle = ProxyHandle(
       ctx_uid: (if body.ctx != nil: body.ctx.uid else: 0),
@@ -228,7 +229,7 @@ proc make_body_ops[T, O](): BodyOps =
     # release.
     let bin =
       if contents:
-        let self = Ed[T, O](body.ctx.resolve_proxy(body))
+        let self = Ed[T](body.ctx.resolve_proxy(body))
         {.gcsafe.}:
           self.tracked.to_flatty
       else:
@@ -237,7 +238,7 @@ proc make_body_ops[T, O](): BodyOps =
       kind: CREATE,
       obj: bin,
       flags: body.flags,
-      type_id: Ed[T, O].tid,
+      type_id: EdContainer[T, O].tid,
       object_id: body.id,
       owner_id: body.owner_id, # synced ownership (see EdBase.owner_id)
       # source is set by send() based on subscription type
@@ -284,7 +285,7 @@ proc make_body_ops[T, O](): BodyOps =
   result.build_message = proc(
       body: ref EdBodyBase, change: BaseChange, id, trace: string
   ): Message {.gcsafe.} =
-    var msg = Message(object_id: id, type_id: Ed[T, O].tid)
+    var msg = Message(object_id: id, type_id: EdContainer[T, O].tid)
     # Collections (change object O differs from tracked T) are delta /
     # non-idempotent ops; registers (O is T) are whole-value and idempotent.
     when O isnot T:
@@ -302,7 +303,7 @@ proc make_body_ops[T, O](): BodyOps =
     when change.item is Ed:
       msg.change_object_id = change.item.id
     elif change.item is Pair[auto, Ed]:
-      # EdTable whose value is an Ed container (e.g. EdTable[Vector3, EdSeq]):
+      # A table whose value is an Ed container (e.g. Ed[Table[Vector3, Ed[seq[X]]]]):
       # the value syncs by id, the key by value. Ref-typed keys aren't supported
       # here -- `to_flatty` nils refs, so the key wouldn't round-trip.
       {.gcsafe.}:
@@ -349,7 +350,7 @@ proc make_body_ops[T, O](): BodyOps =
     # Resolve (minting if none is live) the typed proxy: assign/unassign and
     # callback triggering run through it. A fresh mint simply has no app
     # callbacks to fire.
-    let self = Ed[T, O](body.ctx.resolve_proxy(body))
+    let self = Ed[T](body.ctx.resolve_proxy(body))
 
     if msg.kind == DESTROY:
       # Forward the upstream op-source so the re-broadcast (relay) filters the
@@ -455,7 +456,7 @@ proc make_body_ops[T, O](): BodyOps =
     # publish them ahead of the entry -- per-key deep. Only meaningful for
     # table containers.
     when O is Pair:
-      let self = Ed[T, O](body.ctx.resolve_proxy(body))
+      let self = Ed[T](body.ctx.resolve_proxy(body))
       type K = generic_params(O.default.type).get(0)
       {.gcsafe.}:
         let key = key_bin.from_flatty(K, self.ctx)
@@ -488,7 +489,7 @@ proc make_body_ops[T, O](): BodyOps =
     # report nested Ed containers so the caller can shed them. The local half
     # of `release` and the receiving half of an eviction notice.
     when O is Pair:
-      let self = Ed[T, O](body.ctx.resolve_proxy(body))
+      let self = Ed[T](body.ctx.resolve_proxy(body))
       type K = generic_params(O.default.type).get(0)
       {.gcsafe.}:
         let key = key_bin.from_flatty(K, self.ctx)
@@ -519,15 +520,16 @@ proc body_ops[T, O](): ptr BodyOps =
   {.cast(gcsafe).}:
     result = addr ops
 
-proc defaults[T, O](
-    self: Ed[T, O],
+proc defaults[T](
+    self: Ed[T],
     ctx: EdContext,
     id: string,
     op_ctx: OperationContext,
     broadcast = true,
     flags = DEFAULT_FLAGS,
     placeholder = false,
-): Ed[T, O] =
+): Ed[T] =
+  type O = item_type(T)
   privileged
   log_defaults
 
@@ -537,7 +539,7 @@ proc defaults[T, O](
   # set what are now body fields.
   when O isnot T:
     if REJECT_STALE in flags:
-      fail "REJECT_STALE only applies to registers (EdValue); " & $Ed[T, O] &
+      fail "REJECT_STALE only applies to registers (an Ed value); " & $Ed[T] &
         " would quietly stay last-write-wins"
   let body = EdBody[T, O](flags: flags, placeholder: placeholder)
   self.body = body
@@ -545,8 +547,8 @@ proc defaults[T, O](
   create_initializer(self)
 
   # Register the Ed type name for debugging
-  const ed_type_id = Ed[T, O].tid
-  const ed_type_name = $Ed[T, O]
+  const ed_type_id = EdContainer[T, O].tid
+  const ed_type_name = $EdContainer[T, O]
   {.gcsafe.}:
     if ed_type_id notin global_type_name_registry[]:
       global_type_name_registry[][ed_type_id] = ed_type_name
@@ -594,9 +596,9 @@ proc defaults[T, O](
     self.publish_create(broadcast = true, op_ctx = op_ctx)
   self
 
-proc init_placeholder*[T, O](
-    _: typedesc[Ed[T, O]], ctx: EdContext, id: string
-): Ed[T, O] =
+proc init_placeholder*[T](
+    _: typedesc[Ed[T]], ctx: EdContext, id: string
+): Ed[T] =
   ## A non-broadcasting stand-in for a not-yet-materialized object. Registered in
   ## `ctx.objects` under `id` and marked `placeholder`; no CREATE goes out.
   ## Reading it triggers a fetch; the real state fills it in later.
@@ -604,7 +606,8 @@ proc init_placeholder*[T, O](
   # Minted ownerless: an open `own` scope is whatever is being decoded around
   # the reference, not the object's owner. Its CREATE brings the real one.
   "".own:
-    result = Ed[T, O]().defaults(
+    result = Ed[T]()
+    discard result.defaults(
       ctx, id, OperationContext(), broadcast = false, placeholder = true
     )
 
@@ -617,78 +620,56 @@ proc init*(
 ): T =
   ## Initialize an empty `Ed` container of the given type.
   ctx.setup_op_ctx
-  T().defaults(ctx, id, op_ctx, flags = flags)
+  result = T()
+  discard result.defaults(ctx, id, op_ctx, flags = flags)
 
-proc init*[T: ref | object | tuple | array | SomeOrdinal | SomeNumber | string | ptr](
+proc init_tracked[T](
+    tracked: T, flags: set[EdFlags], ctx: EdContext, id: string,
+    op_ctx: OperationContext,
+): Ed[T] =
+  ctx.setup_op_ctx
+  let self = Ed[T]()
+  discard self.defaults(ctx, id, op_ctx, flags = flags)
+  when T is (seq or system.set or Table):
+    mutate(op_ctx):
+      self.tracked = tracked
+  else:
+    var initial_ctx = op_ctx
+    initial_ctx.initial = true
+    mutate(initial_ctx):
+      self.tracked = tracked
+  self
+
+proc init*[T](
+    _: type Ed[T],
+    tracked: T,
+    flags = DEFAULT_FLAGS,
+    ctx = ctx(),
+    id = "",
+    op_ctx = OperationContext(),
+): Ed[T] =
+  ## A container holding `tracked`: `Ed[seq[int]].init(@[1, 2])`.
+  init_tracked(tracked, flags, ctx, id, op_ctx)
+
+proc init*[T: ref | object | tuple | array | SomeOrdinal | SomeNumber | string | ptr | seq | system.set](
     _: type Ed,
     tracked: T,
     flags = DEFAULT_FLAGS,
     ctx = ctx(),
     id = "",
     op_ctx = OperationContext(),
-): Ed[T, T] =
-  ctx.setup_op_ctx
-  var self = Ed[T, T]().defaults(ctx, id, op_ctx, flags = flags)
+): Ed[T] =
+  ## A container holding `tracked`: `Ed.init(@[1, 2])` is an `Ed[seq[int]]`.
+  init_tracked(tracked, flags, ctx, id, op_ctx)
 
-  var initial_ctx = op_ctx
-  initial_ctx.initial = true
-  mutate(initial_ctx):
-    self.tracked = tracked
-  result = self
-
-proc init*[O](
-    _: type Ed,
-    tracked: set[O],
-    flags = DEFAULT_FLAGS,
-    ctx = ctx(),
-    id = "",
-    op_ctx = OperationContext(),
-): Ed[set[O], O] =
-  ctx.setup_op_ctx
-  var self = Ed[set[O], O]().defaults(ctx, id, op_ctx, flags = flags)
-
-  mutate(op_ctx):
-    self.tracked = tracked
-  result = self
-
-proc init*[K, V](
-    _: type Ed,
-    tracked: Table[K, V],
-    flags = DEFAULT_FLAGS,
-    ctx = ctx(),
-    id = "",
-    op_ctx = OperationContext(),
-): EdTable[K, V] =
-  ctx.setup_op_ctx
-  var self = EdTable[K, V]().defaults(ctx, id, op_ctx, flags = flags)
-
-  mutate(op_ctx):
-    self.tracked = tracked
-  result = self
-
-proc init*[O](
-    _: type Ed,
-    tracked: seq[O],
-    flags = DEFAULT_FLAGS,
-    ctx = ctx(),
-    id = "",
-    op_ctx = OperationContext(),
-): Ed[seq[O], O] =
-  ctx.setup_op_ctx
-  var self = Ed[seq[O], O]().defaults(ctx, id, op_ctx, flags = flags)
-
-  mutate(op_ctx):
-    self.tracked = tracked
-  result = self
-
-proc init*[T, O](
-    self: var Ed[T, O],
+proc init*[T](
+    self: var Ed[T],
     flags = DEFAULT_FLAGS,
     ctx = ctx(),
     id = "",
     op_ctx = OperationContext(),
 ) =
-  self = Ed[T, O].init(ctx = ctx, flags = flags, id = id, op_ctx = op_ctx)
+  self = Ed[T].init(ctx = ctx, flags = flags, id = id, op_ctx = op_ctx)
 
 proc init_ed_fields*[T: object or ref](
     self: T, flags = DEFAULT_FLAGS, ctx = ctx()
@@ -729,35 +710,16 @@ proc init_from*[T: object or ref](
     when dest is Ed:
       dest = ctx[src]
 
-proc ed*[T: ref | object | tuple | array | SomeOrdinal | SomeNumber | string | ptr](
+proc ed*[T: ref | object | tuple | array | SomeOrdinal | SomeNumber | string | ptr | seq | system.set](
     value: T,
     flags = DEFAULT_FLAGS,
     ctx = ctx(),
     id = "",
     op_ctx = OperationContext(),
-): EdValue[T] =
-  ## An Ed holding `value`. The kind follows the value: this one makes an
-  ## `EdValue`; a seq, set or Table makes an `EdSeq`, `EdSet` or `EdTable`.
-  ## Example: `let name = ed("hello")`
-  EdValue[T].init(value, flags = flags, ctx = ctx, id = id, op_ctx = op_ctx)
-
-proc ed*[O](
-    value: seq[O],
-    flags = DEFAULT_FLAGS,
-    ctx = ctx(),
-    id = "",
-    op_ctx = OperationContext(),
-): EdSeq[O] =
-  EdSeq[O].init(value, flags = flags, ctx = ctx, id = id, op_ctx = op_ctx)
-
-proc ed*[O](
-    value: set[O],
-    flags = DEFAULT_FLAGS,
-    ctx = ctx(),
-    id = "",
-    op_ctx = OperationContext(),
-): EdSet[O] =
-  EdSet[O].init(value, flags = flags, ctx = ctx, id = id, op_ctx = op_ctx)
+): Ed[T] =
+  ## An Ed holding `value`: `ed("hello")` is an `Ed[string]`, `ed(@[1, 2])` an
+  ## `Ed[seq[int]]`.
+  init_tracked(value, flags, ctx, id, op_ctx)
 
 proc ed*[K, V](
     value: Table[K, V],
@@ -765,8 +727,8 @@ proc ed*[K, V](
     ctx = ctx(),
     id = "",
     op_ctx = OperationContext(),
-): EdTable[K, V] =
-  EdTable[K, V].init(value, flags = flags, ctx = ctx, id = id, op_ctx = op_ctx)
+): Ed[Table[K, V]] =
+  init_tracked(value, flags, ctx, id, op_ctx)
 
 macro bootstrap*(_: type Ed): untyped =
   ## Emit the per-type registrations collected at compile time. Expanded by

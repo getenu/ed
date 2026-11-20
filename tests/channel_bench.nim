@@ -123,7 +123,7 @@ proc sampler_proc() {.thread.} =
       sleep 4
 
 # --- producer: owns the data, streams adds into the consumer --------------------
-proc per_add_producer(data: EdSeq[int]) =
+proc per_add_producer(data: Ed[seq[int]]) =
   var i = 0
   while i < cur.produce_total:
     if cur.policy == Gated:
@@ -142,7 +142,7 @@ proc per_add_producer(data: EdSeq[int]) =
     if i mod cur.produce_batch == 0:
       g_worker_ctx.tick
 
-proc frame_producer(data: EdSeq[int]) =
+proc frame_producer(data: Ed[seq[int]]) =
   ## Models enu's worker frame: advance (always gated on pressure, like enu today)
   ## produces a frame's "voxel edits" into a COALESCING pending-chunk store; the
   ## flush emits one message per dirty chunk. `gate_flush` adds the proposed fix:
@@ -192,7 +192,7 @@ proc producer_body() =
   )
   Ed.thread_ctx = g_worker_ctx
 
-  var data = EdSeq[int].init(flags = {SYNC_LOCAL}, id = "bench", ctx = g_worker_ctx)
+  var data = Ed[seq[int]].init(flags = {SYNC_LOCAL}, id = "bench", ctx = g_worker_ctx)
 
   # Consumer subscribes to us -> we become the sender into its inbox.
   g_main_ctx.subscribe(g_worker_ctx)
@@ -247,7 +247,7 @@ proc run_scenario(sc: Scenario): bool =
     g_main_ctx.tick
     sleep 1
 
-  var data_main = EdSeq[int](g_main_ctx["bench"])
+  var data_main = Ed[seq[int]](g_main_ctx["bench"])
   data_main.track proc(changes: seq[Change[int]]) {.gcsafe.} =
     var added = 0
     for c in changes:

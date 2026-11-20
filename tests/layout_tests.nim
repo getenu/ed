@@ -29,8 +29,8 @@ type
     handle: Node
     on_change: proc()
     friend: Pal
-    friends: EdSeq[Pal]
-    flags: EdSet[Mood]
+    friends: Ed[seq[Pal]]
+    flags: Ed[set[Mood]]
 
 proc run*() =
   suite "wire layouts":
@@ -39,23 +39,23 @@ proc run*() =
       check "label:string" in sig
       check "mood:enum(HAPPY,SAD)" in sig
       check "at:{x:f8;y:f8;}" in sig
-      check "friends:Ed[seq[edref],edref]" in sig
-      check "flags:Ed[set[enum(HAPPY,SAD)],enum(HAPPY,SAD)]" in sig
+      check "friends:EdContainer[seq[edref],edref]" in sig
+      check "flags:EdContainer[set[enum(HAPPY,SAD)],enum(HAPPY,SAD)]" in sig
       check "local_cache" notin sig
       check "handle" notin sig
       check "on_change" notin sig
       check "friend:" notin sig
 
     test "container item types are walked; recursive refs terminate":
-      check EdValue[Node].layout_signature ==
-        "Ed[ref {value:i8;next:ref rec1;},ref {value:i8;next:ref rec1;}]"
-      check EdValue[int].layout_hash != EdValue[float].layout_hash
-      check EdValue[int32].layout_hash != EdValue[int64].layout_hash
+      check Ed[Node].layout_signature ==
+        "EdContainer[ref {value:i8;next:ref rec1;},ref {value:i8;next:ref rec1;}]"
+      check Ed[int].layout_hash != Ed[float].layout_hash
+      check Ed[int32].layout_hash != Ed[int64].layout_hash
 
     test "aliases don't change a signature":
       type Count = int
-      check EdValue[Count].layout_signature == EdValue[int].layout_signature
-      check EdValue[Hash].layout_signature == "Ed[i8,i8]"
+      check Ed[Count].layout_signature == Ed[int].layout_signature
+      check Ed[Hash].layout_signature == "EdContainer[i8,i8]"
 
   suite "layout handshake":
     proc subscribe_error(skew: bool): string =
@@ -63,7 +63,7 @@ proc run*() =
       # skewing the authority's entry in the callback stands in for a peer built
       # from different sources.
       let host = free_addr()
-      let tid = Ed[int, int].tid
+      let tid = Ed[int].tid
       var authority = EdContext.init(
         id = "layout_auth",
         listen_address = host,
@@ -71,7 +71,7 @@ proc run*() =
         blocking_recv = true,
       )
       var client = EdContext.init(id = "layout_client")
-      discard EdValue[int].init(ctx = authority)
+      discard Ed[int].init(ctx = authority)
       let original = global_layout_registry[][tid]
       try:
         client.subscribe host,
@@ -93,7 +93,7 @@ proc run*() =
     test "a shared type with a different layout is refused, naming the type":
       let error = subscribe_error(skew = true)
       check "refused the subscription" in error
-      check $Ed[int, int] in error
+      check $Ed[int] in error
 
     test "a peer on another wire version gets a NAK, not silence":
       let host = free_addr()

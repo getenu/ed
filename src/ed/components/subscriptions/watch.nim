@@ -9,7 +9,8 @@ import ed/components/private/global_state
 import ed/lifecycle
 
 privileged
-proc untrack*[T, O](self: Ed[T, O], zid: EID) =
+proc untrack*[T](self: Ed[T], zid: EID) =
+  type O {.used.} = item_type(T)
   privileged
   log_defaults
   assert self.valid
@@ -25,7 +26,7 @@ proc untrack*[T, O](self: Ed[T, O], zid: EID) =
   else:
     error "no change callback for zid", zid = zid
 
-proc bind_lifetime*[T, O](self: Ed[T, O], lifetime: Lifetime, zid: EID) =
+proc bind_lifetime*[T](self: Ed[T], lifetime: Lifetime, zid: EID) =
   ## Bind an already-registered callback (`zid`) to `lifetime`, so it untracks
   ## when the lifetime finishes. Lets sugar that mints its own zid (`changes`,
   ## enu's `watch`) route teardown through an owner's Lifetime without exposing
@@ -36,11 +37,12 @@ proc bind_lifetime*[T, O](self: Ed[T, O], lifetime: Lifetime, zid: EID) =
     if not self.destroyed and zid in self.typed_body.changed_callbacks:
       self.untrack(zid)
 
-proc track*[T, O](
-    self: Ed[T, O], callback: proc(changes: seq[Change[O]]) {.gcsafe.}
+proc track*[T](
+    self: Ed[T], callback: proc(changes: seq[Change[T.item_type]]) {.gcsafe.}
 ): EID {.discardable.} =
   ## Register a callback to be called when the container changes. Returns an EID
   ## that can be used to untrack the callback later.
+  type O {.used.} = item_type(T)
   privileged
   log_defaults
 
@@ -66,9 +68,10 @@ proc track*[T, O](
     if not current_lifetime.is_nil:
       self.bind_lifetime(current_lifetime, zid)
 
-proc track*[T, O](
-    self: Ed[T, O], callback: proc(changes: seq[Change[O]], zid: EID) {.gcsafe.}
+proc track*[T](
+    self: Ed[T], callback: proc(changes: seq[Change[T.item_type]], zid: EID) {.gcsafe.}
 ): EID {.discardable.} =
+  type O {.used.} = item_type(T)
   assert self.valid
   var zid: EID
   zid = self.track proc(changes: seq[Change[O]]) {.gcsafe.} =
@@ -76,15 +79,16 @@ proc track*[T, O](
 
   result = zid
 
-proc track*[T, O](
-    self: Ed[T, O],
+proc track*[T](
+    self: Ed[T],
     callback:
-      proc(changes: seq[Change[O]], zid: EID, it: Ed[T, O]) {.gcsafe.},
+      proc(changes: seq[Change[T.item_type]], zid: EID, it: Ed[T]) {.gcsafe.},
 ): EID {.discardable.} =
   ## The non-capturing form: the live proxy arrives as `it` each fire, so the
   ## callback needs no reference to the watched object at all -- a proxy
   ## tracked this way still dies promptly when the app drops it. The sugar
   ## (`changes`/`watch`) builds on this.
+  type O {.used.} = item_type(T)
   privileged
   assert self.valid
   inc self.ctx.changed_callback_eid
@@ -93,7 +97,7 @@ proc track*[T, O](
   body.changed_callbacks[zid] = proc(
       changes: seq[Change[O]], it: ref EdBase
   ) {.gcsafe.} =
-    callback(changes, zid, Ed[T, O](it))
+    callback(changes, zid, Ed[T](it))
   body.callback_gens[zid] = body.proxy_gen
   self.ctx.close_index[zid] = self.id
   result = zid
@@ -101,10 +105,10 @@ proc track*[T, O](
     if not current_lifetime.is_nil:
       self.bind_lifetime(current_lifetime, zid)
 
-proc track*[T, O](
-    self: Ed[T, O],
+proc track*[T](
+    self: Ed[T],
     lifetime: Lifetime,
-    callback: proc(changes: seq[Change[O]]) {.gcsafe.},
+    callback: proc(changes: seq[Change[T.item_type]]) {.gcsafe.},
 ): EID {.discardable.} =
   ## Like `track`, but the callback's removal is owned by `lifetime`: when the
   ## owner calls `lifetime.finish` the callback untracks automatically -- no
@@ -163,12 +167,12 @@ macro warn_self_capture(watched: untyped, body: untyped): untyped =
         watched,
       )
 
-template changes*[T, O](self: Ed[T, O], pause_me, body) =
+template changes*[T](self: Ed[T], pause_me, body) =
   warn_self_capture(self, body)
   make_discardable block:
     {.line.}:
       track self, proc(
-          changes: seq[Change[O]], zid {.inject.}: EID, it {.inject.}: Ed[T, O]
+          changes: seq[Change[T.item_type]], zid {.inject.}: EID, it {.inject.}: Ed[T]
       ) {.gcsafe.} =
         # `it` is the live proxy, delivered as a parameter -- referencing it
         # captures nothing, so sugar watchers never pin their object.
@@ -178,25 +182,25 @@ template changes*[T, O](self: Ed[T, O], pause_me, body) =
             template added(): bool =
               ADDED in change.changes
 
-            template added(obj: O): bool =
+            template added(obj: T.item_type): bool =
               change.item == obj and added()
 
             template removed(): bool =
               REMOVED in change.changes
 
-            template removed(obj: O): bool =
+            template removed(obj: T.item_type): bool =
               change.item == obj and removed()
 
             template modified(): bool =
               MODIFIED in change.changes
 
-            template modified(obj: O): bool =
+            template modified(obj: T.item_type): bool =
               change.item == obj and modified()
 
             template touched(): bool =
               TOUCHED in change.changes
 
-            template touched(obj: O): bool =
+            template touched(obj: T.item_type): bool =
               change.item == obj and touched()
 
             template closed(): bool =
@@ -205,5 +209,5 @@ template changes*[T, O](self: Ed[T, O], pause_me, body) =
             {.line.}:
               check_no_return(body)
 
-template changes*[T, O](self: Ed[T, O], body) =
+template changes*[T](self: Ed[T], body) =
   changes(self, true, body)

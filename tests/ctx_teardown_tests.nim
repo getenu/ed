@@ -13,7 +13,7 @@ proc cycle(n: int) =
   Ed.thread_ctx = ctx
   for i in 0 ..< n:
     block:
-      var v = EdValue[string].init(ctx = ctx, id = "v" & $i)
+      var v = Ed[string].init(ctx = ctx, id = "v" & $i)
       v.value = "x"
       v.destroy()
     # proxy drops at block exit

@@ -1,4 +1,5 @@
 import ed/[deps]
+from ed/utils/misc import tid
 import pkg/[serialization, json_serialization]
 
 template ed_ignore*() {.pragma.}
@@ -262,7 +263,7 @@ type
     item*: O
 
   Pair[K, V] = object
-    ## Key-value pair used for `EdTable` changes.
+    ## Key-value pair used for table changes.
     key*: K
     value*: V
 
@@ -568,7 +569,7 @@ type
     change_receiver*:
       proc(body: ref EdBodyBase, msg: Message, op_ctx: OperationContext) {.gcsafe.}
 
-    # Per-key fetch (partial EdTable). Given a serialized key, build the ADD op
+    # Per-key fetch (partial table). Given a serialized key, build the ADD op
     # carrying that key's current value, so a partial subscriber can pull one
     # entry without the whole table. `found = false` if the key isn't present.
     # `nested` lists Ed containers inside the value (a chunk's delta seq) -- the
@@ -590,7 +591,7 @@ type
       ): tuple[found: bool, nested: seq[string]] {.gcsafe.}
 
     # Typed proxy factory, wired in `defaults` (the only place the concrete
-    # Ed[T, O] is known). Mints over this body, sets the backref + handle.
+    # EdContainer[T, O] is known). Mints over this body, sets the backref + handle.
     mint*: proc(body: ref EdBodyBase): ref EdBase {.gcsafe.}
     # Typed context-level untrack (see EdContext.close_index): untracks `zid`
     # on the live proxy, or no-ops -- a dead proxy already took its callbacks
@@ -718,20 +719,40 @@ type
 
   EdObject[T, O] = object of EdBase
 
-  Ed*[T, O] = ref object of EdObject[T, O]
-    ## Generic reactive container. T is the contained type, O is the change object type.
+  EdContainer*[T, O] = ref object of EdObject[T, O]
+    ## The two-parameter core every `Ed[T]` inherits from: T is the contained
+    ## type, O the change item type. ed's own procs take it, so they serve every
+    ## kind of `Ed`. Not part of the public API (`ed` doesn't export it); apps
+    ## name containers as `Ed[T]`.
 
-  EdTable*[K, V] = Ed[Table[K, V], Pair[K, V]]
-    ## Reactive table container. Changes report key-value pairs.
+template item_type*[K, V](_: typedesc[Table[K, V]]): untyped = Pair[K, V]
+  ## The type of what an `Ed[T]` holds: the value itself, one element of a seq
+  ## or set, or one `Pair` of a table -- what its `items` yield and what a
+  ## change's `item` is.
+template item_type*[O](_: typedesc[seq[O]]): untyped = O
+template item_type*[O](_: typedesc[set[O]]): untyped = O
+template item_type*[T](_: typedesc[T]): untyped = T
 
-  EdSeq*[T] = Ed[seq[T], T]
-    ## Reactive sequence container.
+type Ed*[T] = ref object of EdContainer[T, T.item_type]
+  ## A reactive container holding a `T`. `Ed[int]` holds a value, and its
+  ## changes report the value; `Ed[seq[T]]`, `Ed[set[T]]` and
+  ## `Ed[Table[K, V]]` are collections, whose changes report one item (a
+  ## `Pair[K, V]` for a table). Unparameterized, `Ed` is the namespace for
+  ## `Ed.init`, `Ed.register` and `Ed.thread_ctx`, and in a generic signature
+  ## it matches any kind (`proc f(x: Ed)`).
 
-  EdSet*[T] = Ed[set[T], T]
-    ## Reactive set container.
+template ed_core*[T](_: typedesc[Ed[T]]): untyped =
+  ## The core instantiation behind an `Ed[T]` (see `EdContainer`). Type ids,
+  ## layouts and registration are keyed on it, so `Ed[T]` and the core agree.
+  EdContainer[T, T.item_type]
 
-  EdValue*[T] = Ed[T, T]
-    ## Reactive single-value container.
+func tid*[T](_: typedesc[Ed[T]]): int =
+  ed_core(Ed[T]).tid
+
+template as_ed*[T, O](self: EdContainer[T, O]): Ed[T] =
+  ## The `Ed[T]` a core-typed container is (every container is one), for
+  ## calling the kind-specific procs from code generic over the core.
+  Ed[T](self)
 
 const DEFAULT_FLAGS* = {SYNC_LOCAL, SYNC_REMOTE}
   ## Default flags for `Ed` containers: sync both locally and remotely.
@@ -740,10 +761,10 @@ const DEFAULT_FLAGS* = {SYNC_LOCAL, SYNC_REMOTE}
 # (reads *and* writes) compile unchanged; private body fields still require
 # `privileged` there. The typed `tracked` forward casts through `EdBody[T]`;
 # everything else lives on the untyped base.
-template tracked*[T, O](self: Ed[T, O]): untyped =
+template tracked*[T, O](self: EdContainer[T, O]): untyped =
   EdBody[T, O](self.body).tracked
 
-template typed_body*[T, O](self: Ed[T, O]): EdBody[T, O] =
+template typed_body*[T, O](self: EdContainer[T, O]): EdBody[T, O] =
   EdBody[T, O](self.body)
 
 template id*(self: ref EdBase): untyped =
@@ -764,13 +785,13 @@ template flags*(self: ref EdBase): untyped =
 template ctx*(self: ref EdBase): untyped =
   self.body.ctx
 
-proc init_husk*[T, O](_: typedesc[Ed[T, O]], id: string): Ed[T, O] =
+proc init_husk*[T](_: typedesc[Ed[T]], id: string): Ed[T] =
   ## A bare serialization stand-in: proxy + body carrying only the id. Used by
   ## registered-type `stringify`, which clones a ref and reduces its Ed fields
   ## to their ids -- the receiver re-links them from its own registry. Not
   ## registered anywhere; never escapes serialization.
-  result = Ed[T, O]()
-  result.body = EdBody[T, O](id: id)
+  result = Ed[T]()
+  result.body = EdBody[T, T.item_type](id: id)
 
 # The sync closures: the call-arity procs forward invocations (a dotted call
 # through a proc field parses as a call of the *symbol*, so a field-resolving

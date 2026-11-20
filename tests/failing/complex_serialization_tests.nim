@@ -11,19 +11,19 @@ proc run*() =
         
       NestedLevel4 = ref object of RootObj
         id: string
-        level5_objects: EdSeq[NestedLevel5]
+        level5_objects: Ed[seq[NestedLevel5]]
         
       NestedLevel3 = ref object of RootObj
         id: string
-        level4_table: EdTable[string, NestedLevel4]
+        level4_table: Ed[Table[string, NestedLevel4]]
         
       NestedLevel2 = ref object of RootObj
         id: string
-        level3_seq: EdSeq[NestedLevel3]
+        level3_seq: Ed[seq[NestedLevel3]]
         
       NestedLevel1 = ref object of RootObj
         id: string
-        level2_value: EdValue[NestedLevel2]
+        level2_value: Ed[NestedLevel2]
     
     # Register all types
     Ed.register(NestedLevel5, false)
@@ -78,11 +78,11 @@ proc run*() =
     type
       NodeA = ref object of RootObj
         id: string
-        b_refs: EdSeq[NodeB]
+        b_refs: Ed[seq[NodeB]]
         
       NodeB = ref object of RootObj
         id: string
-        a_ref: EdValue[NodeA]
+        a_ref: Ed[NodeA]
     
     Ed.register(NodeA, false)
     Ed.register(NodeB, false)
@@ -122,13 +122,13 @@ proc run*() =
     
     # Create large string data (simulating binary data)
     let large_data = "x".repeat(1_000_000)  # 1MB of data
-    var data_container = EdValue[string].init(ctx = ctx1, id = "large_data")
+    var data_container = Ed[string].init(ctx = ctx1, id = "large_data")
     data_container.value = large_data
     
     ctx2.tick()
     
     # Large data serialization might fail or be very slow
-    let remote_data = EdValue[string](ctx2["large_data"])
+    let remote_data = Ed[string](ctx2["large_data"])
     check remote_data.value.len == 1_000_000
 
   test "complex table with mixed types":
@@ -137,7 +137,7 @@ proc run*() =
         id: string
         int_val: int
         str_val: string
-        nested_table: EdTable[string, EdSeq[EdValue[float]]]
+        nested_table: Ed[Table[string, Ed[seq[Ed[float]]]]]
         
     Ed.register(MixedData, false)
     
@@ -146,7 +146,7 @@ proc run*() =
     
     ctx2.subscribe(ctx1)
     
-    var complex_table = EdTable[string, MixedData].init(ctx = ctx1, id = "complex")
+    var complex_table = Ed[Table[string, MixedData]].init(ctx = ctx1, id = "complex")
     
     # Create complex nested data
     for i in 1..50:
@@ -155,9 +155,9 @@ proc run*() =
       
       # Add nested table with sequences of values
       for j in 1..5:
-        mixed.nested_table["key_" & $j] = EdSeq[EdValue[float]].init(ctx = ctx1)
+        mixed.nested_table["key_" & $j] = Ed[seq[Ed[float]]].init(ctx = ctx1)
         for k in 1..3:
-          let float_val = EdValue[float].init(ctx = ctx1)
+          let float_val = Ed[float].init(ctx = ctx1)
           float_val.value = float(i * j * k) / 10.0
           mixed.nested_table["key_" & $j] += float_val
       
@@ -166,7 +166,7 @@ proc run*() =
     ctx2.tick()
     
     # Complex serialization might fail
-    let remote_table = EdTable[string, MixedData](ctx2["complex"])
+    let remote_table = Ed[Table[string, MixedData]](ctx2["complex"])
     check remote_table.len == 50
     check remote_table["item_1"].nested_table["key_1"][0].value == 0.1
 

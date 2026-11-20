@@ -1,4 +1,4 @@
-import std/[unittest, macros, tables, strutils]
+import std/[unittest, macros, tables, strutils, rationals, complex, atomics]
 import ed
 import ./objects_tests_types
 
@@ -13,9 +13,9 @@ proc gadget(): Gadget =
 proc run*() =
   test "{.ed.} fields become Ed fields; ignored ones stay plain":
     let g = gadget()
-    check g.size_value is EdValue[float]
-    check g.xform_value is EdValue[Xform]
-    check g.parts is EdSeq[int]
+    check g.size_value is Ed[float]
+    check g.xform_value is Ed[Xform]
+    check g.parts is Ed[seq[int]]
     check g.cache is string
     check g.cache.has_custom_pragma(ed_ignore)
 
@@ -85,7 +85,7 @@ proc run*() =
     check g.xform == Xform(origin: Vec(x: 10, y: 20), scale: 3)
     check writes == 1
 
-  test "edit works on an EdValue too":
+  test "edit works on a value Ed too":
     let g = gadget()
     edit g.xform_value:
       scale = 4
@@ -142,7 +142,7 @@ proc run*() =
   test "init_ed_fields leaves a field that already exists":
     Ed.thread_ctx = objects_ctx
     var g = Gadget()
-    g.size_value = EdValue[float].init(flags = {SYNC_LOCAL}, ctx = objects_ctx)
+    g.size_value = Ed[float].init(flags = {SYNC_LOCAL}, ctx = objects_ctx)
     g.init_ed_fields(ctx = objects_ctx)
     check g.size_value.flags == {SYNC_LOCAL}
     check g.count_value.flags == {SYNC_LOCAL, SYNC_REMOTE}
@@ -158,20 +158,20 @@ proc run*() =
         ctx2.tick(blocking = false)
     settle()
 
-    var src = EdSeq[Widget].init(ctx = ctx1)
+    var src = Ed[seq[Widget]].init(ctx = ctx1)
     var w = Widget(id: "plain_widget", note: "the sender's").init_ed_fields(ctx = ctx1)
     w.name = "bob"
     src += w
     settle()
 
-    let copy = EdSeq[Widget](ctx2[src])[0]
+    let copy = Ed[seq[Widget]](ctx2[src])[0]
     check copy.note == ""             # not sent
     check copy.name_value.value == "bob" # the Ed field is
     copy.note = "the receiver's"
 
     # the same object arriving again inside another value (as opening enu's
     # editor sends a build) leaves the receiver's plain field alone
-    var holder = EdValue[Widget].init(ctx = ctx1)
+    var holder = Ed[Widget].init(ctx = ctx1)
     holder.value = w
     settle()
     check copy.note == "the receiver's"
@@ -203,10 +203,10 @@ proc run*() =
 
   test "ed picks the container kind from the value":
     Ed.thread_ctx = objects_ctx
-    check ed(1.5) is EdValue[float]
-    check ed(@[1, 2]) is EdSeq[int]
-    check ed({'a', 'b'}) is EdSet[char]
-    check ed({"a": 1}.to_table) is EdTable[string, int]
+    check ed(1.5) is Ed[float]
+    check ed(@[1, 2]) is Ed[seq[int]]
+    check ed({'a', 'b'}) is Ed[set[char]]
+    check ed({"a": 1}.to_table) is Ed[Table[string, int]]
     let local = ed(3, flags = {SYNC_LOCAL}, id = "ed_kind_local")
     check local.flags == {SYNC_LOCAL}
     check local.id == "ed_kind_local"
@@ -274,3 +274,45 @@ proc run*() =
     let r = Root().init_ed_fields(ctx = objects_ctx)
     check r.things.id == "root_tests_things"
     check r.count_value.value == 3
+
+  test "Ed[T] is the container for a T, whatever its kind":
+    Ed.thread_ctx = objects_ctx
+    check ed(3) is Ed[int]
+    check ed(@[1]) is Ed[seq[int]]
+    check ed({'a'}) is Ed[set[char]]
+    check ed({"a": 1}.to_table) is Ed[Table[string, int]]
+    check Ed.init(Vec(x: 1)) is Ed[Vec]
+    let names: Ed[seq[string]] = Ed.init(@["a"])
+    let more = Ed[seq[string]].init(@["b", "c"])
+    check names.value == @["a"]
+    check more.len == 2
+    # Generic code infers through Ed[...], and a bare `Ed` takes any kind.
+    proc total[X](items: Ed[seq[X]]): X =
+      for item in items:
+        result += item
+    proc id_of(x: Ed): string =
+      x.id
+    check total(ed(@[1, 2, 3])) == 6
+    check total(ed(@[1.5, 2.5])) == 4.0
+    check id_of(more) == more.id and id_of(ed(1)) != ""
+    var keys: seq[string]
+    let table = Ed[Table[string, int]].init
+    table.changes:
+      if added:
+        keys.add change.item.key
+    table["x"] = 1
+    check keys == @["x"]
+
+  test "+= on synced fields sits beside other libraries' +=":
+    var r = 1 // 2
+    r += 1 // 2
+    var c = complex(1.0, 2.0)
+    c += complex(1.0, 1.0)
+    var a: Atomic[int]
+    a += 3
+    var i = 1
+    i += 2
+    check r == 1 // 1
+    check c == complex(2.0, 3.0)
+    check a.load == 3
+    check i == 3

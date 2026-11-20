@@ -1,4 +1,4 @@
-## Cross-context convergence tests for positional EdSeq ops (`[]=`, indexed
+## Cross-context convergence tests for positional seq Ed ops (`[]=`, indexed
 ## `del`). Indexes needn't be stable across ticks, but once ops propagate the
 ## owner and its replica must converge to identical contents *and order* -- the
 ## same eventual-consistency guarantee the rest of ed gives.
@@ -34,8 +34,8 @@ proc run*() =
   test "positional assign at index 0 converges":
     two_contexts(owner, replica):
       var
-        a = EdSeq[string].init(id = "s", ctx = owner)
-        b = EdSeq[string].init(id = "s", ctx = replica)
+        a = Ed[seq[string]].init(id = "s", ctx = owner)
+        b = Ed[seq[string]].init(id = "s", ctx = replica)
       a.add "A"
       a.add "B"
       sync(owner, replica)
@@ -50,8 +50,8 @@ proc run*() =
   test "positional assign in the middle converges":
     two_contexts(owner, replica):
       var
-        a = EdSeq[string].init(id = "s", ctx = owner)
-        b = EdSeq[string].init(id = "s", ctx = replica)
+        a = Ed[seq[string]].init(id = "s", ctx = owner)
+        b = Ed[seq[string]].init(id = "s", ctx = replica)
       for x in ["A", "B", "C"]:
         a.add x
       sync(owner, replica)
@@ -63,8 +63,8 @@ proc run*() =
   test "indexed del converges":
     two_contexts(owner, replica):
       var
-        a = EdSeq[string].init(id = "s", ctx = owner)
-        b = EdSeq[string].init(id = "s", ctx = replica)
+        a = Ed[seq[string]].init(id = "s", ctx = owner)
+        b = Ed[seq[string]].init(id = "s", ctx = replica)
       for x in ["A", "B", "C"]:
         a.add x
       sync(owner, replica)
@@ -76,8 +76,8 @@ proc run*() =
   test "reported sequence: assign then add then indexed del converges":
     two_contexts(owner, replica):
       var
-        a = EdSeq[string].init(id = "s", ctx = owner)
-        b = EdSeq[string].init(id = "s", ctx = replica)
+        a = Ed[seq[string]].init(id = "s", ctx = owner)
+        b = Ed[seq[string]].init(id = "s", ctx = replica)
       a.add "A"
       a.add "B"
       sync(owner, replica)
@@ -94,8 +94,8 @@ proc run*() =
     # reproduce that exact order, not remove-by-value (which gives [A,C,D]).
     two_contexts(owner, replica):
       var
-        a = EdSeq[string].init(id = "s", ctx = owner)
-        b = EdSeq[string].init(id = "s", ctx = replica)
+        a = Ed[seq[string]].init(id = "s", ctx = owner)
+        b = Ed[seq[string]].init(id = "s", ctx = replica)
       for x in ["A", "B", "C", "D"]:
         a.add x
       sync(owner, replica)
@@ -107,8 +107,8 @@ proc run*() =
   test "shift delete preserves order across contexts":
     two_contexts(owner, replica):
       var
-        a = EdSeq[string].init(id = "s", ctx = owner)
-        b = EdSeq[string].init(id = "s", ctx = replica)
+        a = Ed[seq[string]].init(id = "s", ctx = owner)
+        b = Ed[seq[string]].init(id = "s", ctx = replica)
       for x in ["A", "B", "C", "D"]:
         a.add x
       sync(owner, replica)
@@ -121,8 +121,8 @@ proc run*() =
     # Value-based diff can't tell which duplicate changed; position can.
     two_contexts(owner, replica):
       var
-        a = EdSeq[string].init(id = "s", ctx = owner)
-        b = EdSeq[string].init(id = "s", ctx = replica)
+        a = Ed[seq[string]].init(id = "s", ctx = owner)
+        b = Ed[seq[string]].init(id = "s", ctx = replica)
       for x in ["X", "Y", "X"]:
         a.add x
       sync(owner, replica)
@@ -134,8 +134,8 @@ proc run*() =
   test "assign at last index converges":
     two_contexts(owner, replica):
       var
-        a = EdSeq[string].init(id = "s", ctx = owner)
-        b = EdSeq[string].init(id = "s", ctx = replica)
+        a = Ed[seq[string]].init(id = "s", ctx = owner)
+        b = Ed[seq[string]].init(id = "s", ctx = replica)
       for x in ["A", "B", "C"]:
         a.add x
       sync(owner, replica)
@@ -152,8 +152,8 @@ proc run*() =
     var
       owner = EdContext.init(id = "owner", blocking_recv = true)
       replica = EdContext.init(id = "replica", blocking_recv = true)
-    var a = EdSeq[string].init(@["A", "B"], id = "s", ctx = owner)
-    var b {.used.} = EdSeq[string].init(id = "s", ctx = replica)
+    var a = Ed[seq[string]].init(@["A", "B"], id = "s", ctx = owner)
+    var b {.used.} = Ed[seq[string]].init(id = "s", ctx = replica)
     replica.subscribe(owner)
     for _ in 0 .. 2:
       owner.tick(blocking = false)
@@ -163,13 +163,13 @@ proc run*() =
     replica.close
 
   test "same-id handle: mutate before creates converge still converges":
-    # The realistic pattern (Enu shares an EdSeq handle): create the same empty
+    # The realistic pattern (Enu shares a seq Ed handle): create the same empty
     # id in both contexts, mutate one *before* the creates have synced. Must
     # converge, not clobber. (Pre-#28-fix this lost the owner's content.)
     two_contexts(owner, replica):
       var
-        a = EdSeq[string].init(id = "s", ctx = owner)
-        b = EdSeq[string].init(id = "s", ctx = replica)
+        a = Ed[seq[string]].init(id = "s", ctx = owner)
+        b = Ed[seq[string]].init(id = "s", ctx = replica)
       a.add "A"
       a.add "B"
       sync(owner, replica)

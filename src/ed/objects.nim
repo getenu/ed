@@ -2,8 +2,8 @@
 ##
 ## ```nim
 ## type Thing* {.ed.} = ref object of RootObj
-##   scale*: float                 # synced: a hidden `scale_value: EdValue[float]`
-##   things*: seq[Thing]           # synced: `things: EdSeq[Thing]`
+##   scale*: float                 # synced: a hidden `scale_value: Ed[float]`
+##   things*: seq[Thing]           # synced: `things: Ed[seq[Thing]]`
 ##   cache* {.ignore.}: string     # this side only
 ## Ed.register(Thing)              # plain `scale`/`scale=` accessors
 ##
@@ -22,18 +22,14 @@ import ed/components/subscriptions/watch
 # --- declaring ---------------------------------------------------------------
 
 proc container_type(field_type: NimNode): NimNode =
-  ## The Ed container a field of this written type becomes: `seq[T]` an
-  ## `EdSeq[T]`, `Table[K, V]` an `EdTable[K, V]`, `set[T]` an `EdSet[T]`;
-  ## nil for a value. A type already written as an Ed is left alone.
+  ## The Ed container a field of this written type becomes: a `seq[T]`,
+  ## `set[T]` or `Table[K, V]` an `Ed` of it; nil for a value. A type already
+  ## written as an Ed is left alone.
   if field_type.kind == nnkBracketExpr and field_type[0].kind == nnkIdent:
     case field_type[0].str_val
-    of "seq":
-      return nnkBracketExpr.new_tree(ident"EdSeq", field_type[1])
-    of "Table":
-      return nnkBracketExpr.new_tree(ident"EdTable", field_type[1], field_type[2])
-    of "set":
-      return nnkBracketExpr.new_tree(ident"EdSet", field_type[1])
-    of "Ed", "EdValue", "EdSeq", "EdTable", "EdSet":
+    of "seq", "Table", "set":
+      return nnkBracketExpr.new_tree(ident"Ed", field_type)
+    of "Ed":
       return field_type
   if field_type.kind == nnkIdent and field_type.str_val.starts_with("Ed"):
     return field_type
@@ -121,7 +117,7 @@ proc rewrite_field(name: NimNode, field_type, default: NimNode): NimNode =
       (name, container)
     else:
       let hidden = ident(name.base_name.str_val & "_value")
-      (name.with_name(hidden), nnkBracketExpr.new_tree(ident"EdValue", field_type))
+      (name.with_name(hidden), nnkBracketExpr.new_tree(ident"Ed", field_type))
   let named =
     if pragmas.len > 0: nnkPragmaExpr.new_tree(new_name, pragmas) else: new_name
   nnkIdentDefs.new_tree(named, new_type, default)
@@ -138,7 +134,7 @@ proc rewrite_fields(recs: NimNode): NimNode =
 
 macro ed*(def: untyped): untyped =
   ## `type Thing {.ed.} = ref object ...`: every field becomes an Ed of the type
-  ## written -- a value field a hidden `<name>_value: EdValue[T]`, a `seq`,
+  ## written -- a value field a hidden `<name>_value: Ed[T]`, a `seq`,
   ## `Table` or `set` field the matching Ed container under its own name --
   ## unless it's `{.ignore.}`, which keeps it on this side only. Follow the
   ## type with `Ed.register(Thing)` for the value fields' accessors.
@@ -246,7 +242,7 @@ proc write_back(target, value: NimNode, op: string): NimNode =
 
 # --- watching -----------------------------------------------------------------
 
-macro changes*[T](target: T, body: untyped): untyped =
+macro changes*[T: not Ed](target: T, body: untyped): untyped =
   ## `t.scale.changes:` -- watch a synced field by its own name. (An Ed picks
   ## the Ed overload instead.)
   if not target.is_ed_accessor:
@@ -255,7 +251,7 @@ macro changes*[T](target: T, body: untyped): untyped =
   result = quote do:
     watch.changes(`field`, `body`)
 
-macro changes*[T](target: T, pause_me, body: untyped): untyped =
+macro changes*[T: not Ed](target: T, pause_me, body: untyped): untyped =
   if not target.is_ed_accessor:
     error("`changes` watches an Ed or a synced field", target)
   let field = target.ed_field
@@ -296,7 +292,7 @@ macro `:=`*(target: typed, value: untyped): untyped =
 proc field_names(value_type: NimNode): seq[string] =
   ## The fields of an object type (following `ref` and inheritance).
   var t = value_type
-  if t.kind == nnkBracketExpr: # EdValue[T]: the value is the last parameter
+  if t.kind == nnkBracketExpr: # Ed[T]: the value is the parameter
     t = t[^1]
   var impl = t.get_type_impl
   if impl.kind == nnkRefTy:
@@ -340,7 +336,7 @@ macro edit*(target: typed, body: untyped): untyped =
   ##   origin.x = 10
   ##   scale = 3
   ## ```
-  ## Change several parts of a synced field, or of an `EdValue`, in one write.
+  ## Change several parts of a synced field, or of an `Ed` value, in one write.
   ## Assignments whose target starts with one of the value's fields are made
   ## to the copy; locals and calls are left alone.
   let copy = gensym(nskVar, "copy")

@@ -4,18 +4,18 @@ import ed/lifecycle
 import ed/zens/contexts
 
 type OwnerTest = ref object of EdRef
-  items: EdSeq[int]
-  val: EdValue[int]
-  kids: EdSeq[OwnerTest]
+  items: Ed[seq[int]]
+  val: Ed[int]
+  kids: Ed[seq[OwnerTest]]
 
 type ReincUnit = ref object of EdRef
   # Minimal model of an enu Build for the reincarnation tests: one owned
   # container, no recursive/extra fields (rules out OwnerTest's val/kids
   # serialization as the cause).
-  items: EdSeq[int]
+  items: Ed[seq[int]]
 
 type MoveUnit = ref object of EdRef
-  items: EdSeq[int]
+  items: Ed[seq[int]]
   note: string # plain: stays on each side, so it shows which object this is
 
 # Register the synced ref types so they cross contexts (parse/stringify +
@@ -28,7 +28,7 @@ proc run*() =
   suite "lifetime":
     test "finish untracks callbacks bound to the lifetime":
       var ctx = EdContext.init(id = "lt_ctx")
-      var v = EdValue[int].init(ctx = ctx, id = "v")
+      var v = Ed[int].init(ctx = ctx, id = "v")
       let life = new_lifetime()
 
       var fired = 0
@@ -49,7 +49,7 @@ proc run*() =
 
     test "binding to an already-finished lifetime cleans up immediately":
       var ctx = EdContext.init(id = "lt_ctx2")
-      var v = EdValue[int].init(ctx = ctx, id = "v2")
+      var v = Ed[int].init(ctx = ctx, id = "v2")
       let life = new_lifetime()
       life.finish() # finished before any tracking
 
@@ -77,8 +77,8 @@ proc run*() =
       Ed.thread_ctx = ctx
       var owner = OwnerTest(id: "owner1")
       owner.own:
-        owner.items = EdSeq[int].init(ctx = ctx, id = "own_items")
-        owner.val = EdValue[int].init(ctx = ctx, id = "own_val")
+        owner.items = Ed[seq[int]].init(ctx = ctx, id = "own_items")
+        owner.val = Ed[int].init(ctx = ctx, id = "own_val")
 
       check "own_items" in ctx
       check "own_val" in ctx
@@ -93,7 +93,7 @@ proc run*() =
     test "callbacks tracked in an own scope untrack on finish":
       var ctx = EdContext.init(id = "own_ctx2")
       Ed.thread_ctx = ctx
-      var external = EdValue[int].init(ctx = ctx, id = "ext")
+      var external = Ed[int].init(ctx = ctx, id = "ext")
       var owner = OwnerTest(id: "owner2")
 
       var fired = 0
@@ -116,10 +116,10 @@ proc run*() =
       var inner = OwnerTest(id: "inner")
 
       outer.own:
-        outer.items = EdSeq[int].init(ctx = ctx, id = "outer_items")
+        outer.items = Ed[seq[int]].init(ctx = ctx, id = "outer_items")
         inner.own:
-          inner.items = EdSeq[int].init(ctx = ctx, id = "inner_items")
-        outer.val = EdValue[int].init(ctx = ctx, id = "outer_val") # back to outer
+          inner.items = Ed[seq[int]].init(ctx = ctx, id = "inner_items")
+        outer.val = Ed[int].init(ctx = ctx, id = "outer_val") # back to outer
 
       check inner.items.owner_id == "inner"
       check outer.items.owner_id == "outer"
@@ -139,10 +139,10 @@ proc run*() =
       Ed.thread_ctx = ctx
       let bid = "build_42"
       bid.own: # owner id known before the owner object exists
-        discard EdSeq[int].init(ctx = ctx, id = "bi_items")
-        discard EdValue[int].init(ctx = ctx, id = "bi_val")
+        discard Ed[seq[int]].init(ctx = ctx, id = "bi_items")
+        discard Ed[int].init(ctx = ctx, id = "bi_val")
 
-      check EdSeq[int](ctx["bi_items"]).owner_id == "build_42"
+      check Ed[seq[int]](ctx["bi_items"]).owner_id == "build_42"
       check "bi_items" in ctx.owned_by["build_42"]
 
       ctx.destroy_owned("build_42")
@@ -160,13 +160,13 @@ proc run*() =
 
       var owner = OwnerTest(id: "mcp_bot")
       owner.own:
-        owner.items = EdSeq[int].init(ctx = ctx1, id = "bot_items")
+        owner.items = Ed[seq[int]].init(ctx = ctx1, id = "bot_items")
       owner.items.add 42 # a change, so it syncs
 
       ctx2.tick
 
       check "bot_items" in ctx2
-      check EdSeq[int](ctx2["bot_items"]).owner_id == "mcp_bot" # rode the CREATE
+      check Ed[seq[int]](ctx2["bot_items"]).owner_id == "mcp_bot" # rode the CREATE
       check "bot_items" in ctx2.owned_by["mcp_bot"]             # indexed on the replica
 
       ctx2.destroy_owned("mcp_bot") # ctx2 never built it, but owns the teardown
@@ -185,14 +185,14 @@ proc run*() =
 
       var owner = OwnerTest(id: "so_unit")
       owner.own:
-        owner.items = EdSeq[int].init(ctx = ctx, id = "so_unit_items")
+        owner.items = Ed[seq[int]].init(ctx = ctx, id = "so_unit_items")
 
       var shared = OwnerTest(id: "so_shared")
       shared.id.own:
-        shared.items = EdSeq[int].init(ctx = ctx, id = "so_shared_items")
+        shared.items = Ed[seq[int]].init(ctx = ctx, id = "so_shared_items")
       # Publish through a synced field so the ref enters ref_pool (the enu
       # shared_value pattern), then attribute it to the unit.
-      var shared_value = EdValue[OwnerTest].init(ctx = ctx, id = "so_shared_val")
+      var shared_value = Ed[OwnerTest].init(ctx = ctx, id = "so_shared_val")
       shared_value.value = shared
       ctx.set_owner(shared, "so_unit")
 
@@ -217,7 +217,7 @@ proc run*() =
 
       var owner = OwnerTest(id: "relay_bot")
       owner.own:
-        owner.items = EdSeq[int].init(ctx = ctx1, id = "relay_items")
+        owner.items = Ed[seq[int]].init(ctx = ctx1, id = "relay_items")
       owner.items.add 7
 
       ctx2.tick
@@ -225,8 +225,8 @@ proc run*() =
 
       check "relay_items" in ctx2
       check "relay_items" in ctx3
-      check EdSeq[int](ctx2["relay_items"]).owner_id == "relay_bot"
-      check EdSeq[int](ctx3["relay_items"]).owner_id == "relay_bot" # second hop
+      check Ed[seq[int]](ctx2["relay_items"]).owner_id == "relay_bot"
+      check Ed[seq[int]](ctx3["relay_items"]).owner_id == "relay_bot" # second hop
       check "relay_items" in ctx3.owned_by["relay_bot"]
 
       ctx3.destroy_owned("relay_bot")
@@ -248,7 +248,7 @@ proc run*() =
       proc make_owner(): OwnerTest =
         result = OwnerTest(id: "casc_owner")
         result.own:
-          result.items = EdSeq[int].init(ctx = auth, id = "casc_items")
+          result.items = Ed[seq[int]].init(ctx = auth, id = "casc_items")
 
       var o1 = make_owner()
       o1.items.add 1
@@ -283,14 +283,14 @@ proc run*() =
       rep.subscribe(auth) # bidirectional
       Ed.thread_ctx = auth
 
-      var units = EdSeq[OwnerTest].init(
+      var units = Ed[seq[OwnerTest]].init(
         ctx = auth, id = "mem_units", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
       )
 
       proc make_member(): OwnerTest =
         result = OwnerTest(id: "mem_build")
         result.own:
-          result.items = EdSeq[int].init(ctx = auth, id = "mem_items")
+          result.items = Ed[seq[int]].init(ctx = auth, id = "mem_items")
 
       var m1 = make_member()
       m1.items.add 1
@@ -326,11 +326,11 @@ proc run*() =
       rep.subscribe(auth)
       Ed.thread_ctx = auth
 
-      var units = EdSeq[ReincUnit].init(ctx = auth, id = "ri1_units")
+      var units = Ed[seq[ReincUnit]].init(ctx = auth, id = "ri1_units")
       proc make(v: int): ReincUnit =
         result = ReincUnit(id: "ri1_x")
         result.own:
-          result.items = EdSeq[int].init(ctx = auth, id = "ri1_x_items")
+          result.items = Ed[seq[int]].init(ctx = auth, id = "ri1_x_items")
         result.items.add v
 
       var x1 = make(1)
@@ -339,12 +339,12 @@ proc run*() =
         auth.tick(blocking = false)
         rep.tick(blocking = false)
       check "ri1_x_items" in rep
-      check EdSeq[int](rep["ri1_x_items"]).value == @[1]
+      check Ed[seq[int]](rep["ri1_x_items"]).value == @[1]
 
       # Count what the replica's seq watcher sees across the reload (the enu
       # "node_ctrl state.units change" signature: added=N, removed=M).
       var rep_added, rep_removed: int
-      EdSeq[ReincUnit](rep["ri1_units"]).track proc(
+      Ed[seq[ReincUnit]](rep["ri1_units"]).track proc(
           cs: seq[Change[ReincUnit]]
       ) {.gcsafe.} =
         for c in cs:
@@ -362,10 +362,10 @@ proc run*() =
         auth.tick(blocking = false)
         rep.tick(blocking = false)
 
-      check EdSeq[ReincUnit](rep["ri1_units"]).len == 1
+      check Ed[seq[ReincUnit]](rep["ri1_units"]).len == 1
       check "ri1_x_items" in rep
       check rep["ri1_x_items"].valid
-      check EdSeq[int](rep["ri1_x_items"]).value == @[2]
+      check Ed[seq[int]](rep["ri1_x_items"]).value == @[2]
       check rep_added == rep_removed # balanced: every add paired with a remove
 
     test "REINC tick-between: does a publish boundary fix it 100%":
@@ -378,11 +378,11 @@ proc run*() =
       rep.subscribe(auth)
       Ed.thread_ctx = auth
 
-      var units = EdSeq[ReincUnit].init(ctx = auth, id = "ri2_units")
+      var units = Ed[seq[ReincUnit]].init(ctx = auth, id = "ri2_units")
       proc make(v: int): ReincUnit =
         result = ReincUnit(id: "ri2_x")
         result.own:
-          result.items = EdSeq[int].init(ctx = auth, id = "ri2_x_items")
+          result.items = Ed[seq[int]].init(ctx = auth, id = "ri2_x_items")
         result.items.add v
 
       var x1 = make(1)
@@ -390,7 +390,7 @@ proc run*() =
       for _ in 0 ..< 4:
         auth.tick(blocking = false)
         rep.tick(blocking = false)
-      check EdSeq[int](rep["ri2_x_items"]).value == @[1]
+      check Ed[seq[int]](rep["ri2_x_items"]).value == @[1]
 
       # Reload WITH a publish boundary between destroy and recreate.
       units -= x1
@@ -406,10 +406,10 @@ proc run*() =
         auth.tick(blocking = false)
         rep.tick(blocking = false)
 
-      check EdSeq[ReincUnit](rep["ri2_units"]).len == 1
+      check Ed[seq[ReincUnit]](rep["ri2_units"]).len == 1
       check "ri2_x_items" in rep
       check rep["ri2_x_items"].valid
-      check EdSeq[int](rep["ri2_x_items"]).value == @[2]
+      check Ed[seq[int]](rep["ri2_x_items"]).value == @[2]
 
     test "REINC storm: many reincarnations in one replica drain (enu churn)":
       # The enu failure: the authority (worker) churns many same-id incarnations
@@ -424,11 +424,11 @@ proc run*() =
       rep.subscribe(auth)
       Ed.thread_ctx = auth
 
-      var units = EdSeq[ReincUnit].init(ctx = auth, id = "ri3_units")
+      var units = Ed[seq[ReincUnit]].init(ctx = auth, id = "ri3_units")
       proc make(v: int): ReincUnit =
         result = ReincUnit(id: "ri3_x")
         result.own:
-          result.items = EdSeq[int].init(ctx = auth, id = "ri3_x_items")
+          result.items = Ed[seq[int]].init(ctx = auth, id = "ri3_x_items")
         result.items.add v
 
       var cur = make(0)
@@ -436,7 +436,7 @@ proc run*() =
       for _ in 0 ..< 4:
         auth.tick(blocking = false)
         rep.tick(blocking = false)
-      check EdSeq[int](rep["ri3_x_items"]).value == @[0]
+      check Ed[seq[int]](rep["ri3_x_items"]).value == @[0]
 
       # Churn 20 same-id incarnations, flushing ONLY the authority each time so
       # the replica's inbox accumulates a multi-incarnation batch.
@@ -452,10 +452,10 @@ proc run*() =
         rep.tick(blocking = false)
         auth.tick(blocking = false)
 
-      check EdSeq[ReincUnit](rep["ri3_units"]).len == 1
+      check Ed[seq[ReincUnit]](rep["ri3_units"]).len == 1
       check "ri3_x_items" in rep
       check rep["ri3_x_items"].valid
-      check EdSeq[int](rep["ri3_x_items"]).value == @[20] # the latest, not a stale one
+      check Ed[seq[int]](rep["ri3_x_items"]).value == @[20] # the latest, not a stale one
 
     test "REINC held ref: a held reference is destroyed, and the reload is a new object":
       # A consumer that holds the unit across a reload sees it destroyed -- ed
@@ -466,13 +466,13 @@ proc run*() =
       rep.subscribe(auth)
       Ed.thread_ctx = auth
 
-      var units = EdSeq[ReincUnit].init(ctx = auth, id = "ri4_units")
+      var units = Ed[seq[ReincUnit]].init(ctx = auth, id = "ri4_units")
       proc make(v: int): ReincUnit =
         result = ReincUnit(id: "ri4_x") # stable id (the build), reincarnated
         result.own:
           # Fresh field id per incarnation -- models enu, where a reloaded build's
           # owned containers (code/units) get newly-generated ids each time.
-          result.items = EdSeq[int].init(ctx = auth, id = "ri4_x_items_" & $v)
+          result.items = Ed[seq[int]].init(ctx = auth, id = "ri4_x_items_" & $v)
         result.items.add v
 
       var cur = make(0)
@@ -482,7 +482,7 @@ proc run*() =
         rep.tick(blocking = false)
 
       # The consumer captures and HOLDS a reference (never released).
-      var held = EdSeq[ReincUnit](rep["ri4_units"]).value[0]
+      var held = Ed[seq[ReincUnit]](rep["ri4_units"]).value[0]
       check held.items.valid
       check held.items.value == @[0]
 
@@ -497,7 +497,7 @@ proc run*() =
           rep.tick(blocking = false)
 
       check held.destroyed
-      let current = EdSeq[ReincUnit](rep["ri4_units"]).value[0]
+      let current = Ed[seq[ReincUnit]](rep["ri4_units"]).value[0]
       check current != held
       check not current.destroyed
       check current.items.value == @[20]
@@ -508,16 +508,16 @@ proc run*() =
       rep.subscribe(auth)
       Ed.thread_ctx = auth
 
-      var units = EdSeq[ReincUnit].init(ctx = auth, id = "od_units")
+      var units = Ed[seq[ReincUnit]].init(ctx = auth, id = "od_units")
       var x = ReincUnit(id: "od_x")
       x.own:
-        x.items = EdSeq[int].init(@[0], ctx = auth, id = "od_x_items")
+        x.items = Ed[seq[int]].init(@[0], ctx = auth, id = "od_x_items")
       units.add x
       for _ in 0 ..< 4:
         auth.tick(blocking = false)
         rep.tick(blocking = false)
 
-      let copy = EdSeq[ReincUnit](rep["od_units"]).value[0]
+      let copy = Ed[seq[ReincUnit]](rep["od_units"]).value[0]
       var auth_fired, rep_fired = 0
       var rep_saw: seq[int]
       x.on_destroy:
@@ -556,11 +556,11 @@ proc run*() =
       rep.subscribe(auth)
       Ed.thread_ctx = auth
 
-      var units = EdSeq[ReincUnit].init(ctx = auth, id = "inc_units")
+      var units = Ed[seq[ReincUnit]].init(ctx = auth, id = "inc_units")
       proc make(v: int): ReincUnit =
         result = ReincUnit(id: "inc_x")
         result.own:
-          result.items = EdSeq[int].init(ctx = auth, id = "inc_x_items_" & $v)
+          result.items = Ed[seq[int]].init(ctx = auth, id = "inc_x_items_" & $v)
         result.items.add v
 
       var x1 = make(1)
@@ -568,7 +568,7 @@ proc run*() =
       for _ in 0 ..< 4:
         auth.tick(blocking = false)
         rep.tick(blocking = false)
-      let stale = EdSeq[ReincUnit](rep["inc_units"]).value[0]
+      let stale = Ed[seq[ReincUnit]](rep["inc_units"]).value[0]
 
       units -= x1
       var x2 = make(2)
@@ -588,7 +588,7 @@ proc run*() =
       # the id in a context, a destroy of the older one finds nothing there.)
       check not x2.destroyed
       check x2.items.valid
-      let current = EdSeq[ReincUnit](rep["inc_units"]).value[0]
+      let current = Ed[seq[ReincUnit]](rep["inc_units"]).value[0]
       check current != stale
       check not current.destroyed
       check current.items.value == @[2]
@@ -601,11 +601,11 @@ proc run*() =
       rep.subscribe(auth)
       Ed.thread_ctx = auth
 
-      var here = EdSeq[MoveUnit].init(ctx = auth, id = "mv_here")
-      var there = EdSeq[MoveUnit].init(ctx = auth, id = "mv_there")
+      var here = Ed[seq[MoveUnit]].init(ctx = auth, id = "mv_here")
+      var there = Ed[seq[MoveUnit]].init(ctx = auth, id = "mv_there")
       var x = MoveUnit(id: "mv_x")
       x.own:
-        x.items = EdSeq[int].init(ctx = auth, id = "mv_x_items")
+        x.items = Ed[seq[int]].init(ctx = auth, id = "mv_x_items")
       here.add x
       for _ in 0 ..< 4:
         auth.tick(blocking = false)
@@ -613,7 +613,7 @@ proc run*() =
       # In a proc of its own, so no temporary here keeps the replica's copy
       # alive across the move.
       proc mark(rep: EdContext) {.nimcall.} =
-        EdSeq[MoveUnit](rep["mv_here"]).value[0].note = "the replica's own"
+        Ed[seq[MoveUnit]](rep["mv_here"]).value[0].note = "the replica's own"
       mark(rep)
 
       here -= x
@@ -622,8 +622,8 @@ proc run*() =
         auth.tick(blocking = false)
         rep.tick(blocking = false)
       proc note(rep: EdContext): string {.nimcall.} =
-        EdSeq[MoveUnit](rep["mv_there"]).value[0].note
-      check EdSeq[MoveUnit](rep["mv_here"]).len == 0
+        Ed[seq[MoveUnit]](rep["mv_there"]).value[0].note
+      check Ed[seq[MoveUnit]](rep["mv_here"]).len == 0
       check note(rep) == "the replica's own"
 
     test "on_destroy with a lifetime is dropped when that lifetime finishes":
@@ -650,11 +650,11 @@ proc run*() =
       rep.subscribe(auth)
       Ed.thread_ctx = auth
 
-      var units = EdSeq[ReincUnit].init(ctx = auth, id = "ri5_units")
+      var units = Ed[seq[ReincUnit]].init(ctx = auth, id = "ri5_units")
       proc make(v: int): ReincUnit =
         result = ReincUnit(id: "ri5_x")
         result.own:
-          result.items = EdSeq[int].init(ctx = auth, id = "ri5_x_items")
+          result.items = Ed[seq[int]].init(ctx = auth, id = "ri5_x_items")
         result.items.add v
 
       var cur = make(0)
@@ -664,7 +664,7 @@ proc run*() =
         rep.tick(blocking = false)
 
       var held: ReincUnit = nil
-      EdSeq[ReincUnit](rep["ri5_units"]).track proc(
+      Ed[seq[ReincUnit]](rep["ri5_units"]).track proc(
           cs: seq[Change[ReincUnit]]
       ) {.gcsafe.} =
         for c in cs:
@@ -694,11 +694,11 @@ proc run*() =
     test "EdRef destroy: lifetime, owned containers, destroyed latch":
       var ctx = EdContext.init(id = "rd_ctx")
       Ed.thread_ctx = ctx
-      var external = EdValue[int].init(ctx = ctx, id = "rd_ext")
+      var external = Ed[int].init(ctx = ctx, id = "rd_ext")
       var owner = OwnerTest(id: "rd_owner")
       var fired = 0
       owner.own:
-        owner.items = EdSeq[int].init(ctx = ctx, id = "rd_items")
+        owner.items = Ed[seq[int]].init(ctx = ctx, id = "rd_items")
         external.track proc(changes: seq[Change[int]]) {.gcsafe.} =
           fired.inc
 
@@ -722,10 +722,10 @@ proc run*() =
       Ed.thread_ctx = ctx_a
       var child = OwnerTest(id: "xd_child")
       child.own:
-        child.items = EdSeq[int].init(ctx = ctx_a, id = "xd_child_items")
+        child.items = Ed[seq[int]].init(ctx = ctx_a, id = "xd_child_items")
       var parent = OwnerTest(id: "xd_parent")
       parent.own:
-        parent.kids = EdSeq[OwnerTest].init(
+        parent.kids = Ed[seq[OwnerTest]].init(
           ctx = ctx_a, id = "xd_kids", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
         )
       parent.kids.add child # -> ctx_a.ref_pool, stamps child.ctx = ctx_a
@@ -741,10 +741,10 @@ proc run*() =
       Ed.thread_ctx = ctx
       var child = OwnerTest(id: "om_child")
       child.own:
-        child.items = EdSeq[int].init(ctx = ctx, id = "om_child_items")
+        child.items = Ed[seq[int]].init(ctx = ctx, id = "om_child_items")
       var parent = OwnerTest(id: "om_parent")
       parent.own:
-        parent.kids = EdSeq[OwnerTest].init(
+        parent.kids = Ed[seq[OwnerTest]].init(
           ctx = ctx, id = "om_kids", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
         )
       parent.kids.add child # membership -> owned by parent
@@ -760,7 +760,7 @@ proc run*() =
       var child = OwnerTest(id: "om2_child")
       var parent = OwnerTest(id: "om2_parent")
       parent.own:
-        parent.kids = EdSeq[OwnerTest].init(
+        parent.kids = Ed[seq[OwnerTest]].init(
           ctx = ctx, id = "om2_kids", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
         )
       parent.kids.add child

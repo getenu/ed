@@ -30,12 +30,12 @@ From the current Ed codebase (`src/ed/`):
    synchronously in-line; cross-context changes are applied (and callbacks fired) when
    *that context's thread* calls `ctx.tick()`. Never on a background thread you don't
    control.
-4. **Proxy/body split** (`src/ed/types.nim`). The app holds a proxy (`Ed[T,O]` ref); the
+4. **Proxy/body split** (`src/ed/types.nim`). The app holds a proxy (`Ed[T]` ref); the
    real data + callbacks live on a registry-owned body keyed by a stable `string` id.
    Proxies are pruned when nothing holds them — a bridge must **root** any handle it hands
    out, or re-resolve via `ctx[id]`.
 5. **`Ed.bootstrap` is compile-time.** No runtime "register container type" call — every
-   `Ed[T,O]` the UI needs must be *instantiated in Nim code linked into the binary* so the
+   `Ed[T]` the UI needs must be *instantiated in Nim code linked into the binary* so the
    bootstrap macro emits its registration. The bridge shim is where those instantiations
    are declared.
 
@@ -135,7 +135,7 @@ structs.
 
 ## The Nim shim (`bridge.nim`)
 
-Declare the concrete `Ed[T,O]` types the UI needs, keep a **handle table that roots
+Declare the concrete `Ed[T]` types the UI needs, keep a **handle table that roots
 proxies**, wrap Ed's real procs with `exportc, cdecl`. Single-thread-per-context by
 contract, so no locks. Illustrative, not compile-ready:
 
@@ -148,7 +148,7 @@ contract, so no locks. Illustrative, not compile-ready:
 import std/tables
 import ed
 
-type SwiftVal = EdValue[string]          # covers text settings & the editor buffer
+type SwiftVal = Ed[string]          # covers text settings & the editor buffer
 Ed.bootstrap                             # runs during NimMain (this module's init)
 
 var
@@ -290,7 +290,7 @@ struct SettingsView: View {
 
 Edit → `ed_set` on the bridge thread → syncs to enu. Change in-game → enu pushes a
 `Message` → bridge `tick` fires the callback → `MainActor` updates `text` → SwiftUI
-redraws. The editor component is the same mechanism with `EdSeq[string]`/a registered ref
+redraws. The editor component is the same mechanism with `Ed[seq[string]]`/a registered ref
 type, its change deltas mapped to a SwiftUI `ForEach`.
 
 ## Generalizing the shim (ship it with Ed)
@@ -311,7 +311,7 @@ Ships in Ed + a reusable Swift package:
 - The whole C ABI, `NimMain` init, context create/tick/free, the handle table + proxy
   rooting, `EdVar` marshalling, the C callback trampoline.
 - Swift `EdBridge` (the serial-queue-as-thread + tick loop), and observable wrappers:
-  `EdString`/`EdScalar` (one value) and `EdList` (an `EdSeq`/`EdTable`), all `@Observable`
+  `EdString`/`EdScalar` (one value) and `EdList` (a seq or table `Ed`), all `@Observable`
   with `MainActor` delivery.
 - **Identity adapters** for the primitives (`string`/`int`/`float`/`bool`) so scalar Ed
   fields need zero app code.
@@ -338,7 +338,7 @@ ed_bridge_adapter(Code,
   to   = proc(c: Code): string = c.nim,
   from = proc(s: string): Code = Code.init(s))
 
-# Config is one EdValue[Config] holding ~35 plain scalar fields (id "config").
+# Config is one Ed[Config] holding ~35 plain scalar fields (id "config").
 # Auto-generate a per-field bridge accessor for each; the whole Config still swaps
 # atomically underneath, so field observers all fire on any change (fine for settings).
 ed_bridge_value_object(Config)      # macro enumerates Config's fields
@@ -351,7 +351,7 @@ ed_bridge_register(Sign)            # message, more, width, billboard, ...
 ed_bridge_register(GameState)       # config, level_name, ...
 ```
 
-That's the whole "type registration" story: enu already instantiates every `Ed[T,O]` (so
+That's the whole "type registration" story: enu already instantiates every `Ed[T]` (so
 `Ed.bootstrap` covers them) and already registers its ref types; the bridge adds
 field-projection registration on top. Nothing is maintained in two places.
 
@@ -448,7 +448,7 @@ Known costs / scope (verified against current code):
 - **`tracked =` is ~8 scattered sites** (`tracking.nim:282-293`, `operations.nim:97-347`,
   initializers) — the cell lock wraps the owner-side writes behind a `set_tracked` helper.
 - **Foreign reads return value copies, not proxies** → clean for scalars/value-objects
-  (`EdValue[float|Code|Config]`), leaky for containers-of-refs (`EdSeq[Unit]`). Restrict.
+  (`Ed[float|Code|Config]`), leaky for containers-of-refs (`Ed[seq[Unit]]`). Restrict.
 - **Async writes** → no read-your-writes on a foreign thread until the owner ticks.
 - **`LAZY`/partial objects can't be read foreign** (materialize is owner-thread I/O);
   require flagged objects to be resident.
@@ -538,11 +538,11 @@ replica) and many-thread cases, but is not justified by the voxel-memory argumen
 
 - **Phase 0 — toolchain proof.** `--app:staticlib --header` "hello" called from Swift on
   macOS. Confirm `NimMain` + ORC + threads link cleanly and `-d:nim_type_names` compiles.
-- **Phase 1 — read-only scalar.** `EdValue[string]` `get` + `track`; one SwiftUI label
+- **Phase 1 — read-only scalar.** `Ed[string]` `get` + `track`; one SwiftUI label
   updating live from a Nim-side write. Proves the thread/tick/callback plumbing.
 - **Phase 2 — two-way + settings screen.** `ed_set`, `Binding`, `EdVar` generalized to
   int/float/bool. A handful of typed scalars.
-- **Phase 3 — collections.** `EdSeq`/`EdTable` with change deltas → SwiftUI `ForEach`
+- **Phase 3 — collections.** Seq and table `Ed`s with change deltas → SwiftUI `ForEach`
   (script list, editor line buffer).
 - **Phase 4 — domain objects.** `Ed.register`-style ref types exposed as structured
   values — the editor component proper.

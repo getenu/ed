@@ -22,7 +22,7 @@ proc run*() =
     var ctx2 = EdContext.init(id = "ctx2")
     
     # Create object before subscription
-    var obj = EdValue[string].init(ctx = ctx1, id = "test_obj")
+    var obj = Ed[string].init(ctx = ctx1, id = "test_obj")
     obj.value = "test_data"
     
     # Forcibly close the listening context

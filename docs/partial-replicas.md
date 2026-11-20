@@ -1,7 +1,7 @@
 # Partial Replicas
 
 A context should hold only the objects it uses. Nested `Ed` objects (the
-`EdTable`s inside an `EdSeq[EdTable]`, etc.) don't exist in memory until reached,
+table `Ed`s inside a seq of them, etc.) don't exist in memory until reached,
 and materialize on access. Opt-in and non-breaking: the default is still a full
 replica (full push on subscribe, every op fanned out), byte-identical to before.
 

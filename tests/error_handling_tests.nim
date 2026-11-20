@@ -8,9 +8,9 @@ proc run*() =
   test "memory cleanup on context destruction":
     block:
       var ctx = EdContext.init(id = "temp_ctx")
-      var obj1 = EdValue[string].init(ctx = ctx, id = "obj1")
-      var obj2 = EdSeq[int].init(ctx = ctx, id = "obj2")
-      var obj3 = EdTable[string, float].init(ctx = ctx, id = "obj3")
+      var obj1 = Ed[string].init(ctx = ctx, id = "obj1")
+      var obj2 = Ed[seq[int]].init(ctx = ctx, id = "obj2")
+      var obj3 = Ed[Table[string, float]].init(ctx = ctx, id = "obj3")
 
       obj1.value = "test"
       obj2 += 42
@@ -30,7 +30,7 @@ proc run*() =
     Ed.register(RefObject, false)
 
     let ref_obj = RefObject(id: "test_ref", data: 123)
-    var ref_container = EdSeq[RefObject].init(ctx = ctx)
+    var ref_container = Ed[seq[RefObject]].init(ctx = ctx)
 
     # Add reference
     ref_container += ref_obj
@@ -50,10 +50,10 @@ proc run*() =
 
     type
       NodeA = ref object of EdRef
-        b_ref: EdValue[NodeB]
+        b_ref: Ed[NodeB]
 
       NodeB = ref object of EdRef
-        a_ref: EdValue[NodeA]
+        a_ref: Ed[NodeA]
 
     Ed.register(NodeA, false)
     Ed.register(NodeB, false)
@@ -76,10 +76,10 @@ proc run*() =
     var ctx = EdContext.init(id = "pressure_ctx")
 
     # Create many objects to test memory pressure
-    var objects: seq[EdValue[string]]
+    var objects: seq[Ed[string]]
 
     for i in 1 .. 50:
-      var obj = EdValue[string].init(ctx = ctx, id = "obj" & $i)
+      var obj = Ed[string].init(ctx = ctx, id = "obj" & $i)
       obj.value = "data" & $i
       objects.add obj
 
@@ -92,7 +92,7 @@ proc run*() =
     for i in 1 .. 50:
       let obj_id = "obj" & $i
       if obj_id in ctx:
-        var obj = EdValue[string](ctx[obj_id])
+        var obj = Ed[string](ctx[obj_id])
         obj.destroy()
 
   test "subscription memory management":
@@ -104,15 +104,15 @@ proc run*() =
     ctx2.subscribe(ctx1)
     ctx3.subscribe(ctx2)
 
-    var obj = EdValue[string].init(ctx = ctx1, id = "chain_obj")
+    var obj = Ed[string].init(ctx = ctx1, id = "chain_obj")
     obj.value = "test_chain"
 
     ctx2.tick()
     ctx3.tick()
 
     # Verify propagation
-    var obj2 = EdValue[string](ctx2["chain_obj"])
-    var obj3 = EdValue[string](ctx3["chain_obj"])
+    var obj2 = Ed[string](ctx2["chain_obj"])
+    var obj3 = Ed[string](ctx3["chain_obj"])
 
     check obj2.value == "test_chain"
     check obj3.value == "test_chain"
@@ -128,7 +128,7 @@ proc run*() =
 
     # Create object with large data
     var large_table =
-      EdTable[string, string].init(ctx = ctx1, id = "large_data")
+      Ed[Table[string, string]].init(ctx = ctx1, id = "large_data")
 
     # Add substantial data
     for i in 1 .. 20:
@@ -138,13 +138,13 @@ proc run*() =
 
     ctx2.tick()
 
-    var remote_table = EdTable[string, string](ctx2["large_data"])
+    var remote_table = Ed[Table[string, string]](ctx2["large_data"])
     check remote_table.len == 20
     check remote_table["key_1"].len > 100
 
   test "tracking callback cleanup":
     var ctx = EdContext.init(id = "callback_ctx")
-    var obj = EdValue[string].init(ctx = ctx)
+    var obj = Ed[string].init(ctx = ctx)
 
     var callback_count = 0
 

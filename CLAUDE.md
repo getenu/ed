@@ -16,8 +16,8 @@ This library provides "Ed" objects - reactive data containers that can:
 ### Core Types (`src/ed/types.nim`)
 - **EdContext**: Central coordination object managing object lifecycle, subscriptions, and message passing
 - **EdBase**: Base class for all reactive objects
-- **Ed[T, O]**: Generic reactive container for type T with change objects of type O
-- **EdTable[K, V]**, **EdSeq[T]**, **EdSet[T]**, **EdValue[T]**: Specialized reactive collections
+- **Ed[T]**: The reactive container for a `T`. `Ed[int]` holds a value; `Ed[seq[T]]`, `Ed[set[T]]` and `Ed[Table[K, V]]` are collections whose changes report one item (a `Pair[K, V]` for a table). A bare `Ed` in a signature matches any kind.
+- **EdContainer[T, O]**: Internal two-parameter core every `Ed[T]` inherits from (O is its `item_type`: what the container holds). ed's own code takes it; `ed` doesn't export it. Public procs take `Ed[T]` (with `T.item_type` for the item type), because Nim ranks a match through inheritance below any generic overload elsewhere (system's `&=` template, `==` for refs).
 - **Change[O]**: Represents modifications to objects with change tracking
 - **Subscription**: Manages local/remote connections for data synchronization
 
@@ -90,7 +90,7 @@ Ed.bootstrap
 
 # Create reactive values
 let name = ed("hello")
-var items = EdSeq[string].init
+var items = Ed[seq[string]].init
 
 # Track changes
 items.track proc(changes: auto) =

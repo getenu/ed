@@ -19,7 +19,7 @@ var server_thread: Thread[string]
 proc server_loop(address: string) {.thread.} =
   let server = EdContext.init(id = "test-server", listen_address = address)
   Ed.thread_ctx = server
-  var shared = EdValue[string].init(id = "shared", ctx = server)
+  var shared = Ed[string].init(id = "shared", ctx = server)
   shared.value = "hello"
   server_ready.store(true)
   while server_running.load:
@@ -66,7 +66,7 @@ proc run*() =
     for _ in 0 ..< 20:
       client.tick
       if "shared" in client.ctx:
-        received = EdValue[string](client.ctx["shared"]).value
+        received = Ed[string](client.ctx["shared"]).value
         if received == "hello":
           break
       sleep 5

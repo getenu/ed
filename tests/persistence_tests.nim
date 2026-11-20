@@ -23,9 +23,9 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p1_auth", is_authority = true)
       a.open_store(path)
-      var value = EdValue[int].init(ctx = a, id = "p1_value")
-      var s = EdSeq[string].init(ctx = a, id = "p1_seq")
-      var t = EdTable[string, int].init(ctx = a, id = "p1_table")
+      var value = Ed[int].init(ctx = a, id = "p1_value")
+      var s = Ed[seq[string]].init(ctx = a, id = "p1_seq")
+      var t = Ed[Table[string, int]].init(ctx = a, id = "p1_table")
       value.value = 42
       s.add "one"
       s.add "two"
@@ -36,13 +36,13 @@ proc run*() =
 
       var b = EdContext.init(id = "p1_auth", is_authority = true)
       b.open_store(path)
-      check EdValue[int](b["p1_value"]).value == 42
-      check EdSeq[string](b["p1_seq"]).len == 2
-      check "two" in EdSeq[string](b["p1_seq"])
-      check EdTable[string, int](b["p1_table"])["k"] == 7
+      check Ed[int](b["p1_value"]).value == 42
+      check Ed[seq[string]](b["p1_seq"]).len == 2
+      check "two" in Ed[seq[string]](b["p1_seq"])
+      check Ed[Table[string, int]](b["p1_table"])["k"] == 7
       # Counters continue: a new write stamps a strictly higher LSN.
       check b.lsn_counter == lsn
-      EdValue[int](b["p1_value"]).value = 43
+      Ed[int](b["p1_value"]).value = 43
       check b.lsn_counter > lsn
       b.destroy()
 
@@ -54,7 +54,7 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p2_auth", is_authority = true)
       a.open_store(path)
-      var s = EdSeq[int].init(ctx = a, id = "p2_seq")
+      var s = Ed[seq[int]].init(ctx = a, id = "p2_seq")
       s.add 1
       s.add 2
       s.add 3
@@ -62,8 +62,8 @@ proc run*() =
 
       var b = EdContext.init(id = "p2_auth", is_authority = true)
       b.open_store(path)
-      check EdSeq[int](b["p2_seq"]).len == 3
-      check EdSeq[int](b["p2_seq"])[2] == 3
+      check Ed[seq[int]](b["p2_seq"]).len == 3
+      check Ed[seq[int]](b["p2_seq"])[2] == 3
       b.destroy()
 
     test "content created with zero subscribers is captured":
@@ -74,14 +74,14 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p3_auth", is_authority = true)
       a.open_store(path)
-      var value = EdValue[string].init(ctx = a, id = "p3_value")
+      var value = Ed[string].init(ctx = a, id = "p3_value")
       value.value = "durable"
       check a.lsn_counter > 0 # stamped despite zero subscribers
       a.destroy()
 
       var b = EdContext.init(id = "p3_auth", is_authority = true)
       b.open_store(path)
-      check EdValue[string](b["p3_value"]).value == "durable"
+      check Ed[string](b["p3_value"]).value == "durable"
       b.destroy()
 
     test "torn tail is dropped; state as of last valid entry":
@@ -90,7 +90,7 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p4_auth", is_authority = true)
       a.open_store(path)
-      var value = EdValue[int].init(ctx = a, id = "p4_value")
+      var value = Ed[int].init(ctx = a, id = "p4_value")
       value.value = 1
       value.value = 2
       let segment = path / a.store.segment_name
@@ -103,8 +103,8 @@ proc run*() =
 
       var b = EdContext.init(id = "p4_auth", is_authority = true)
       b.open_store(path)
-      check EdValue[int](b["p4_value"]).value == 2
-      EdValue[int](b["p4_value"]).value = 3 # appends still work
+      check Ed[int](b["p4_value"]).value == 2
+      Ed[int](b["p4_value"]).value = 3 # appends still work
       b.destroy()
 
     test "mid-file corruption raises StoreError":
@@ -113,7 +113,7 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p5_auth", is_authority = true)
       a.open_store(path)
-      var value = EdValue[int].init(ctx = a, id = "p5_value")
+      var value = Ed[int].init(ctx = a, id = "p5_value")
       value.value = 1
       value.value = 2
       let segment = path / a.store.segment_name
@@ -135,7 +135,7 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p6_auth", is_authority = true)
       a.open_store(path)
-      var s = EdSeq[int].init(ctx = a, id = "p6_seq")
+      var s = Ed[seq[int]].init(ctx = a, id = "p6_seq")
       s.add 1
       s.add 2
       let genesis_segment = path / a.store.segment_name
@@ -149,8 +149,8 @@ proc run*() =
 
       var b = EdContext.init(id = "p6_auth", is_authority = true)
       b.open_store(path)
-      check EdSeq[int](b["p6_seq"]).len == 3
-      check EdSeq[int](b["p6_seq"])[2] == 3
+      check Ed[seq[int]](b["p6_seq"]).len == 3
+      check Ed[seq[int]](b["p6_seq"])[2] == 3
       b.destroy()
 
     test "snapshot_every auto-triggers; retention prunes":
@@ -159,7 +159,7 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p7_auth", is_authority = true)
       a.open_store(path, snapshot_every = 5, retain_snapshots = 1)
-      var value = EdValue[int].init(ctx = a, id = "p7_value")
+      var value = Ed[int].init(ctx = a, id = "p7_value")
       for i in 1 .. 12:
         value.value = i
         a.tick()
@@ -179,7 +179,7 @@ proc run*() =
 
       var b = EdContext.init(id = "p7_auth", is_authority = true)
       b.open_store(path)
-      check EdValue[int](b["p7_value"]).value == 12
+      check Ed[int](b["p7_value"]).value == 12
       b.destroy()
 
     test "replay_to materializes historical state; views never persist":
@@ -188,7 +188,7 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p8_auth", is_authority = true)
       a.open_store(path)
-      var value = EdValue[int].init(ctx = a, id = "p8_value")
+      var value = Ed[int].init(ctx = a, id = "p8_value")
       var lsns: seq[int64]
       for i in 1 .. 5:
         value.value = i * 10
@@ -196,15 +196,15 @@ proc run*() =
       a.destroy()
 
       let view = EdContext.replay(path, to_lsn = lsns[2])
-      check EdValue[int](view["p8_value"]).value == 30
+      check Ed[int](view["p8_value"]).value == 30
       check not view.is_authority
       # A write on the view is local-only.
-      EdValue[int](view["p8_value"]).value = 999
+      Ed[int](view["p8_value"]).value = 999
       view.destroy()
 
       var b = EdContext.init(id = "p8_auth", is_authority = true)
       b.open_store(path)
-      check EdValue[int](b["p8_value"]).value == 50 # 999 never persisted
+      check Ed[int](b["p8_value"]).value == 50 # 999 never persisted
       b.destroy()
 
     test "replay_to below retained history raises":
@@ -213,7 +213,7 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p9_auth", is_authority = true)
       a.open_store(path, retain_snapshots = 1)
-      var value = EdValue[int].init(ctx = a, id = "p9_value")
+      var value = Ed[int].init(ctx = a, id = "p9_value")
       value.value = 1
       let early_lsn = a.lsn_counter
       value.value = 2
@@ -232,14 +232,14 @@ proc run*() =
       var a = EdContext.init(id = "p10_auth", is_authority = true)
       let store_a = a.open_store(path)
       check store_a.epoch == 1
-      var value = EdValue[int].init(ctx = a, id = "p10_value")
+      var value = Ed[int].init(ctx = a, id = "p10_value")
       value.value = 1
       a.destroy()
 
       var b = EdContext.init(id = "p10_auth", is_authority = true)
       let store_b = b.open_store(path)
       check store_b.epoch == 2
-      EdValue[int](b["p10_value"]).value = 2
+      Ed[int](b["p10_value"]).value = 2
       b.destroy()
 
       let log = read_log(path)
@@ -254,7 +254,7 @@ proc run*() =
       a.open_store(path)
       var follower = EdContext.init(id = "p11_follower")
       follower.subscribe(a)
-      var value = EdValue[int].init(ctx = a, id = "p11_value")
+      var value = Ed[int].init(ctx = a, id = "p11_value")
       for i in 1 .. 5:
         value.value = i
       follower.tick()
@@ -270,13 +270,13 @@ proc run*() =
       b.open_store(path)
       check b.lsn_counter == 0 # tail lost; timeline restarts
       follower.subscribe(b)
-      var value2 = EdValue[int].init(ctx = b, id = "p11_value2")
+      var value2 = Ed[int].init(ctx = b, id = "p11_value2")
       value2.value = 77 # stamps lsn 1/2, epoch 2 -- below the follower's old frontier
       follower.tick()
       # Without the epoch-aware frontier reset these would be stale-dropped
       # forever (applied_lsn was 5).
       check "p11_value2" in follower
-      check EdValue[int](follower["p11_value2"]).value == 77
+      check Ed[int](follower["p11_value2"]).value == 77
       b.destroy()
       follower.destroy()
 
@@ -286,7 +286,7 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p20_auth", is_authority = true)
       a.open_store(path)
-      var value = EdValue[int].init(ctx = a, id = "p20_value")
+      var value = Ed[int].init(ctx = a, id = "p20_value")
       value.value = 1
       let genesis_segment = path / a.store.segment_name
       a.snapshot()
@@ -309,13 +309,13 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p21_auth", is_authority = true)
       a.open_store(path)
-      var value = EdValue[int].init(ctx = a, id = "p21_value")
+      var value = Ed[int].init(ctx = a, id = "p21_value")
       value.value = 1
       let first = a.snapshot()
       # No stamped ops since (a CREATE-only append doesn't move the
       # watermark): the second snapshot must not delete-and-rewrite the only
       # retained snapshot -- a crash mid-replace would lose it.
-      discard EdValue[int].init(ctx = a, id = "p21_extra")
+      discard Ed[int].init(ctx = a, id = "p21_extra")
       let second = a.snapshot()
       check second == first
       check file_exists(first / "manifest.json")
@@ -323,7 +323,7 @@ proc run*() =
 
       var b = EdContext.init(id = "p21_auth", is_authority = true)
       b.open_store(path)
-      check EdValue[int](b["p21_value"]).value == 1
+      check Ed[int](b["p21_value"]).value == 1
       check "p21_extra" in b # CREATE-only tail replays over the kept snapshot
       b.destroy()
 
@@ -331,7 +331,7 @@ proc run*() =
       var leader = EdContext.init(id = "p22_auth", is_authority = true)
       var follower = EdContext.init(id = "p22_follower")
       follower.subscribe(leader)
-      var value = EdValue[int].init(ctx = leader, id = "p22_value")
+      var value = Ed[int].init(ctx = leader, id = "p22_value")
       for i in 1 .. 3:
         value.value = i
       follower.tick()
@@ -370,14 +370,14 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p13_auth", is_authority = true)
       a.open_store(path)
-      var doomed = EdValue[int].init(ctx = a, id = "p13_doomed")
+      var doomed = Ed[int].init(ctx = a, id = "p13_doomed")
       doomed.value = 1
       a.snapshot()
       doomed.destroy() # tail op
-      var phoenix = EdValue[int].init(ctx = a, id = "p13_phoenix")
+      var phoenix = Ed[int].init(ctx = a, id = "p13_phoenix")
       phoenix.value = 1
       phoenix.destroy()
-      var phoenix2 = EdValue[int].init(ctx = a, id = "p13_phoenix")
+      var phoenix2 = Ed[int].init(ctx = a, id = "p13_phoenix")
       phoenix2.value = 2
       a.destroy()
 
@@ -385,7 +385,7 @@ proc run*() =
       b.open_store(path)
       check "p13_doomed" notin b
       check "p13_phoenix" in b
-      check EdValue[int](b["p13_phoenix"]).value == 2
+      check Ed[int](b["p13_phoenix"]).value == 2
       b.destroy()
 
     test "nested + owned objects restore linked; new follower gets a working replica":
@@ -394,18 +394,18 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p14_auth", is_authority = true)
       a.open_store(path)
-      var tbl = EdTable[string, EdSeq[int]].init(ctx = a, id = "p14_tbl")
-      var inner = EdSeq[int].init(ctx = a, id = "p14_inner")
+      var tbl = Ed[Table[string, Ed[seq[int]]]].init(ctx = a, id = "p14_tbl")
+      var inner = Ed[seq[int]].init(ctx = a, id = "p14_inner")
       tbl["k"] = inner
       inner.add 42
       "p14_owner".own:
-        discard EdValue[int].init(ctx = a, id = "p14_owned")
+        discard Ed[int].init(ctx = a, id = "p14_owned")
       a.snapshot()
       a.destroy()
 
       var b = EdContext.init(id = "p14_auth", is_authority = true)
       b.open_store(path)
-      let restored = EdTable[string, EdSeq[int]](b["p14_tbl"])
+      let restored = Ed[Table[string, Ed[seq[int]]]](b["p14_tbl"])
       check restored["k"].id == "p14_inner"
       check not restored["k"].body.placeholder # linked, not a husk
       check restored["k"][0] == 42
@@ -417,7 +417,7 @@ proc run*() =
       var follower = EdContext.init(id = "p14_follower")
       follower.subscribe(b)
       follower.tick()
-      let mirrored = EdTable[string, EdSeq[int]](follower["p14_tbl"])
+      let mirrored = Ed[Table[string, Ed[seq[int]]]](follower["p14_tbl"])
       check mirrored["k"][0] == 42
       b.destroy()
       follower.destroy()
@@ -428,7 +428,7 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p15_auth", is_authority = true)
       a.open_store(path)
-      var t = EdTable[string, int].init(ctx = a, id = "p15_table")
+      var t = Ed[Table[string, int]].init(ctx = a, id = "p15_table")
       t.value = {"a": 1, "b": 2, "c": 3}.to_table # one changeset, packed
       a.destroy()
 
@@ -436,8 +436,8 @@ proc run*() =
 
       var b = EdContext.init(id = "p15_auth", is_authority = true)
       b.open_store(path)
-      check EdTable[string, int](b["p15_table"]).len == 3
-      check EdTable[string, int](b["p15_table"])["b"] == 2
+      check Ed[Table[string, int]](b["p15_table"]).len == 3
+      check Ed[Table[string, int]](b["p15_table"])["b"] == 2
       b.destroy()
 
     test "a follower-originated op is captured exactly once":
@@ -448,9 +448,9 @@ proc run*() =
       a.open_store(path)
       var follower = EdContext.init(id = "p16_follower")
       follower.subscribe(a)
-      var s = EdSeq[int].init(ctx = a, id = "p16_seq")
+      var s = Ed[seq[int]].init(ctx = a, id = "p16_seq")
       follower.tick()
-      EdSeq[int](follower["p16_seq"]).add 42
+      Ed[seq[int]](follower["p16_seq"]).add 42
       a.tick() # authority orders + appends the follower's op
       follower.tick()
 
@@ -460,7 +460,7 @@ proc run*() =
 
       var b = EdContext.init(id = "p16_auth", is_authority = true)
       b.open_store(path)
-      check EdSeq[int](b["p16_seq"]).len == 1
+      check Ed[seq[int]](b["p16_seq"]).len == 1
       b.destroy()
 
     test "open_store guards: non-authority, non-empty, stale tmp dirs":
@@ -472,7 +472,7 @@ proc run*() =
         follower.open_store(path)
 
       var busy = EdContext.init(id = "p17_busy", is_authority = true)
-      discard EdValue[int].init(ctx = busy, id = "p17_value")
+      discard Ed[int].init(ctx = busy, id = "p17_value")
       expect AssertionDefect:
         busy.open_store(path)
       busy.destroy()
@@ -491,14 +491,14 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p24_auth", is_authority = true)
       a.open_store(path)
-      var value = EdValue[int].init(ctx = a, id = "p24_value")
+      var value = Ed[int].init(ctx = a, id = "p24_value")
       value.value = 1
       a.snapshot()
       a.destroy()
       # Same build -> manifest.schema == ED_SCHEMA_VERSION -> opens cleanly.
       var b = EdContext.init(id = "p24_auth", is_authority = true)
       b.open_store(path)
-      check EdValue[int](b["p24_value"]).value == 1
+      check Ed[int](b["p24_value"]).value == 1
       b.destroy()
 
     test "schema gate: mismatched version refuses; override opens":
@@ -507,7 +507,7 @@ proc run*() =
         remove_dir(path)
       var a = EdContext.init(id = "p25_auth", is_authority = true)
       a.open_store(path)
-      var value = EdValue[int].init(ctx = a, id = "p25_value")
+      var value = Ed[int].init(ctx = a, id = "p25_value")
       value.value = 1
       let snap = a.snapshot()
       a.destroy()
@@ -529,7 +529,7 @@ proc run*() =
       # The override opens it anyway.
       var c = EdContext.init(id = "p25_auth", is_authority = true)
       c.open_store(path, allow_schema_mismatch = true)
-      check EdValue[int](c["p25_value"]).value == 1
+      check Ed[int](c["p25_value"]).value == 1
       c.destroy()
 
     test "entry format: roundtrip, crc rejection, forward compat":

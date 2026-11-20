@@ -5,12 +5,12 @@ import ed
 proc run*() =
   test "context with excessive object creation":
     var ctx = EdContext.init(id = "exhaustion_ctx")
-    var objects: seq[EdValue[string]]
+    var objects: seq[Ed[string]]
     
     # Create many objects to test memory/resource limits
     # This might hit internal limits or cause memory issues
     for i in 1..10000:
-      let obj = EdValue[string].init(ctx = ctx, id = "obj_" & $i)
+      let obj = Ed[string].init(ctx = ctx, id = "obj_" & $i)
       obj.value = "data_" & $i
       objects.add obj
       
@@ -25,7 +25,7 @@ proc run*() =
 
   test "excessive tracking callbacks":
     var ctx = EdContext.init(id = "callback_ctx") 
-    var obj = EdValue[int].init(ctx = ctx)
+    var obj = Ed[int].init(ctx = ctx)
     
     var total_callbacks = 0
     
@@ -44,20 +44,20 @@ proc run*() =
     var ctx = EdContext.init(id = "nesting_ctx")
     
     # Create deeply nested structure that might hit stack limits
-    var root = EdTable[string, EdTable[string, EdTable[string, EdValue[string]]]].init(ctx = ctx)
+    var root = Ed[Table[string, Ed[Table[string, Ed[Table[string, Ed[string]]]]]]].init(ctx = ctx)
     
     # Create nested structure
     for i in 1..100:
       let key1 = "level1_" & $i
-      root[key1] = EdTable[string, EdTable[string, EdValue[string]]].init(ctx = ctx)
+      root[key1] = Ed[Table[string, Ed[Table[string, Ed[string]]]]].init(ctx = ctx)
       
       for j in 1..10:
         let key2 = "level2_" & $j
-        root[key1][key2] = EdTable[string, EdValue[string]].init(ctx = ctx)
+        root[key1][key2] = Ed[Table[string, Ed[string]]].init(ctx = ctx)
         
         for k in 1..5:
           let key3 = "level3_" & $k
-          root[key1][key2][key3] = EdValue[string].init(ctx = ctx)
+          root[key1][key2][key3] = Ed[string].init(ctx = ctx)
           root[key1][key2][key3].value = $i & "_" & $j & "_" & $k
     
     # Should still be accessible
@@ -65,7 +65,7 @@ proc run*() =
 
   test "massive sequence operations":
     var ctx = EdContext.init(id = "sequence_ctx")
-    var large_seq = EdSeq[int].init(ctx = ctx)
+    var large_seq = Ed[seq[int]].init(ctx = ctx)
     
     # Add many items rapidly
     for i in 1..50000:
@@ -95,7 +95,7 @@ proc run*() =
       contexts[i].subscribe(contexts[i-1])
     
     # Create object at start of chain
-    var obj = EdValue[string].init(ctx = contexts[0], id = "chain_obj")
+    var obj = Ed[string].init(ctx = contexts[0], id = "chain_obj")
     obj.value = "propagate_me"
     
     # Propagate through all contexts
@@ -103,7 +103,7 @@ proc run*() =
       ctx.tick()
     
     # Should reach the end of the chain
-    let final_obj = EdValue[string](contexts[^1]["chain_obj"])
+    let final_obj = Ed[string](contexts[^1]["chain_obj"])
     check final_obj.value == "propagate_me"
 
 when is_main_module:

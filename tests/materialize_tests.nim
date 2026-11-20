@@ -15,8 +15,8 @@ proc rmat_server_loop(address: string) {.thread.} =
   let server =
     EdContext.init(id = "rmat-server", is_authority = true, listen_address = address)
   Ed.thread_ctx = server
-  var parent = EdSeq[EdValue[string]].init(id = "parent", ctx = server)
-  var child = EdValue[string].init(id = "child", ctx = server)
+  var parent = Ed[seq[Ed[string]]].init(id = "parent", ctx = server)
+  var child = Ed[string].init(id = "child", ctx = server)
   child.value = "materialized"
   parent += child # parent is pre-populated before any client connects
   rmat_ready.store(true)
@@ -32,7 +32,7 @@ proc run*() =
       var client = EdContext.init(id = "m_client")
 
       # Parent collection of nested Ed values.
-      var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
+      var parent = Ed[seq[Ed[string]]].init(ctx = authority, id = "parent")
 
       # Client is interested only in the parent, not its children.
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent"])
@@ -42,32 +42,32 @@ proc run*() =
       # Author a child and add it to the parent. The child's CREATE is filtered
       # (not in interest), but the parent's ADD op -- which references the child --
       # is delivered, so the client must stand in with a placeholder.
-      var child = EdValue[string].init(ctx = authority, id = "child")
+      var child = Ed[string].init(ctx = authority, id = "child")
       child.value = "hi"
       parent += child
       client.tick()
 
       check "child" in client # placeholder materialized into the object pool
-      check EdSeq[EdValue[string]](client["parent"]).len == 1 # cardinality correct
+      check Ed[seq[Ed[string]]](client["parent"]).len == 1 # cardinality correct
       check not client["child"].loaded # exists, but not loaded
-      check EdValue[string](client["child"]).value == "" # empty until filled
+      check Ed[string](client["child"]).value == "" # empty until filled
 
       # Explicit fetch materializes it (access-triggered fetch is the next slice).
       client.fetch("child")
       authority.tick() # authority answers the REQUEST
       client.tick() # client fills the placeholder
       check client["child"].loaded # fill cleared the bit
-      check EdValue[string](client["child"]).value == "hi"
+      check Ed[string](client["child"]).value == "hi"
 
     test "a placeholder takes its owner from its own CREATE, not its parent's":
       var authority = EdContext.init(id = "mo_auth", is_authority = true)
       var client = EdContext.init(id = "mo_client")
-      var parent: EdSeq[EdValue[string]]
-      var child: EdValue[string]
+      var parent: Ed[seq[Ed[string]]]
+      var child: Ed[string]
       "parent_owner".own:
-        parent = EdSeq[EdValue[string]].init(ctx = authority, id = "mo_parent")
+        parent = Ed[seq[Ed[string]]].init(ctx = authority, id = "mo_parent")
       "child_owner".own:
-        child = EdValue[string].init(ctx = authority, id = "mo_child")
+        child = Ed[string].init(ctx = authority, id = "mo_child")
       child.value = "hi"
       parent += child
 
@@ -91,11 +91,11 @@ proc run*() =
     test "reading a placeholder auto-triggers the fetch (no explicit fetch)":
       var authority = EdContext.init(id = "ma_auth", is_authority = true)
       var client = EdContext.init(id = "ma_client")
-      var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
+      var parent = Ed[seq[Ed[string]]].init(ctx = authority, id = "parent")
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent"])
       client.tick()
 
-      var child = EdValue[string].init(ctx = authority, id = "child")
+      var child = Ed[string].init(ctx = authority, id = "child")
       child.value = "hi"
       parent += child
       client.tick()
@@ -103,26 +103,26 @@ proc run*() =
 
       # Just *reading* the placeholder's value kicks the fetch (non-blocking:
       # returns empty now). No client.fetch() call here.
-      check EdValue[string](client["child"]).value == ""
+      check Ed[string](client["child"]).value == ""
       authority.tick() # authority answers the access-triggered REQUEST
       client.tick() # fill arrives
       check client["child"].loaded
-      check EdValue[string](client["child"]).value == "hi"
+      check Ed[string](client["child"]).value == "hi"
 
     test "a fill fires a change tagged reason == Fill":
       var authority = EdContext.init(id = "mf_auth", is_authority = true)
       var client = EdContext.init(id = "mf_client")
-      var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
+      var parent = Ed[seq[Ed[string]]].init(ctx = authority, id = "parent")
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent"])
       client.tick()
-      var child = EdValue[string].init(ctx = authority, id = "child")
+      var child = Ed[string].init(ctx = authority, id = "child")
       child.value = "hi"
       parent += child
       client.tick()
       check not client["child"].loaded
 
       var fill_reason = Update
-      EdValue[string](client["child"]).track proc(cs: seq[Change[string]]) =
+      Ed[string](client["child"]).track proc(cs: seq[Change[string]]) =
         for c in cs:
           if MODIFIED in c.changes:
             fill_reason = c.reason
@@ -136,22 +136,22 @@ proc run*() =
     test "blocking materialize is silent: only the target fills, rest defers":
       var authority = EdContext.init(id = "ms_auth", is_authority = true)
       var client = EdContext.init(id = "ms_client")
-      var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
-      var other = EdValue[int].init(ctx = authority, id = "other")
+      var parent = Ed[seq[Ed[string]]].init(ctx = authority, id = "parent")
+      var other = Ed[int].init(ctx = authority, id = "other")
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent", "other"])
       client.tick()
 
-      var child = EdValue[string].init(ctx = authority, id = "child")
+      var child = Ed[string].init(ctx = authority, id = "child")
       child.value = "hi"
       parent += child
       client.tick() # placeholder for child
       check not client["child"].loaded
 
       var other_fired = false
-      EdValue[int](client["other"]).track proc(cs: seq[Change[int]]) =
+      Ed[int](client["other"]).track proc(cs: seq[Change[int]]) =
         other_fired = true
       var child_fill_reason = Update
-      EdValue[string](client["child"]).track proc(cs: seq[Change[string]]) =
+      Ed[string](client["child"]).track proc(cs: seq[Change[string]]) =
         for c in cs:
           if MODIFIED in c.changes:
             child_fill_reason = c.reason
@@ -165,18 +165,18 @@ proc run*() =
       # Blocking read materializes ONLY child; everything else is deferred.
       var got = "before"
       client.blocking:
-        got = EdValue[string](client["child"]).value
+        got = Ed[string](client["child"]).value
 
       check got == "hi" # blocking read returned the real value
       check client["child"].loaded
       check not other_fired # unrelated message was deferred, not applied
-      check EdValue[int](client["other"]).value == 0 # ...and its value untouched
+      check Ed[int](client["other"]).value == 0 # ...and its value untouched
       check not (child_fill_reason == Fill) # even the Fill callback deferred
 
       # The next explicit tick replays everything at the tick boundary.
       client.tick()
       check other_fired
-      check EdValue[int](client["other"]).value == 99
+      check Ed[int](client["other"]).value == 99
       check child_fill_reason == Fill
 
     test "remote partial replica blocking-materializes a placeholder":
@@ -209,7 +209,7 @@ proc run*() =
       # answers the fetch while we pump.
       var got = ""
       client.blocking:
-        got = EdValue[string](client["child"]).value
+        got = Ed[string](client["child"]).value
       check got == "materialized"
       check client["child"].loaded
       client.close
@@ -219,8 +219,8 @@ proc run*() =
       var client = EdContext.init(id = "pk_client")
       # A seq of tables; the client takes the seq as a root, so each table comes
       # in as an empty placeholder.
-      var parent = EdSeq[EdTable[int, string]].init(ctx = authority, id = "parent")
-      var child = EdTable[int, string].init(ctx = authority, id = "child")
+      var parent = Ed[seq[Ed[Table[int, string]]]].init(ctx = authority, id = "parent")
+      var child = Ed[Table[int, string]].init(ctx = authority, id = "child")
       child[1] = "one"
       child[2] = "two"
       child[3] = "three"
@@ -228,7 +228,7 @@ proc run*() =
 
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent"])
       client.tick()
-      let table = EdTable[int, string](client["child"])
+      let table = Ed[Table[int, string]](client["child"])
       check "child" in client
       check not table.loaded(1) # nothing pulled yet
 
@@ -262,7 +262,7 @@ proc run*() =
       table.release(1)
       check not table.loaded(1) # dropped locally
       check removed_keys == @[1] # fired REMOVED so watches un-render
-      check EdTable[int, string](authority["child"]).loaded(1) # still on authority
+      check Ed[Table[int, string]](authority["child"]).loaded(1) # still on authority
       table.request(1) # re-fetch works
       client.tick()
       authority.tick()
@@ -290,8 +290,8 @@ proc run*() =
     test "blocking write materializes first: the fill can't clobber the write":
       var authority = EdContext.init(id = "bw_auth", is_authority = true)
       var client = EdContext.init(id = "bw_client")
-      var parent = EdSeq[EdValue[string]].init(ctx = authority, id = "parent")
-      var child = EdValue[string].init(ctx = authority, id = "child")
+      var parent = Ed[seq[Ed[string]]].init(ctx = authority, id = "parent")
+      var child = Ed[string].init(ctx = authority, id = "child")
       child.value = "old"
       parent += child
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent"])
@@ -306,10 +306,10 @@ proc run*() =
       # Write with no prior read. The placeholder must materialize (applying
       # the queued fill) before the write, or the fill would clobber it.
       client.blocking:
-        EdValue[string](client["child"]).value = "new"
+        Ed[string](client["child"]).value = "new"
 
       check client["child"].loaded
-      check EdValue[string](client["child"]).value == "new"
+      check Ed[string](client["child"]).value == "new"
       client.tick()
       authority.tick()
       check child.value == "new" # ...and the write flowed up
@@ -317,8 +317,8 @@ proc run*() =
     test "blocking += on a placeholder set materializes, then applies":
       var authority = EdContext.init(id = "bs_auth", is_authority = true)
       var client = EdContext.init(id = "bs_client")
-      var parent = EdSeq[EdSet[char]].init(ctx = authority, id = "parent")
-      var child = EdSet[char].init(ctx = authority, id = "child")
+      var parent = Ed[seq[Ed[set[char]]]].init(ctx = authority, id = "parent")
+      var child = Ed[set[char]].init(ctx = authority, id = "child")
       child += 'a'
       parent += child
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["parent"])
@@ -329,10 +329,10 @@ proc run*() =
       authority.tick() # fill queued, unprocessed
 
       client.blocking:
-        EdSet[char](client["child"]) += 'b'
+        Ed[set[char]](client["child"]) += 'b'
 
       check client["child"].loaded
-      let filled = EdSet[char](client["child"])
+      let filled = Ed[set[char]](client["child"])
       check 'a' in filled # the authority's contents survived
       check 'b' in filled # ...and the local add applied on top
       client.tick()
