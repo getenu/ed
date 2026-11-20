@@ -25,11 +25,17 @@ macro enum_members(T: typedesc): string =
 
 proc layout_sig[T](_: typedesc[T], seen: var seq[string]): string
 
-proc ed_item[A, B](_: typedesc[Ed[A, B]]): A =
+proc ed_item[A, B](_: typedesc[EdContainer[A, B]]): A =
   discard
 
-proc ed_change[A, B](_: typedesc[Ed[A, B]]): B =
+proc ed_change[A, B](_: typedesc[EdContainer[A, B]]): B =
   discard
+
+proc ed_item[A](_: typedesc[Ed[A]]): A =
+  discard
+
+proc ed_change[A](_: typedesc[Ed[A]]): auto =
+  ed_change(ed_core(Ed[A]))
 
 proc set_item[E](_: typedesc[set[E]]): E =
   discard
@@ -57,8 +63,8 @@ proc fields_sig[T](
   seen.set_len(seen.len - 1)
 
 proc layout_sig[T](_: typedesc[T], seen: var seq[string]): string =
-  when T is Ed:
-    "Ed[" & layout_sig(typeof(ed_item(T)), seen) & "," &
+  when T is Ed or T is EdContainer:
+    "EdContainer[" & layout_sig(typeof(ed_item(T)), seen) & "," &
       layout_sig(typeof(ed_change(T)), seen) & "]"
   elif T is EdRef:
     "edref"

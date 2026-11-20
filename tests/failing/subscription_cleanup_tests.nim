@@ -10,11 +10,11 @@ proc run*() =
     # Establish subscription
     ctx2.subscribe("127.0.0.1")
     
-    var obj = EdValue[string].init(ctx = ctx1, id = "cleanup_test")
+    var obj = Ed[string].init(ctx = ctx1, id = "cleanup_test")
     obj.value = "before_disconnect"
     
     ctx2.tick()
-    let remote_obj = EdValue[string](ctx2["cleanup_test"])
+    let remote_obj = Ed[string](ctx2["cleanup_test"])
     check remote_obj.value == "before_disconnect"
     
     # Forcibly close the server context without proper cleanup
@@ -35,9 +35,9 @@ proc run*() =
     var ctx2 = EdContext.init(id = "ctx2")
     
     # Create many objects before subscription
-    var objects: seq[EdValue[string]]
+    var objects: seq[Ed[string]]
     for i in 1..1000:
-      let obj = EdValue[string].init(ctx = ctx1, id = "obj_" & $i)
+      let obj = Ed[string].init(ctx = ctx1, id = "obj_" & $i)
       obj.value = "data_" & $i
       objects.add obj
     
@@ -67,7 +67,7 @@ proc run*() =
       ctx2.subscribe(ctx1)
       ctx3.subscribe(ctx2)
       
-      var obj = EdValue[string].init(ctx = ctx1, id = "chain_obj")
+      var obj = Ed[string].init(ctx = ctx1, id = "chain_obj")
       obj.value = "propagate"
       
       ctx2.tick()
@@ -94,7 +94,7 @@ proc run*() =
         # Quick subscription
         temp_ctx.subscribe("127.0.0.1")
         
-        var obj = EdValue[int].init(ctx = ctx1, id = "rapid_" & $i)
+        var obj = Ed[int].init(ctx = ctx1, id = "rapid_" & $i)
         obj.value = i
         
         temp_ctx.tick()
@@ -110,7 +110,7 @@ proc run*() =
     
     block:
       var ctx = EdContext.init(id = "temp_ctx")
-      var obj = EdValue[string].init(ctx = ctx)
+      var obj = Ed[string].init(ctx = ctx)
       
       # Add tracking callbacks
       for i in 1..10:
@@ -130,7 +130,7 @@ proc run*() =
     var ctx1 = EdContext.init(id = "ctx1")
     var ctx2 = EdContext.init(id = "ctx2") 
     
-    var obj = EdValue[string].init(ctx = ctx1, id = "race_obj")
+    var obj = Ed[string].init(ctx = ctx1, id = "race_obj")
     obj.value = "initial"
     
     # Start subscription

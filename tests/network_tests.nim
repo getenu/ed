@@ -33,10 +33,10 @@ proc run*() =
         ctx2.tick(blocking = false)
 
     var
-      a = EdValue[string].init(id = "test1", ctx = ctx1)
-      b = EdValue[string].init(id = "test1", ctx = ctx2)
-      c = EdValue[string].init(id = "test1", ctx = ctx3)
-      d = EdValue[string].init(id = "test1", ctx = ctx4)
+      a = Ed[string].init(id = "test1", ctx = ctx1)
+      b = Ed[string].init(id = "test1", ctx = ctx2)
+      c = Ed[string].init(id = "test1", ctx = ctx3)
+      d = Ed[string].init(id = "test1", ctx = ctx4)
 
     ctx1.tick
     ctx2.tick
@@ -104,7 +104,7 @@ proc run*() =
   test "nested collection":
     let host = free_addr()
     type Unit = object
-      code: EdValue[string]
+      code: Ed[string]
 
     var
       count = 0
@@ -168,19 +168,19 @@ proc run*() =
 
     ctx2.subscribe(ctx1)
 
-    # Create Vector3 value and verify it creates EdValue not EdSeq
+    # Create Vector3 value and verify it creates a value Ed, not a seq
     var vec = Vector3([1.0, 2.0, 3.0])
     var v1 = ed(vec, id = "vector", ctx = ctx1)
     
     # Verify type - this ensures our fix worked
-    check v1 is EdValue[Vector3]
+    check v1 is Ed[Vector3]
     check v1.value == vec
 
     ctx1.tick
     ctx2.tick
 
     # Test that it synced over network
-    var v2 = EdValue[Vector3](ctx2["vector"])
+    var v2 = Ed[Vector3](ctx2["vector"])
     check v2.value == vec
 
     # Test mutation sync
@@ -244,7 +244,7 @@ proc run*() =
       min_recv_duration = recv_duration,
       blocking_recv = true,
     )
-    var sv = EdValue[string].init(id = "wire_v", ctx = server)
+    var sv = Ed[string].init(id = "wire_v", ctx = server)
     sv.value = "alive"
 
     # A "client" speaking a different wire format: valid netty framing,
@@ -267,7 +267,7 @@ proc run*() =
     Ed.thread_ctx.subscribe host,
       callback = proc() =
         server.tick(blocking = false)
-    var cv = EdValue[string](Ed.thread_ctx["wire_v"])
+    var cv = Ed[string](Ed.thread_ctx["wire_v"])
     check cv.value == "alive"
 
     server.close
@@ -285,7 +285,7 @@ proc run*() =
       min_recv_duration = recv_duration,
       blocking_recv = true,
     )
-    var sv = EdValue[string].init(id = "wd_v", ctx = server)
+    var sv = Ed[string].init(id = "wd_v", ctx = server)
     sv.value = "x"
 
     Ed.thread_ctx = EdContext.init(id = "wd_cli")

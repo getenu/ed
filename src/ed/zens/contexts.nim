@@ -189,8 +189,8 @@ proc logs_ops*(self: EdContext): bool =
   self.is_authority and self.store != nil and not self.store.read_only and
     not self.replaying
 
-proc `[]`*[T, O](self: EdContext, src: Ed[T, O]): Ed[T, O] =
-  result = Ed[T, O](self.resolve_proxy(self.objects[src.id]))
+proc `[]`*[T](self: EdContext, src: Ed[T]): Ed[T] =
+  result = Ed[T](self.resolve_proxy(self.objects[src.id]))
 
 proc `[]`*(self: EdContext, id: string): ref EdBase =
   ## Container lookup by id. Raises `KeyError` when absent -- except inside a

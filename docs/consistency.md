@@ -49,7 +49,7 @@ register-vs-collection "skip vs re-apply my own op" dilemma:
 > correction (matching → no-op; differing → snap forward).
 
 **Traffic shape drives the emphasis.** Registers are most *objects*, but the bulk
-of *traffic* is voxel updates (`EdSeq`/`EdTable` deltas). So collection
+of *traffic* is voxel updates (seq and table `Ed` deltas). So collection
 reconciliation is the hot path: it applies via idempotent delta dedup, never
 full-state resend. Full-state snapshot is reserved for resync / new-subscriber
 catch-up / backpressure (mirroring enu's `MAX_DELTAS_BEFORE_SNAPSHOT`).
@@ -148,7 +148,7 @@ log-and-skip for unknown `type_id` / unregistered ref tid.
 rare, global, bump only when an old peer would misparse *every* message. It does
 **not** cover the *application schema* (the bytes inside `msg.obj`). Critical
 gotcha: `tid(T) = hash($T)` — the type *name*, not its structure. So adding a new
-type or `EdSet[NewEnum]` is safe (new name → new tid → old peers see an unknown
+type or `Ed[set[NewEnum]]` is safe (new name → new tid → old peers see an unknown
 type and skip it), but **adding a value to an existing enum, or a field to an
 existing type, changes neither the name nor the tid** — an old peer deserializes
 happily and reads garbage, silently. Bumping the envelope version does not catch

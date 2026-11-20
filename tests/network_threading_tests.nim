@@ -15,13 +15,13 @@ type
     End
 
   Unit = ref object of RootObj
-    flags: EdSet[UnitFlags]
-    units: EdSeq[Unit]
+    flags: Ed[set[UnitFlags]]
+    units: Ed[seq[Unit]]
 
 proc start_worker(ctx: EdContext) {.thread.} =
   Ed.thread_ctx = ctx
 
-  var b = EdValue[string](ctx["t1"])
+  var b = Ed[string](ctx["t1"])
   var working = true
   b.changes:
     if "scott".added:

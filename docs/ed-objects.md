@@ -10,7 +10,7 @@ results they produced are recorded here.
 Today a synced object mixes two kinds of field with different rules, and the
 difference is invisible at the declaration:
 
-- **Ed fields** (`scale_value*: EdValue[float]`, `things*: EdSeq[Thing]`) sync on
+- **Ed fields** (`scale_value*: Ed[float]`, `things*: Ed[seq[Thing]]`) sync on
   every change.
 - **Plain fields** (`frame*: int`) look local but aren't. `stringify` copies them
   into the CREATE snapshot, and `revive` copies them again whenever a reference to
@@ -18,7 +18,7 @@ difference is invisible at the declaration:
   truly local.
 
 That caused a real bug in enu: opening the code editor sets
-`state.player.coding` (an `EdValue[Thing]`), which ships main's copy of the build,
+`state.player.coding` (an `Ed[Thing]`), which ships main's copy of the build,
 and the worker's live object was revived with main's plain fields. Its
 `next_frame_id` went back to 1 on every run, so frames 1-3 shared one frame's
 storage. The same path overwrites every other worker-local plain field on `Build`
@@ -27,13 +27,13 @@ declaration says any of this can happen.
 
 The rest is friction:
 
-- An `EdValue` field has two names: `thing.scale = 5` to write and
+- A value field has two names: `thing.scale = 5` to write and
   `thing.scale_value.changes:` to watch. Containers don't have this problem.
 - `thing.scale += 1` doesn't compile.
 - `thing.transform.origin.x = 5` doesn't compile; enu hand-writes `origin=` and
-  `basis=` on `EdValue[Transform]` to cover one level of one type.
+  `basis=` on `Ed[Transform]` to cover one level of one type.
 
-Cost is no longer a reason to avoid Ed fields. Since 0.34.0 an `EdValue[int]` is
+Cost is no longer a reason to avoid Ed fields. Since 0.34.0 an `Ed[int]` is
 about 600 bytes (it was about 12.6 KB, almost all of it an inline `set[uint16]`).
 
 ## Settled
@@ -181,7 +181,7 @@ edit t.xform:            # several changes, one read and one write
   (`std/with`, which enu's `value:` uses, can't take a path like `origin.x`, and
   passes the copy to every call in the body, `echo` included.)
 - Together they replace enu's hand-written `origin=` and `basis=` on
-  `EdValue[Transform]`.
+  `Ed[Transform]`.
 
 ### Constructing
 
@@ -225,13 +225,14 @@ bot's `speed = 1.0`).
 
 To free `Ed.init(T, ...)` for this, `Ed.init(SomeType)` (an empty container of
 the kind a type implies) is removed, and `ed(value)` takes `id`, `ctx` and
-`flags` and picks the container kind from the value (a seq makes an `EdSeq`, a
-set an `EdSet`, a Table an `EdTable`). `EdValue[T].init(value)` and the other
+`flags` and picks the container kind from the value (a seq makes an
+`Ed[seq[T]]`, a set an `Ed[set[T]]`, a Table an `Ed[Table[K, V]]`).
+`Ed[T].init(value)` and the other
 typed forms are unchanged.
 
 ## Rejected
 
-- **Getters that return the `EdValue`, with a converter to the value.** Comparing
+- **Getters that return the `Ed`, with a converter to the value.** Comparing
   two fields picked ed's identity `==` (two things with scale 2.0 compared
   unequal), and `let old = t.scale` was a live alias that changed with the field.
 - **A read type carrying the value and the field (`EdRead[T]`).** It fixed both of
@@ -289,12 +290,17 @@ Separate from the field rules, but found alongside them. Both are built
   (`REF_DESTROY`, naming the incarnation it ends), and `on_destroy` listeners
   tell holders to let go.
 
-## Open
+## Settled since
 
-- **One-parameter `Ed[T]`.** A one-parameter alias that works out the change type
-  (`Ed[int]` a value, `Ed[seq[int]]` an `EdSeq`) works, matching what `ed(value)`
-  already does. Taking the name `Ed` for it needs the two-parameter core renamed,
-  and a check that `Ed.register`, `Ed.bootstrap` and `Ed.thread_ctx` still work.
-- **`+=` next to other libraries.** A non-generic `+=` in another library still
-  wins, but a generic one taking a non-`var` left side of the same type could be
-  ambiguous with ed's. Test against enu's dependencies before shipping.
+- **One `Ed[T]` for every kind.** `Ed[int]`, `Ed[seq[int]]`, `Ed[set[E]]` and
+  `Ed[Table[K, V]]` are all `Ed`; the old `EdValue`, `EdSeq`, `EdSet` and
+  `EdTable` are gone. `Ed[T]` is a real type (it inherits from the internal
+  two-parameter core, with the change item computed from `T`), so generic code
+  infers through it (`proc total[X](s: Ed[seq[X]])`) and a bare `Ed` matches
+  any kind (`proc f(x: Ed)`, `field is Ed`). Unparameterized, `Ed` is still the
+  namespace for `Ed.init`, `Ed.register`, `Ed.bootstrap` and `Ed.thread_ctx`.
+- **`+=` next to other libraries.** Checked against everything enu depends on:
+  the stdlib's generic `+=` (integers, floats, `Rational`, `Complex`, both
+  `Atomic`s) and godot-nim's (non-generic) resolve as before beside ed's field
+  sugar. None of enu's dependencies has a generic `+=` taking a non-`var` left
+  side, the case that could be ambiguous. `objects_tests` keeps a check.

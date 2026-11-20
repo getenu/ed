@@ -4,37 +4,37 @@ import ed/lifecycle
 import ed/zens/contexts
 
 type DeepOwner = ref object of EdRef
-  items: EdSeq[int]
-  val: EdValue[int]
+  items: Ed[seq[int]]
+  val: Ed[int]
 
 type LazyOwner = ref object of EdRef
-  # Mirrors enu's Build: a LAZY EdTable field next to a normal EdSeq field, both
+  # Mirrors enu's Build: a LAZY table field next to a normal seq field, both
   # owned. The LAZY table is first so that, if its serialization misaligns, the
-  # EdSeq after it is the field that gets corrupted (which is what we saw: enu's
+  # seq after it is the field that gets corrupted (which is what we saw: enu's
   # `units` collection went invalid after adding LAZY voxel-table fields).
-  chunks: EdTable[int, string]
-  items: EdSeq[int]
+  chunks: Ed[Table[int, string]]
+  items: Ed[seq[int]]
 
 proc run*() =
   Ed.register(DeepOwner, false)
   Ed.register(LazyOwner, false)
 
   suite "partial replicas":
-    test "a LAZY EdTable field on a registered ref doesn't corrupt its siblings":
+    test "a LAZY table field on a registered ref doesn't corrupt its siblings":
       var authority = EdContext.init(id = "lzf_auth", is_authority = true)
       var client = EdContext.init(id = "lzf_client")
       Ed.thread_ctx = authority
 
       var u = LazyOwner(id: "lzf_u")
       u.own:
-        u.chunks = EdTable[int, string].init(
+        u.chunks = Ed[Table[int, string]].init(
           ctx = authority, id = "lzf_chunks", flags = DEFAULT_FLAGS + {LAZY}
         )
-        u.items = EdSeq[int].init(ctx = authority, id = "lzf_items")
+        u.items = Ed[seq[int]].init(ctx = authority, id = "lzf_items")
       u.chunks[1] = "x" # LAZY table has contents (paged per-key)
       u.items.add 5     # the canary sibling
 
-      var units = EdSeq[LazyOwner].init(
+      var units = Ed[seq[LazyOwner]].init(
         ctx = authority, id = "lzf_units", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
       )
       units.add u
@@ -44,8 +44,8 @@ proc run*() =
       )
       client.tick()
 
-      let m = EdSeq[LazyOwner](client["lzf_units"])[0]
-      # The EdSeq sibling must survive the LAZY field intact (not destroyed /
+      let m = Ed[seq[LazyOwner]](client["lzf_units"])[0]
+      # The seq sibling must survive the LAZY field intact (not destroyed /
       # misaligned by it).
       check m.items.valid
       check m.items.len == 1
@@ -63,8 +63,8 @@ proc run*() =
       var client = EdContext.init(id = "pd_client")
       Ed.thread_ctx = authority
 
-      var x = EdSeq[int].init(ctx = authority, id = "pd_x") # the fetched object
-      var y = EdSeq[int].init(ctx = authority, id = "pd_y") # never fetched
+      var x = Ed[seq[int]].init(ctx = authority, id = "pd_x") # the fetched object
+      var y = Ed[seq[int]].init(ctx = authority, id = "pd_y") # never fetched
       y.add 1
 
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = ["pd_x"])
@@ -73,7 +73,7 @@ proc run*() =
 
       # The client materializes pd_y on its own (an inline-ref placeholder mint
       # during parse -- the authority doesn't know, no interest registered).
-      discard EdSeq[int].init_placeholder(client, "pd_y")
+      discard Ed[seq[int]].init_placeholder(client, "pd_y")
       check "pd_y" in client
 
       # Authority destroys it. The DESTROY must arrive despite zero interest.
@@ -94,15 +94,15 @@ proc run*() =
       var client = EdContext.init(id = "lzr_client") # full clone
       Ed.thread_ctx = authority
 
-      var units = EdSeq[LazyOwner].init(
+      var units = Ed[seq[LazyOwner]].init(
         ctx = authority, id = "lzr_units", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
       )
       var u1 = LazyOwner(id: "lzr_m") # the reused EdRef id
       u1.own:
-        u1.chunks = EdTable[int, string].init(
+        u1.chunks = Ed[Table[int, string]].init(
           ctx = authority, flags = DEFAULT_FLAGS + {LAZY} # generated id
         )
-        u1.items = EdSeq[int].init(ctx = authority) # generated id
+        u1.items = Ed[seq[int]].init(ctx = authority) # generated id
       u1.items.add 1
       units.add u1
 
@@ -110,7 +110,7 @@ proc run*() =
       client.tick()
       authority.tick()
       client.tick()
-      check EdSeq[LazyOwner](client["lzr_units"])[0].items[0] == 1
+      check Ed[seq[LazyOwner]](client["lzr_units"])[0].items[0] == 1
 
       # Reload: remove + destroy the old incarnation, add a fresh one (same EdRef
       # id, fresh table/seq ids -- no container id reuse).
@@ -118,10 +118,10 @@ proc run*() =
       u1.destroy()
       var u2 = LazyOwner(id: "lzr_m")
       u2.own:
-        u2.chunks = EdTable[int, string].init(
+        u2.chunks = Ed[Table[int, string]].init(
           ctx = authority, flags = DEFAULT_FLAGS + {LAZY}
         )
-        u2.items = EdSeq[int].init(ctx = authority)
+        u2.items = Ed[seq[int]].init(ctx = authority)
       u2.items.add 2
       units.add u2
 
@@ -130,7 +130,7 @@ proc run*() =
       authority.tick()
       client.tick()
 
-      let m = EdSeq[LazyOwner](client["lzr_units"])[0]
+      let m = Ed[seq[LazyOwner]](client["lzr_units"])[0]
       check m.items.valid # <- the corruption point in enu
       check m.items.len == 1
       check m.items[0] == 2
@@ -142,9 +142,9 @@ proc run*() =
 
       var u1 = DeepOwner(id: "omp_u1")
       u1.own:
-        u1.items = EdSeq[int].init(ctx = authority, id = "omp_u1_items")
+        u1.items = Ed[seq[int]].init(ctx = authority, id = "omp_u1_items")
       u1.items.add 5
-      var units = EdSeq[DeepOwner].init(
+      var units = Ed[seq[DeepOwner]].init(
         ctx = authority, id = "omp_units", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
       )
       units.add u1
@@ -156,19 +156,19 @@ proc run*() =
       )
       client.tick()
       check "omp_u1_items" in client
-      let m1 = EdSeq[DeepOwner](client["omp_units"])[0]
+      let m1 = Ed[seq[DeepOwner]](client["omp_units"])[0]
       check m1.items.len == 1
       check m1.items[0] == 5
 
       # A member added later: its closure precedes the ADD too.
       var u2 = DeepOwner(id: "omp_u2")
       u2.own:
-        u2.items = EdSeq[int].init(ctx = authority, id = "omp_u2_items")
+        u2.items = Ed[seq[int]].init(ctx = authority, id = "omp_u2_items")
       u2.items.add 6
       units.add u2
       client.tick()
       check "omp_u2_items" in client
-      let m2 = EdSeq[DeepOwner](client["omp_units"])[1]
+      let m2 = Ed[seq[DeepOwner]](client["omp_units"])[1]
       check m2.items.len == 1
       check m2.items[0] == 6
 
@@ -184,8 +184,8 @@ proc run*() =
 
       var u1 = DeepOwner(id: "omd_u1")
       u1.own:
-        u1.items = EdSeq[int].init(ctx = authority, id = "omd_u1_items")
-      var units = EdSeq[DeepOwner].init(
+        u1.items = Ed[seq[int]].init(ctx = authority, id = "omd_u1_items")
+      var units = Ed[seq[DeepOwner]].init(
         ctx = authority, id = "omd_units", flags = DEFAULT_FLAGS + {OWNS_MEMBERS}
       )
       units.add u1
@@ -208,8 +208,8 @@ proc run*() =
       var authority = EdContext.init(id = "p_authority", is_authority = true)
       var client = EdContext.init(id = "p_client")
 
-      var x = EdValue[int].init(ctx = authority, id = "obj_x")
-      var y = EdValue[int].init(ctx = authority, id = "obj_y")
+      var x = Ed[int].init(ctx = authority, id = "obj_x")
+      var y = Ed[int].init(ctx = authority, id = "obj_y")
       x.value = 1
       y.value = 2
 
@@ -219,21 +219,21 @@ proc run*() =
 
       check "obj_x" in client # pushed (in interest)
       check "obj_y" notin client # filtered out
-      check EdValue[int](client["obj_x"]).value == 1
+      check Ed[int](client["obj_x"]).value == 1
 
       # Ongoing ops: only obj_x's changes reach the client.
       x.value = 10
       y.value = 20
       client.tick()
-      check EdValue[int](client["obj_x"]).value == 10
+      check Ed[int](client["obj_x"]).value == 10
       check "obj_y" notin client
 
     test "fetch materializes an out-of-interest object and starts syncing it":
       var authority = EdContext.init(id = "f_authority", is_authority = true)
       var client = EdContext.init(id = "f_client")
 
-      var x = EdValue[int].init(ctx = authority, id = "f_x")
-      var y = EdValue[int].init(ctx = authority, id = "f_y")
+      var x = Ed[int].init(ctx = authority, id = "f_x")
+      var y = Ed[int].init(ctx = authority, id = "f_y")
       x.value = 1
       y.value = 2
 
@@ -246,17 +246,17 @@ proc run*() =
       authority.tick() # authority handles REQUEST, sends f_y's CREATE
       client.tick() # client materializes f_y
       check "f_y" in client
-      check EdValue[int](client["f_y"]).value == 2
+      check Ed[int](client["f_y"]).value == 2
 
       # f_y now syncs (it joined the interest set).
       y.value = 20
       client.tick()
-      check EdValue[int](client["f_y"]).value == 20
+      check Ed[int](client["f_y"]).value == 20
 
     test "fetch returns a handle that resolves Found with the object":
       var authority = EdContext.init(id = "fh_auth", is_authority = true)
       var client = EdContext.init(id = "fh_client")
-      var x = EdValue[int].init(ctx = authority, id = "fh_x")
+      var x = Ed[int].init(ctx = authority, id = "fh_x")
       x.value = 4
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
@@ -284,7 +284,7 @@ proc run*() =
     test "disconnected partial replica: fetch resolves NotFound, doesn't crash":
       var authority = EdContext.init(id = "dc_auth", is_authority = true)
       var client = EdContext.init(id = "dc_client")
-      var x = EdValue[int].init(ctx = authority, id = "dc_x")
+      var x = Ed[int].init(ctx = authority, id = "dc_x")
       x.value = 7
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
@@ -328,16 +328,16 @@ proc run*() =
       client.tick()
       check handle.state == NotFound # didn't exist at fetch time...
 
-      var late = EdValue[int].init(ctx = authority, id = "late_obj")
+      var late = Ed[int].init(ctx = authority, id = "late_obj")
       late.value = 9
       client.tick()
       check "late_obj" in client # ...but the kept interest delivered it
-      check EdValue[int](client["late_obj"]).value == 9
+      check Ed[int](client["late_obj"]).value == 9
 
     test "blocking ctx[] pulls an unknown id; a NACK fails fast":
       var authority = EdContext.init(id = "bk_auth", is_authority = true)
       var client = EdContext.init(id = "bk_client")
-      var x = EdValue[int].init(ctx = authority, id = "bk_x")
+      var x = Ed[int].init(ctx = authority, id = "bk_x")
       x.value = 7
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
@@ -351,7 +351,7 @@ proc run*() =
       var got: ref EdBase
       client.blocking:
         got = client["bk_x"]
-      check EdValue[int](got).value == 7
+      check Ed[int](got).value == 7
 
       # Unknown id: the NACK resolves the blocking wait promptly (KeyError),
       # well inside the pump's safety deadline.
@@ -367,7 +367,7 @@ proc run*() =
       var a = EdContext.init(id = "ch_auth", is_authority = true)
       var b = EdContext.init(id = "ch_hub")
       var c = EdContext.init(id = "ch_leaf")
-      var x = EdValue[int].init(ctx = a, id = "ch_x")
+      var x = Ed[int].init(ctx = a, id = "ch_x")
       x.value = 11
       b.subscribe(a, mode = PARTIAL_ASYNC, fetch = [])
       b.tick()
@@ -381,7 +381,7 @@ proc run*() =
       b.tick() # hub materializes, serves the waiting leaf
       c.tick() # leaf receives
       check handle.state == Found
-      check EdValue[int](c["ch_x"]).value == 11
+      check Ed[int](c["ch_x"]).value == 11
       check "ch_x" in b # the hub holds it now too
 
     test "request chaining: an authority miss NACKs back down the chain":
@@ -404,12 +404,12 @@ proc run*() =
       var a = EdContext.init(id = "chk_auth", is_authority = true)
       var b = EdContext.init(id = "chk_hub")
       var c = EdContext.init(id = "chk_leaf")
-      var tbl = EdTable[int, string].init(ctx = a, id = "chk_tbl")
+      var tbl = Ed[Table[int, string]].init(ctx = a, id = "chk_tbl")
       tbl[1] = "one"
-      var parent = EdSeq[EdValue[string]].init(ctx = a, id = "chk_parent")
+      var parent = Ed[seq[Ed[string]]].init(ctx = a, id = "chk_parent")
       # Reference the table indirectly so partial subscribers mint placeholders
       # for it (the voxel topology: worker holds the table unloaded).
-      var pointer_value = EdValue[string].init(ctx = a, id = "chk_ptr")
+      var pointer_value = Ed[string].init(ctx = a, id = "chk_ptr")
       parent += pointer_value
       b.subscribe(a, mode = PARTIAL_ASYNC, fetch = ["chk_parent", "chk_tbl_ph"])
       b.tick()
@@ -424,7 +424,7 @@ proc run*() =
       b.tick()
       c.tick()
       check "chk_tbl" in c
-      let leaf_tbl = EdTable[int, string](c["chk_tbl"])
+      let leaf_tbl = Ed[Table[int, string]](c["chk_tbl"])
       check leaf_tbl.loaded(1) == false or leaf_tbl[1] == "one"
         # whole-object fetch may carry the value; the per-key path below is
         # exercised against key 2, added after the fetch
@@ -445,11 +445,11 @@ proc run*() =
       Ed.thread_ctx = authority
       var owner = DeepOwner(id: "lz_owner")
       owner.own:
-        owner.items = EdSeq[int].init(ctx = authority, id = "lz_items")
-        discard EdTable[int, string].init(
+        owner.items = Ed[seq[int]].init(ctx = authority, id = "lz_items")
+        discard Ed[Table[int, string]].init(
           ctx = authority, id = "lz_big", flags = DEFAULT_FLAGS + {LAZY}
         )
-      EdTable[int, string](authority["lz_big"])[1] = "huge"
+      Ed[Table[int, string]](authority["lz_big"])[1] = "huge"
 
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
@@ -458,7 +458,7 @@ proc run*() =
       client.tick()
       check "lz_items" in client # normal container came with the closure
       check "lz_big" in client # LAZY came too -- but only as a handle
-      let big = EdTable[int, string](client["lz_big"])
+      let big = Ed[Table[int, string]](client["lz_big"])
       check not big.loaded # placeholder: shape unknown, entries page in
       check not big.loaded(1) # the entry did NOT ride along
       check big.value.len == 0 # and reading doesn't materialize (LAZY: no touch)
@@ -474,9 +474,9 @@ proc run*() =
       var client = EdContext.init(id = "ki_client")
       Ed.thread_ctx = authority
       var owner = DeepOwner(id: "ki_owner")
-      var tbl: EdTable[int, string]
+      var tbl: Ed[Table[int, string]]
       owner.own:
-        tbl = EdTable[int, string].init(
+        tbl = Ed[Table[int, string]].init(
           ctx = authority, id = "ki_tbl", flags = DEFAULT_FLAGS + {LAZY}
         )
       tbl[1] = "one"
@@ -486,7 +486,7 @@ proc run*() =
       discard client.fetch("ki_owner", deep = true) # handle rides the closure
       authority.tick()
       client.tick()
-      let ctbl = EdTable[int, string](client["ki_tbl"])
+      let ctbl = Ed[Table[int, string]](client["ki_tbl"])
       check not ctbl.loaded(1) # handle only -- entries page in on request
 
       # Requesting a present key loads it -- and subscribes to it: a later
@@ -527,9 +527,9 @@ proc run*() =
       var clone = EdContext.init(id = "rl_clone")
       Ed.thread_ctx = authority
       var owner = DeepOwner(id: "rl_owner")
-      var tbl: EdTable[int, string]
+      var tbl: Ed[Table[int, string]]
       owner.own:
-        tbl = EdTable[int, string].init(
+        tbl = Ed[Table[int, string]].init(
           ctx = authority, id = "rl_tbl", flags = DEFAULT_FLAGS + {LAZY}
         )
       tbl[1] = "one"
@@ -542,8 +542,8 @@ proc run*() =
       authority.tick()
       pager.tick()
       clone.tick()
-      let ptbl = EdTable[int, string](pager["rl_tbl"])
-      let ntbl = EdTable[int, string](clone["rl_tbl"])
+      let ptbl = Ed[Table[int, string]](pager["rl_tbl"])
+      let ntbl = Ed[Table[int, string]](clone["rl_tbl"])
       check not ptbl.loaded(1) # handle only
 
       ptbl.request(1) # page in
@@ -585,9 +585,9 @@ proc run*() =
       var client = EdContext.init(id = "pk_client", mem_limit = 1024 * 1024)
       Ed.thread_ctx = authority
       var owner = DeepOwner(id: "pk_owner")
-      var tbl: EdTable[int, string]
+      var tbl: Ed[Table[int, string]]
       owner.own:
-        tbl = EdTable[int, string].init(
+        tbl = Ed[Table[int, string]].init(
           ctx = authority, id = "pk_tbl", flags = DEFAULT_FLAGS + {LAZY}
         )
       tbl[1] = 'x'.repeat(200)
@@ -598,7 +598,7 @@ proc run*() =
       discard client.fetch("pk_owner", deep = true) # the LAZY handle rides in
       authority.tick()
       client.tick()
-      let ctbl = EdTable[int, string](client["pk_tbl"])
+      let ctbl = Ed[Table[int, string]](client["pk_tbl"])
       check client.used_bytes == 0 # handle only, no entries yet
 
       ctbl.request(1)
@@ -624,8 +624,8 @@ proc run*() =
       var hub = EdContext.init(id = "it_hub", mem_limit = 200)
       var leaf = EdContext.init(id = "it_leaf", mem_limit = 10_000_000)
       Ed.thread_ctx = authority
-      discard EdValue[string].init(ctx = authority, id = "it_x")
-      EdValue[string](authority["it_x"]).value = 'z'.repeat(400)
+      discard Ed[string].init(ctx = authority, id = "it_x")
+      Ed[string](authority["it_x"]).value = 'z'.repeat(400)
 
       hub.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       hub.tick()
@@ -672,8 +672,8 @@ proc run*() =
       var authority = EdContext.init(id = "ub_auth", is_authority = true)
       var client = EdContext.init(id = "ub_client", mem_limit = Unbounded)
       Ed.thread_ctx = authority
-      discard EdValue[string].init(ctx = authority, id = "ub_x")
-      EdValue[string](authority["ub_x"]).value = "hi"
+      discard Ed[string].init(ctx = authority, id = "ub_x")
+      Ed[string](authority["ub_x"]).value = "hi"
 
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
@@ -695,8 +695,8 @@ proc run*() =
       var authority = EdContext.init(id = "nc_auth", is_authority = true)
       var client = EdContext.init(id = "nc_client", mem_limit = 0)
       Ed.thread_ctx = authority
-      discard EdValue[string].init(ctx = authority, id = "nc_x")
-      EdValue[string](authority["nc_x"]).value = "hi"
+      discard Ed[string].init(ctx = authority, id = "nc_x")
+      Ed[string](authority["nc_x"]).value = "hi"
 
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
@@ -718,12 +718,12 @@ proc run*() =
       var authority = EdContext.init(id = "ev_auth", is_authority = true)
       var client = EdContext.init(id = "ev_client", mem_limit = 250)
       Ed.thread_ctx = authority
-      discard EdValue[string].init(ctx = authority, id = "ev_1")
-      discard EdValue[string].init(ctx = authority, id = "ev_2")
-      discard EdValue[string].init(ctx = authority, id = "ev_3")
-      EdValue[string](authority["ev_1"]).value = 'a'.repeat(100)
-      EdValue[string](authority["ev_2"]).value = 'b'.repeat(100)
-      EdValue[string](authority["ev_3"]).value = 'c'.repeat(100)
+      discard Ed[string].init(ctx = authority, id = "ev_1")
+      discard Ed[string].init(ctx = authority, id = "ev_2")
+      discard Ed[string].init(ctx = authority, id = "ev_3")
+      Ed[string](authority["ev_1"]).value = 'a'.repeat(100)
+      Ed[string](authority["ev_2"]).value = 'b'.repeat(100)
+      Ed[string](authority["ev_3"]).value = 'c'.repeat(100)
 
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
       client.tick()
@@ -742,8 +742,8 @@ proc run*() =
       # Read ev_2 and ev_3 (recently used); ev_1 is never read, so it stays the
       # stalest. Drop the handles and force ORC so the bodies read as unheld
       # (production reaches this as allocation drives collection).
-      discard EdValue[string](client["ev_2"]).value
-      discard EdValue[string](client["ev_3"]).value
+      discard Ed[string](client["ev_2"]).value
+      discard Ed[string](client["ev_3"]).value
       f1.obj = nil
       f2.obj = nil
       f3.obj = nil
@@ -765,9 +765,9 @@ proc run*() =
       var leaf = EdContext.init(id = "ck_leaf", mem_limit = 0)
       Ed.thread_ctx = authority
       var owner = DeepOwner(id: "ck_owner")
-      var tbl: EdTable[int, string]
+      var tbl: Ed[Table[int, string]]
       owner.own:
-        tbl = EdTable[int, string].init(
+        tbl = Ed[Table[int, string]].init(
           ctx = authority, id = "ck_tbl", flags = DEFAULT_FLAGS + {LAZY}
         )
       tbl[1] = 'a'.repeat(200)
@@ -786,8 +786,8 @@ proc run*() =
       leaf.tick()
       hub.tick()
       leaf.tick()
-      let htbl = EdTable[int, string](hub["ck_tbl"])
-      let ltbl = EdTable[int, string](leaf["ck_tbl"])
+      let htbl = Ed[Table[int, string]](hub["ck_tbl"])
+      let ltbl = Ed[Table[int, string]](leaf["ck_tbl"])
 
       # L pages key 1 in, then releases it (out of view).
       ltbl.request(1)
@@ -828,9 +828,9 @@ proc run*() =
       var leaf = EdContext.init(id = "hs_leaf")
       Ed.thread_ctx = authority
       var owner = DeepOwner(id: "hs_owner")
-      var tbl: EdTable[int, string]
+      var tbl: Ed[Table[int, string]]
       owner.own:
-        tbl = EdTable[int, string].init(
+        tbl = Ed[Table[int, string]].init(
           ctx = authority, id = "hs_tbl", flags = DEFAULT_FLAGS + {LAZY}
         )
       tbl[1] = "one"
@@ -843,8 +843,8 @@ proc run*() =
       authority.tick()
       hub.tick()
       leaf.tick()
-      let htbl = EdTable[int, string](hub["hs_tbl"])
-      let ltbl = EdTable[int, string](leaf["hs_tbl"])
+      let htbl = Ed[Table[int, string]](hub["hs_tbl"])
+      let ltbl = Ed[Table[int, string]](leaf["hs_tbl"])
 
       ltbl.request(1) # leaf pages in: chains leaf -> hub -> authority
       leaf.tick() # flush the key request
@@ -889,12 +889,12 @@ proc run*() =
       var client = EdContext.init(id = "nb_client")
       Ed.thread_ctx = authority
       var owner = DeepOwner(id: "nb_owner")
-      var tbl: EdTable[int, EdSeq[int]]
+      var tbl: Ed[Table[int, Ed[seq[int]]]]
       owner.own:
-        tbl = EdTable[int, EdSeq[int]].init(
+        tbl = Ed[Table[int, Ed[seq[int]]]].init(
           ctx = authority, id = "nb_tbl", flags = DEFAULT_FLAGS + {LAZY}
         )
-      var entry = EdSeq[int].init(ctx = authority, id = "nb_entry")
+      var entry = Ed[seq[int]].init(ctx = authority, id = "nb_entry")
       entry.add 7
       tbl[1] = entry
 
@@ -903,7 +903,7 @@ proc run*() =
       discard client.fetch("nb_owner", deep = true)
       authority.tick()
       client.tick()
-      let ctbl = EdTable[int, EdSeq[int]](client["nb_tbl"])
+      let ctbl = Ed[Table[int, Ed[seq[int]]]](client["nb_tbl"])
 
       ctbl.request(1)
       client.tick()
@@ -938,7 +938,7 @@ proc run*() =
       var hub = EdContext.init(id = "hf_hub")
       var leaf = EdContext.init(id = "hf_leaf")
       Ed.thread_ctx = authority
-      var tbl = EdTable[int, string].init(
+      var tbl = Ed[Table[int, string]].init(
         ctx = authority, id = "hf_tbl", flags = DEFAULT_FLAGS + {LAZY}
       )
       tbl[1] = "one"
@@ -949,7 +949,7 @@ proc run*() =
       leaf.tick()
       # The leaf knows the table only by its derived id -- neither it nor the
       # hub holds the container.
-      let ltbl = EdTable[int, string].init_placeholder(leaf, "hf_tbl")
+      let ltbl = Ed[Table[int, string]].init_placeholder(leaf, "hf_tbl")
       check "hf_tbl" notin hub
 
       ltbl.request(1)
@@ -959,7 +959,7 @@ proc run*() =
       hub.tick() # apply handle + entry; serve the waiting leaf
       leaf.tick() # apply
       check "hf_tbl" in hub
-      check EdTable[int, string](hub["hf_tbl"]).loaded(1)
+      check Ed[Table[int, string]](hub["hf_tbl"]).loaded(1)
       check ltbl[1] == "one"
 
     test "per-key replies carry nested containers (chunk-deep)":
@@ -967,9 +967,9 @@ proc run*() =
       var client = EdContext.init(id = "kd_client")
       Ed.thread_ctx = authority
       var owner = DeepOwner(id: "kd_owner")
-      var tbl: EdTable[int, EdSeq[int]]
+      var tbl: Ed[Table[int, Ed[seq[int]]]]
       owner.own:
-        tbl = EdTable[int, EdSeq[int]].init(
+        tbl = Ed[Table[int, Ed[seq[int]]]].init(
           ctx = authority, id = "kd_tbl", flags = DEFAULT_FLAGS + {LAZY}
         )
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
@@ -979,11 +979,11 @@ proc run*() =
       client.tick()
       check "kd_tbl" in client
 
-      var entry = EdSeq[int].init(ctx = authority, id = "kd_entry")
+      var entry = Ed[seq[int]].init(ctx = authority, id = "kd_entry")
       entry.add 7
       tbl[1] = entry # LAZY + no per-key interest: not streamed
       client.tick()
-      let ctbl = EdTable[int, EdSeq[int]](client["kd_tbl"])
+      let ctbl = Ed[Table[int, Ed[seq[int]]]](client["kd_tbl"])
       check not ctbl.loaded(1)
 
       ctbl.request(1)
@@ -992,7 +992,7 @@ proc run*() =
       client.tick() # apply
       check ctbl.loaded(1)
       check "kd_entry" in client
-      check EdSeq[int](client["kd_entry"]).len == 1 # nested arrived loaded
+      check Ed[seq[int]](client["kd_entry"]).len == 1 # nested arrived loaded
       check ctbl[1][0] == 7 # and the entry links to it
 
     test "deep fetch pulls an owner's full ownership closure":
@@ -1001,8 +1001,8 @@ proc run*() =
 
       var bot = DeepOwner(id: "d_bot")
       bot.own:
-        bot.items = EdSeq[int].init(ctx = authority, id = "d_items")
-        bot.val = EdValue[int].init(ctx = authority, id = "d_val")
+        bot.items = Ed[seq[int]].init(ctx = authority, id = "d_items")
+        bot.val = Ed[int].init(ctx = authority, id = "d_val")
       bot.items.add 3
 
       client.subscribe(authority, mode = PARTIAL_ASYNC, fetch = [])
@@ -1017,14 +1017,14 @@ proc run*() =
       client.tick() # materializes the owned containers
       check "d_items" in client
       check "d_val" in client
-      check EdSeq[int](client["d_items"])[0] == 3
-      check EdSeq[int](client["d_items"]).owner_id == "d_bot" # ownership syncs too
+      check Ed[seq[int]](client["d_items"])[0] == 3
+      check Ed[seq[int]](client["d_items"]).owner_id == "d_bot" # ownership syncs too
       check "d_items" in client.owned_by["d_bot"]
 
       # The closure joined the interest set: future ops follow.
       bot.items.add 4
       client.tick()
-      check EdSeq[int](client["d_items"]).len == 2
+      check Ed[seq[int]](client["d_items"]).len == 2
 
     test "objects created after subscribe respect partial interest":
       var authority = EdContext.init(id = "pc_auth", is_authority = true)
@@ -1033,8 +1033,8 @@ proc run*() =
       client.tick()
 
       # Created after the subscribe -- the broadcast CREATE must still be filtered.
-      var root = EdValue[int].init(ctx = authority, id = "pc_root")
-      var other = EdValue[int].init(ctx = authority, id = "pc_other")
+      var root = Ed[int].init(ctx = authority, id = "pc_root")
+      var other = Ed[int].init(ctx = authority, id = "pc_other")
       client.tick()
       check "pc_root" in client # in interest
       check "pc_other" notin client # filtered
@@ -1047,26 +1047,26 @@ proc run*() =
 
       # Client creates its own object; the authority should pick it up and
       # return its canonical ops (auto-interest on create-from-subscriber).
-      var mine = EdValue[int].init(ctx = client, id = "po_mine")
+      var mine = Ed[int].init(ctx = client, id = "po_mine")
       mine.value = 5
       authority.tick()
       client.tick()
       check "po_mine" in authority
-      check EdValue[int](authority["po_mine"]).value == 5
+      check Ed[int](authority["po_mine"]).value == 5
 
       # Return-to-source works for the partial client's own object.
-      EdValue[int](client["po_mine"]).value = 7
+      Ed[int](client["po_mine"]).value = 7
       authority.tick()
       client.tick()
-      check EdValue[int](authority["po_mine"]).value == 7
-      check EdValue[int](client["po_mine"]).value == 7
+      check Ed[int](authority["po_mine"]).value == 7
+      check Ed[int](client["po_mine"]).value == 7
 
     test "non-partial subscriber still gets everything (default unchanged)":
       var authority = EdContext.init(id = "p_authority2", is_authority = true)
       var client = EdContext.init(id = "p_client2")
 
-      var x = EdValue[int].init(ctx = authority, id = "obj_x2")
-      var y = EdValue[int].init(ctx = authority, id = "obj_y2")
+      var x = Ed[int].init(ctx = authority, id = "obj_x2")
+      var y = Ed[int].init(ctx = authority, id = "obj_y2")
 
       client.subscribe(authority) # full
       client.tick()

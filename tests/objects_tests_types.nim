@@ -32,7 +32,7 @@ Ed.register(Gadget)
 
 type Widget* = ref object of EdRef
   note*: string                   # a plain field: stays on its own side
-  name_value*: EdValue[string]
+  name_value*: Ed[string]
 
 Ed.register(Widget)
 

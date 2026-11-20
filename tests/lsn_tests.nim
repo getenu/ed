@@ -22,7 +22,7 @@ proc run*() =
       var follower = EdContext.init(id = "lsn_follower_a")
       follower.subscribe(leader)
 
-      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_a")
+      var obj = Ed[int].init(ctx = leader, id = "lsn_obj_a")
       let before = leader.lsn_counter  # CREATE is not stamped yet
       obj.value = 1
       obj.value = 2
@@ -40,7 +40,7 @@ proc run*() =
       var follower = EdContext.init(id = "lsn_follower_b")
       follower.subscribe(leader)
 
-      var fobj = EdValue[int].init(ctx = follower, id = "lsn_obj_b")
+      var fobj = Ed[int].init(ctx = follower, id = "lsn_obj_b")
       fobj.value = 7
       fobj.value = 8
       check follower.lsn_counter == 0
@@ -50,7 +50,7 @@ proc run*() =
       var follower = EdContext.init(id = "lsn_follower_c")
       follower.subscribe(leader)
 
-      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_c")
+      var obj = Ed[int].init(ctx = leader, id = "lsn_obj_c")
       obj.value = 1
       obj.value = 2
       obj.value = 3
@@ -60,7 +60,7 @@ proc run*() =
       # LSN counter (CREATE is unstamped, so only the 3 assigns count).
       check follower.applied_lsn == leader.lsn_counter
       check follower.applied_lsn >= 3
-      check EdValue[int](follower["lsn_obj_c"]).value == 3
+      check Ed[int](follower["lsn_obj_c"]).value == 3
 
     test "concurrent register writers converge to the authority's order":
       var leader = EdContext.init(id = "lsn_leader_e", is_authority = true)
@@ -69,15 +69,15 @@ proc run*() =
       fa.subscribe(leader)
       fb.subscribe(leader)
 
-      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_e")
+      var obj = Ed[int].init(ctx = leader, id = "lsn_obj_e")
       fa.tick()
       fb.tick()
       check "lsn_obj_e" in fa
       check "lsn_obj_e" in fb
 
       # Two optimistic writers race the same register.
-      EdValue[int](fa["lsn_obj_e"]).value = 10
-      EdValue[int](fb["lsn_obj_e"]).value = 20
+      Ed[int](fa["lsn_obj_e"]).value = 10
+      Ed[int](fb["lsn_obj_e"]).value = 20
 
       # Authority orders them (FIFO: fa then fb) and fans the canonical values
       # back to everyone -- including the writers (return-to-source).
@@ -85,9 +85,9 @@ proc run*() =
       fa.tick()
       fb.tick()
 
-      let lv = EdValue[int](leader["lsn_obj_e"]).value
-      check EdValue[int](fa["lsn_obj_e"]).value == lv  # no divergence
-      check EdValue[int](fb["lsn_obj_e"]).value == lv
+      let lv = Ed[int](leader["lsn_obj_e"]).value
+      check Ed[int](fa["lsn_obj_e"]).value == lv  # no divergence
+      check Ed[int](fb["lsn_obj_e"]).value == lv
       check lv == 20  # later writer in the authority's order wins
 
     test "register reconciliation is flicker-free (coalesced)":
@@ -97,26 +97,26 @@ proc run*() =
       fa.subscribe(leader)
       fb.subscribe(leader)
 
-      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_h")
+      var obj = Ed[int].init(ctx = leader, id = "lsn_obj_h")
       fa.tick()
       fb.tick()
 
       var seen: seq[int]
-      EdValue[int](fb["lsn_obj_h"]).track proc(
+      Ed[int](fb["lsn_obj_h"]).track proc(
           changes: seq[Change[int]]
       ) {.gcsafe.} =
         for c in changes:
           if ADDED in c.changes:
             seen.add c.item
 
-      EdValue[int](fa["lsn_obj_h"]).value = 10
-      EdValue[int](fb["lsn_obj_h"]).value = 20
+      Ed[int](fa["lsn_obj_h"]).value = 10
+      Ed[int](fb["lsn_obj_h"]).value = 20
       leader.tick()
       fa.tick()
       fb.tick()
 
       # fb converges to 20 without ever applying the superseded intermediate 10.
-      check EdValue[int](fb["lsn_obj_h"]).value == 20
+      check Ed[int](fb["lsn_obj_h"]).value == 20
       check 10 notin seen
 
     test "a non-leader's writes don't snap back to their own stale echoes":
@@ -127,43 +127,43 @@ proc run*() =
       var follower = EdContext.init(id = "lsn_follower_j")
       follower.subscribe(leader)
 
-      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_j")
+      var obj = Ed[int].init(ctx = leader, id = "lsn_obj_j")
       follower.tick()
       check "lsn_obj_j" in follower
 
       # Write 1; let the authority order it (the echo is now queued for us)...
-      EdValue[int](follower["lsn_obj_j"]).value = 1
+      Ed[int](follower["lsn_obj_j"]).value = 1
       leader.tick()
       # ...but before applying that echo we move on to 2.
-      EdValue[int](follower["lsn_obj_j"]).value = 2
+      Ed[int](follower["lsn_obj_j"]).value = 2
       follower.tick()
       # The stale echo of 1 must not drag us back.
-      check EdValue[int](follower["lsn_obj_j"]).value == 2
+      check Ed[int](follower["lsn_obj_j"]).value == 2
 
       # And we still converge: the latest write is the canonical value.
       leader.tick()
       follower.tick()
-      check EdValue[int](follower["lsn_obj_j"]).value == 2
-      check EdValue[int](leader["lsn_obj_j"]).value == 2
+      check Ed[int](follower["lsn_obj_j"]).value == 2
+      check Ed[int](leader["lsn_obj_j"]).value == 2
 
     test "a follower's collection op is not double-applied":
       var leader = EdContext.init(id = "lsn_leader_f", is_authority = true)
       var follower = EdContext.init(id = "lsn_follower_f")
       follower.subscribe(leader)
 
-      var s = EdSeq[int].init(ctx = leader, id = "lsn_seq_f")
+      var s = Ed[seq[int]].init(ctx = leader, id = "lsn_seq_f")
       follower.tick()
       check "lsn_seq_f" in follower
 
       # Applied optimistically, sent to the authority, ordered, returned --
       # must NOT be re-applied (no duplicate).
-      EdSeq[int](follower["lsn_seq_f"]).add 42
+      Ed[seq[int]](follower["lsn_seq_f"]).add 42
       leader.tick()
       follower.tick()
 
-      check EdSeq[int](follower["lsn_seq_f"]).len == 1
-      check EdSeq[int](leader["lsn_seq_f"]).len == 1
-      check 42 in EdSeq[int](follower["lsn_seq_f"])
+      check Ed[seq[int]](follower["lsn_seq_f"]).len == 1
+      check Ed[seq[int]](leader["lsn_seq_f"]).len == 1
+      check 42 in Ed[seq[int]](follower["lsn_seq_f"])
 
     test "concurrent collection writers converge without duplication":
       var leader = EdContext.init(id = "lsn_leader_g", is_authority = true)
@@ -172,20 +172,20 @@ proc run*() =
       fa.subscribe(leader)
       fb.subscribe(leader)
 
-      var s = EdSeq[int].init(ctx = leader, id = "lsn_seq_g")
+      var s = Ed[seq[int]].init(ctx = leader, id = "lsn_seq_g")
       fa.tick()
       fb.tick()
 
-      EdSeq[int](fa["lsn_seq_g"]).add 1
-      EdSeq[int](fb["lsn_seq_g"]).add 2
+      Ed[seq[int]](fa["lsn_seq_g"]).add 1
+      Ed[seq[int]](fb["lsn_seq_g"]).add 2
       leader.tick()
       fa.tick()
       fb.tick()
 
       # Both adds present exactly once on every replica.
-      check EdSeq[int](leader["lsn_seq_g"]).len == 2
-      check EdSeq[int](fa["lsn_seq_g"]).len == 2
-      check EdSeq[int](fb["lsn_seq_g"]).len == 2
+      check Ed[seq[int]](leader["lsn_seq_g"]).len == 2
+      check Ed[seq[int]](fa["lsn_seq_g"]).len == 2
+      check Ed[seq[int]](fb["lsn_seq_g"]).len == 2
 
     test "concurrent update and delete converge (delete wins, no divergence)":
       var leader = EdContext.init(id = "lsn_leader_i", is_authority = true)
@@ -194,7 +194,7 @@ proc run*() =
       fa.subscribe(leader)
       fb.subscribe(leader)
 
-      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_i")
+      var obj = Ed[int].init(ctx = leader, id = "lsn_obj_i")
       obj.value = 1
       fa.tick()
       fb.tick()
@@ -202,8 +202,8 @@ proc run*() =
       check "lsn_obj_i" in fb
 
       # fa updates the object; fb deletes it -- concurrently.
-      EdValue[int](fa["lsn_obj_i"]).value = 99
-      EdValue[int](fb["lsn_obj_i"]).destroy()
+      Ed[int](fa["lsn_obj_i"]).value = 99
+      Ed[int](fb["lsn_obj_i"]).destroy()
 
       leader.tick()
       fa.tick()
@@ -219,7 +219,7 @@ proc run*() =
       var follower = EdContext.init(id = "lsn_follower_d")
       follower.subscribe(leader)
 
-      var obj = EdValue[int].init(ctx = leader, id = "lsn_obj_d")
+      var obj = Ed[int].init(ctx = leader, id = "lsn_obj_d")
       obj.value = 5
       follower.tick()
       check "lsn_obj_d" in follower
@@ -238,9 +238,9 @@ proc run*() =
       var leader = EdContext.init(id = "cond_leader_a", is_authority = true)
       var follower = EdContext.init(id = "cond_follower_a")
       follower.subscribe(leader)
-      var obj = EdValue[int].init(ctx = leader, id = "cond_obj_a")
+      var obj = Ed[int].init(ctx = leader, id = "cond_obj_a")
       follower.tick()
-      let fobj = EdValue[int](follower["cond_obj_a"])
+      let fobj = Ed[int](follower["cond_obj_a"])
 
       fobj.value = 1
       follower.tick() # sent, not yet ordered
@@ -257,9 +257,9 @@ proc run*() =
       var leader = EdContext.init(id = "cond_leader_b", is_authority = true)
       var follower = EdContext.init(id = "cond_follower_b")
       follower.subscribe(leader)
-      var obj = EdValue[int].init(ctx = leader, id = "cond_obj_b", flags = flags)
+      var obj = Ed[int].init(ctx = leader, id = "cond_obj_b", flags = flags)
       follower.tick()
-      let fobj = EdValue[int](follower["cond_obj_b"])
+      let fobj = Ed[int](follower["cond_obj_b"])
 
       fobj.value = 1
       follower.tick() # sent, not yet ordered
@@ -278,9 +278,9 @@ proc run*() =
       var leader = EdContext.init(id = "cond_leader_c", is_authority = true)
       var follower = EdContext.init(id = "cond_follower_c")
       follower.subscribe(leader)
-      var obj = EdValue[int].init(ctx = leader, id = "cond_obj_c", flags = flags)
+      var obj = Ed[int].init(ctx = leader, id = "cond_obj_c", flags = flags)
       follower.tick()
-      let fobj = EdValue[int](follower["cond_obj_c"])
+      let fobj = Ed[int](follower["cond_obj_c"])
 
       for i in 1 .. 5:
         fobj.value = i # none of these has seen the one before come back
@@ -291,12 +291,12 @@ proc run*() =
 
     test "a new subscriber's first write isn't treated as stale":
       var leader = EdContext.init(id = "cond_leader_d", is_authority = true)
-      var obj = EdValue[int].init(ctx = leader, id = "cond_obj_d", flags = flags)
+      var obj = Ed[int].init(ctx = leader, id = "cond_obj_d", flags = flags)
       obj.value = 5 # the latest write is the leader's, before anyone subscribes
       var follower = EdContext.init(id = "cond_follower_d")
       follower.subscribe(leader)
       follower.tick()
-      let fobj = EdValue[int](follower["cond_obj_d"])
+      let fobj = Ed[int](follower["cond_obj_d"])
       check fobj.value == 5
 
       fobj.value = 7
@@ -310,26 +310,26 @@ proc run*() =
       var fb = EdContext.init(id = "cond_fb")
       fa.subscribe(leader)
       fb.subscribe(leader)
-      var obj = EdValue[int].init(ctx = leader, id = "cond_obj_e", flags = flags)
+      var obj = Ed[int].init(ctx = leader, id = "cond_obj_e", flags = flags)
       fa.tick()
       fb.tick()
 
-      EdValue[int](fa["cond_obj_e"]).value = 10
-      EdValue[int](fb["cond_obj_e"]).value = 20 # hasn't seen fa's
+      Ed[int](fa["cond_obj_e"]).value = 10
+      Ed[int](fb["cond_obj_e"]).value = 20 # hasn't seen fa's
       fa.tick()
       fb.tick()
       settle(leader, fa, fb)
       check obj.value == 10
-      check EdValue[int](fa["cond_obj_e"]).value == 10
-      check EdValue[int](fb["cond_obj_e"]).value == 10
+      check Ed[int](fa["cond_obj_e"]).value == 10
+      check Ed[int](fb["cond_obj_e"]).value == 10
 
     test "a touch is conditional too":
       var leader = EdContext.init(id = "cond_leader_f", is_authority = true)
       var follower = EdContext.init(id = "cond_follower_f")
       follower.subscribe(leader)
-      var obj = EdValue[int].init(ctx = leader, id = "cond_obj_f", flags = flags)
+      var obj = Ed[int].init(ctx = leader, id = "cond_obj_f", flags = flags)
       follower.tick()
-      let fobj = EdValue[int](follower["cond_obj_f"])
+      let fobj = Ed[int](follower["cond_obj_f"])
 
       fobj.touch 1
       follower.tick()
@@ -348,9 +348,9 @@ proc run*() =
       relay.subscribe(leader)
       writer.subscribe(relay)
       check writer.authority_known
-      var obj = EdValue[int].init(ctx = leader, id = "cond_obj_g", flags = flags)
+      var obj = Ed[int].init(ctx = leader, id = "cond_obj_g", flags = flags)
       settle(leader, relay, writer)
-      let wobj = EdValue[int](writer["cond_obj_g"])
+      let wobj = Ed[int](writer["cond_obj_g"])
 
       wobj.value = 1
       settle(writer, relay, leader, relay, writer)
@@ -373,14 +373,14 @@ proc run*() =
     test "a REJECT_STALE collection is refused, not quietly unchecked":
       var ctx = EdContext.init(id = "cond_ctx_h", is_authority = true)
       expect AssertionDefect:
-        discard EdSeq[int].init(ctx = ctx, id = "cond_seq_h", flags = flags)
+        discard Ed[seq[int]].init(ctx = ctx, id = "cond_seq_h", flags = flags)
 
     test "writing with no authority above says so":
       var a = EdContext.init(id = "cond_a_i")
       var b = EdContext.init(id = "cond_b_i")
       b.subscribe(a)
       check not b.authority_known
-      var obj = EdValue[int].init(ctx = b, id = "cond_obj_i", flags = flags)
+      var obj = Ed[int].init(ctx = b, id = "cond_obj_i", flags = flags)
       obj.value = 1
       check "cond_obj_i" in b.unordered_warned
 
@@ -388,7 +388,7 @@ proc run*() =
       var a = EdContext.init(id = "cond_a_k")
       var b = EdContext.init(id = "cond_b_k")
       b.subscribe(a)
-      var obj = EdValue[int].init(5, ctx = b, id = "cond_obj_k", flags = flags)
+      var obj = Ed[int].init(5, ctx = b, id = "cond_obj_k", flags = flags)
       check "cond_obj_k" notin b.unordered_warned
       obj.value = 6
       check "cond_obj_k" in b.unordered_warned
@@ -404,15 +404,15 @@ proc run*() =
       relay.subscribe(leader)
       writer.subscribe(relay)
       other.subscribe(leader)
-      var obj = EdValue[int].init(ctx = leader, id = "cond_obj_j", flags = flags)
+      var obj = Ed[int].init(ctx = leader, id = "cond_obj_j", flags = flags)
       obj.value = 5
       settle(leader, relay, writer, other)
 
-      EdValue[int](other["cond_obj_j"]).value = 5 # same value, other origin
-      EdValue[int](other["cond_obj_j"]).touch 5
+      Ed[int](other["cond_obj_j"]).value = 5 # same value, other origin
+      Ed[int](other["cond_obj_j"]).touch 5
       settle(other, leader, relay, writer)
 
-      EdValue[int](writer["cond_obj_j"]).value = 9
+      Ed[int](writer["cond_obj_j"]).value = 9
       settle(writer, relay, leader, relay, writer)
       check obj.value == 9
-      check EdValue[int](writer["cond_obj_j"]).value == 9
+      check Ed[int](writer["cond_obj_j"]).value == 9

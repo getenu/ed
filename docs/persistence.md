@@ -111,7 +111,7 @@ by every surviving follower forever. `op_id_counter`/`latest_op_id` rebuild
 from the manifest + own-origin tail entries.
 
 **Type registration:** a restoring process must instantiate the store's Ed
-types (compile an `Ed[T,O].init` for each) so `Ed.bootstrap` registers their
+types (compile an `Ed[T].init` for each) so `Ed.bootstrap` registers their
 materializers — the same rule as any subscriber (it's what the capability
 handshake enforces on the wire). An unknown tid in the log is skipped, like an
 unknown type from a peer.

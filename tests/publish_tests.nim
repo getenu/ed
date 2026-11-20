@@ -22,8 +22,8 @@ proc run*() =
       ctx2 = EdContext.init(id = "ctx2")
       build = Build(id: "some_build", build_stuff: "asdf")
       bot = Bot(id: "some_bot", bot_stuff: "wasd")
-      units1 = EdSeq[Unit].init(id = "units", ctx = ctx1)
-      units2 = EdSeq[Unit].init(id = "units", ctx = ctx2)
+      units1 = Ed[seq[Unit]].init(id = "units", ctx = ctx1)
+      units2 = Ed[seq[Unit]].init(id = "units", ctx = ctx2)
 
     ctx2.subscribe(ctx1)
 
@@ -46,8 +46,8 @@ proc run*() =
       ctx2 = EdContext.init(id = "ctx2")
       build = Build(id: "some_build", build_stuff: "asdf")
       bot = Bot(id: "some_bot", bot_stuff: "wasd")
-      units1 = EdSeq[Unit].init(id = "units", ctx = ctx1)
-      units2 = EdSeq[Unit].init(id = "units", ctx = ctx2)
+      units1 = Ed[seq[Unit]].init(id = "units", ctx = ctx1)
+      units2 = Ed[seq[Unit]].init(id = "units", ctx = ctx2)
 
     ctx2.subscribe(ctx1)
 
@@ -73,8 +73,8 @@ proc run*() =
       ctx2 = EdContext.init(id = "ctx2")
       build = Build(id: "some_build", build_stuff: "asdf")
       bot = Bot(id: "some_bot", bot_stuff: "wasd")
-      units1 = EdSeq[Unit].init(id = "units", ctx = ctx1)
-      units2 = EdSeq[Unit].init(id = "units", ctx = ctx2)
+      units1 = Ed[seq[Unit]].init(id = "units", ctx = ctx1)
+      units2 = Ed[seq[Unit]].init(id = "units", ctx = ctx2)
 
     units1 += build
     units1 += bot
@@ -94,10 +94,10 @@ proc run*() =
       flags = {TRACK_CHILDREN}
       ctx1 = EdContext.init(id = "ctx1")
       ctx2 = EdContext.init(id = "ctx2")
-      a = EdValue[string].init(id = "test1", ctx = ctx1, flags = flags)
-      b = EdValue[string].init(id = "test1", ctx = ctx2, flags = flags)
-      c = EdValue[string].init(id = "test2", ctx = ctx1, flags = flags)
-      d: EdValue[string]
+      a = Ed[string].init(id = "test1", ctx = ctx1, flags = flags)
+      b = Ed[string].init(id = "test1", ctx = ctx2, flags = flags)
+      c = Ed[string].init(id = "test2", ctx = ctx1, flags = flags)
+      d: Ed[string]
 
     check "test1" in ctx2
     check "test2" notin ctx2

@@ -137,7 +137,7 @@ template connect*(self: EdClient) =
   ## one step, so apps never name `bootstrap`. Returns the client, chainable:
   ## `let c = EdClient(...).connect`.
   ##
-  ## `Ed.bootstrap` is a macro emitting one registration per `Ed[T,O]` the
+  ## `Ed.bootstrap` is a macro emitting one registration per `EdContainer[T,O]` the
   ## program has instantiated; `connect` is a template so it expands at YOUR
   ## call site, picking up everything instantiated by then (so call it after
   ## your imports). The registrations are trivial calls referencing named

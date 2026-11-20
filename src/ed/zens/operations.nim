@@ -4,7 +4,8 @@ import ed/[core, components/private/tracking, types {.all.}]
 import ed/lifecycle
 import ./[contexts, validations, private]
 
-proc untrack_all*[T, O](self: Ed[T, O]) =
+proc untrack_all*[T](self: Ed[T]) =
+  type O {.used.} = item_type(T)
   privileged
   assert self.valid
   self.trigger_callbacks(@[Change.init(O, {CLOSED})])
@@ -52,19 +53,19 @@ template touch_placeholder(self: untyped) =
   if self.placeholder and LAZY notin self.flags and self.ctx.materialize != nil:
     self.ctx.materialize(self.ctx, self.id)
 
-proc contains*[T, O](self: Ed[T, O], child: O): bool =
+proc contains*[T](self: Ed[T], child: T.item_type): bool =
   privileged
   assert self.valid
   self.touch_placeholder
   child in self.tracked
 
-proc contains*[K, V](self: EdTable[K, V], key: K): bool =
+proc contains*[K, V](self: Ed[Table[K, V]], key: K): bool =
   privileged
   assert self.valid
   self.touch_placeholder
   key in self.tracked
 
-proc contains*[T, O](self: Ed[T, O], children: set[O] | seq[O]): bool =
+proc contains*[T](self: Ed[T], children: set[T.item_type] | seq[T.item_type]): bool =
   assert self.valid
   result = true
   for child in children:
@@ -90,13 +91,13 @@ template materialize_for_write(self: untyped, op_ctx: untyped) =
   if op_ctx.source.len == 0:
     self.materialize_for_write
 
-proc clear*[T, O](self: Ed[T, O]) =
+proc clear*[T](self: Ed[T]) =
   assert self.valid
   self.materialize_for_write
   mutate(OperationContext(source: [self.ctx.id].to_hash_set)):
     self.tracked = T.default
 
-proc `value=`*[T, O](self: Ed[T, O], value: T, op_ctx = OperationContext()) =
+proc `value=`*[T](self: Ed[T], value: T, op_ctx = OperationContext()) =
   ## Set the container's value. Triggers change callbacks and sync.
   privileged
   assert self.valid
@@ -112,27 +113,27 @@ proc loaded*(self: ref EdBase): bool =
   ## "exists but not loaded" from "exists and is genuinely empty".
   not self.placeholder
 
-proc value*[T, O](self: Ed[T, O]): T =
+proc value*[T](self: Ed[T]): T =
   ## Get the container's current value.
   privileged
   assert self.valid
   self.touch_placeholder
   self.tracked
 
-proc `[]`*[K, V](self: Ed[Table[K, V], Pair[K, V]], index: K): V =
+proc `[]`*[K, V](self: Ed[Table[K, V]], index: K): V =
   privileged
   assert self.valid
   self.touch_placeholder
   self.tracked[index]
 
-proc loaded*[K, V](self: EdTable[K, V], key: K): bool =
+proc loaded*[K, V](self: Ed[Table[K, V]], key: K): bool =
   ## Whether this key's value is materialized locally. Distinct from
   ## `key in self` (shape: whether the key exists at all, once shape sync lands).
   privileged
   assert self.valid
   key in self.tracked
 
-proc request*[K, V](self: EdTable[K, V], key: K) =
+proc request*[K, V](self: Ed[Table[K, V]], key: K) =
   ## Queue a per-key fetch from the authority. Batched and sent on the next
   ## `tick` (a frame's worth of requests collapse into one message per table);
   ## the value arrives as an ADDED change, so existing `track`/`watch` handlers
@@ -142,11 +143,11 @@ proc request*[K, V](self: EdTable[K, V], key: K) =
   if key notin self.tracked:
     self.ctx.pending_key_requests.mget_or_put(self.id, @[]).add key.to_flatty
 
-proc request*[K, V](self: EdTable[K, V], keys: open_array[K]) =
+proc request*[K, V](self: Ed[Table[K, V]], keys: open_array[K]) =
   for key in keys:
     self.request(key)
 
-proc release*[K, V](self: EdTable[K, V], key: K) =
+proc release*[K, V](self: Ed[Table[K, V]], key: K) =
   ## Drop a locally-materialized entry to free memory (paging out). Never
   ## deletes on the authority; `request(key)` re-fetches. Three effects:
   ## evict locally (REMOVED fires, watches un-render), retract our per-key
@@ -164,30 +165,31 @@ proc release*[K, V](self: EdTable[K, V], key: K) =
     self.ctx.drop_nested_bodies(evicted.nested)
   self.ctx.pending_key_releases.mget_or_put(self.id, @[]).add key_bin
 
-proc release*[K, V](self: EdTable[K, V], keys: open_array[K]) =
+proc release*[K, V](self: Ed[Table[K, V]], keys: open_array[K]) =
   for key in keys:
     self.release(key)
 
-proc `[]`*[T](self: EdSeq[T], index: SomeOrdinal | BackwardsIndex): T =
+proc `[]`*[T](self: Ed[seq[T]], index: SomeOrdinal | BackwardsIndex): T =
   privileged
   assert self.valid
   self.touch_placeholder
   self.tracked[index]
 
 proc `[]=`*[K, V](
-    self: EdTable[K, V], key: K, value: V, op_ctx = OperationContext()
+    self: Ed[Table[K, V]], key: K, value: V, op_ctx = OperationContext()
 ) =
   self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
   self.put(key, value, touch = false, op_ctx)
 
-proc set_at*[T, O](self: Ed[T, O], index: int, value: O, op_ctx: OperationContext) =
+proc set_at*[T](self: Ed[T], index: int, value: T.item_type, op_ctx: OperationContext) =
   ## Positional replace at `index` (T is `seq[O]`). Emits REMOVED(old) +
   ## ADDED(new), both keyed by the index. The REMOVED+MODIFIED half fires local
   ## watches (a replace reads as remove-then-add) but isn't sent -- publish_changes
   ## drops REMOVED+MODIFIED; the ADDED half goes on the wire as a positional
-  ## ASSIGN so replicas replace in place instead of appending. Mirrors EdTable
+  ## ASSIGN so replicas replace in place instead of appending. Mirrors a table
   ## `[]=`, keyed by index rather than table key.
+  type O {.used.} = item_type(T)
   privileged
   let old = self.tracked[index]
   self.tracked[index] = value
@@ -202,12 +204,13 @@ proc set_at*[T, O](self: Ed[T, O], index: int, value: O, op_ctx: OperationContex
   self.publish_changes(changes, op_ctx)
   self.trigger_callbacks(changes)
 
-proc remove_at*[T, O](
-    self: Ed[T, O], index: int, shift: bool, op_ctx: OperationContext
+proc remove_at*[T](
+    self: Ed[T], index: int, shift: bool, op_ctx: OperationContext
 ) =
   ## Positional removal at `index` (T is `seq[O]`). `shift` picks order-preserving
   ## `delete` vs Nim's swap `del`; it rides the wire so the replica reproduces the
   ## same reordering. Emits a REMOVED keyed by the index -> UNASSIGN.
+  type O {.used.} = item_type(T)
   privileged
   let obj = self.tracked[index]
   if shift:
@@ -222,7 +225,7 @@ proc remove_at*[T, O](
   self.trigger_callbacks(removed)
 
 proc `[]=`*[T](
-    self: EdSeq[T], index: SomeOrdinal, value: T, op_ctx = OperationContext()
+    self: Ed[seq[T]], index: SomeOrdinal, value: T, op_ctx = OperationContext()
 ) =
   self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
@@ -235,8 +238,9 @@ proc `[]=`*[T](
     # here yet. Append to keep the element rather than crash or drop it.
     self.add(value, op_ctx)
 
-proc add*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
+proc add*[T](self: Ed[T], value: T.item_type, op_ctx = OperationContext()) =
   ## Add an item to a sequence container.
+  type O {.used.} = item_type(T)
   privileged
   self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
@@ -253,7 +257,7 @@ proc add*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
   self.publish_changes(added, op_ctx)
   self.trigger_callbacks(added)
 
-proc del*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
+proc del*[T](self: Ed[T], value: T.item_type, op_ctx = OperationContext()) =
   privileged
   self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
@@ -261,7 +265,7 @@ proc del*[T, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
   if value in self.tracked:
     remove(self, value, value, del, op_ctx)
 
-proc del*[K, V](self: EdTable[K, V], key: K, op_ctx = OperationContext()) =
+proc del*[K, V](self: Ed[Table[K, V]], key: K, op_ctx = OperationContext()) =
   privileged
   self.materialize_for_write(op_ctx)
   self.ctx.setup_op_ctx
@@ -271,8 +275,8 @@ proc del*[K, V](self: EdTable[K, V], key: K, op_ctx = OperationContext()) =
       self, key, Pair[K, V](key: key, value: self.tracked[key]), del, op_ctx
     )
 
-proc del*[T: seq, O](
-    self: Ed[T, O], index: SomeOrdinal, op_ctx = OperationContext()
+proc del*[T: seq](
+    self: Ed[T], index: SomeOrdinal, op_ctx = OperationContext()
 ) =
   privileged
   self.materialize_for_write(op_ctx)
@@ -281,7 +285,7 @@ proc del*[T: seq, O](
   if index.int < self.tracked.len:
     self.remove_at(index.int, shift = false, op_ctx)
 
-proc delete*[T, O](self: Ed[T, O], value: O) =
+proc delete*[T](self: Ed[T], value: T.item_type) =
   assert self.valid
   self.materialize_for_write
   if value in self.tracked:
@@ -293,7 +297,7 @@ proc delete*[T, O](self: Ed[T, O], value: O) =
       op_ctx = OperationContext(source: [self.ctx.id].to_hash_set),
     )
 
-proc delete*[K, V](self: EdTable[K, V], key: K) =
+proc delete*[K, V](self: Ed[Table[K, V]], key: K) =
   assert self.valid
   self.materialize_for_write
   if key in self.tracked:
@@ -305,101 +309,100 @@ proc delete*[K, V](self: EdTable[K, V], key: K) =
       op_ctx = OperationContext(),
     )
 
-proc delete*[T: seq, O](self: Ed[T, O], index: SomeOrdinal) =
+proc delete*[T: seq](self: Ed[T], index: SomeOrdinal) =
   assert self.valid
   self.materialize_for_write
   if index.int < self.tracked.len:
     self.remove_at(index.int, shift = true, op_ctx = OperationContext())
 
 proc touch*[K, V](
-    self: EdTable[K, V], pair: Pair[K, V], op_ctx: OperationContext
+    self: Ed[Table[K, V]], pair: Pair[K, V], op_ctx: OperationContext
 ) =
   assert self.valid
   self.materialize_for_write(op_ctx)
   self.put(pair.key, pair.value, touch = true, op_ctx = op_ctx)
 
 proc touch*[T, O](
-    self: EdTable[T, O], key: T, value: O, op_ctx = OperationContext()
+    self: Ed[Table[T, O]], key: T, value: O, op_ctx = OperationContext()
 ) =
   assert self.valid
   self.materialize_for_write(op_ctx)
   self.put(key, value, touch = true, op_ctx = op_ctx)
 
-proc touch*[T: set, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
+proc touch*[T: set](self: Ed[T], value: T.item_type, op_ctx = OperationContext()) =
   assert self.valid
   self.materialize_for_write(op_ctx)
   self.change_and_touch({value}, true, op_ctx = op_ctx)
 
-proc touch*[T: seq, O](self: Ed[T, O], value: O, op_ctx = OperationContext()) =
+proc touch*[T: seq](self: Ed[T], value: T.item_type, op_ctx = OperationContext()) =
   assert self.valid
   self.materialize_for_write(op_ctx)
   self.change_and_touch(@[value], true, op_ctx = op_ctx)
 
-proc touch*[T, O](self: Ed[T, O], value: T, op_ctx = OperationContext()) =
+proc touch*[T](self: Ed[T], value: T, op_ctx = OperationContext()) =
+  type O {.used.} = item_type(T)
   assert self.valid
   self.materialize_for_write(op_ctx)
-  self.change_and_touch(value, true, op_ctx = op_ctx)
+  when T is O:
+    mutate_and_touch(touch = true, op_ctx):
+      self.tracked = value
+  else:
+    self.change_and_touch(value, true, op_ctx = op_ctx)
 
-proc touch*[T](self: EdValue[T], value: T, op_ctx = OperationContext()) =
-  assert self.valid
-  self.materialize_for_write(op_ctx)
-  mutate_and_touch(touch = true, op_ctx):
-    self.tracked = value
-
-proc len*(self: Ed): int =
+proc len*[T](self: Ed[T]): int =
   privileged
   assert self.valid
   self.touch_placeholder
   self.tracked.len
 
-proc `+`*[O](self, other: EdSet[O]): set[O] =
+proc `+`*[O](self, other: Ed[set[O]]): set[O] =
   privileged
   self.tracked + other.tracked
 
-proc `+=`*[T, O](self: Ed[T, O], value: T) =
+proc `+=`*[T](self: Ed[T], value: T) =
   assert self.valid
   self.materialize_for_write
   self.change(value, true, op_ctx = OperationContext())
 
-proc `+=`*[O](self: EdSet[O], value: O) =
+proc `+=`*[O](self: Ed[set[O]], value: O) =
   assert self.valid
   self.materialize_for_write
   self.change({value}, true, op_ctx = OperationContext())
 
-proc `+=`*[T: seq, O](self: Ed[T, O], value: O) =
+proc `+=`*[T: seq](self: Ed[T], value: T.item_type) =
   assert self.valid
   self.add(value)
 
-proc `+=`*[T, O](self: EdTable[T, O], other: Table[T, O]) =
+proc `+=`*[T, O](self: Ed[Table[T, O]], other: Table[T, O]) =
   assert self.valid
   self.materialize_for_write
   self.put_all(other, touch = false, op_ctx = OperationContext())
 
-proc `-=`*[T, O](self: Ed[T, O], value: T) =
+proc `-=`*[T](self: Ed[T], value: T) =
   assert self.valid
   self.materialize_for_write
   self.change(value, false, op_ctx = OperationContext())
 
-proc `-=`*[T: set, O](self: Ed[T, O], value: O) =
+proc `-=`*[T: set](self: Ed[T], value: T.item_type) =
   assert self.valid
   self.materialize_for_write
   self.change({value}, false, op_ctx = OperationContext())
 
-proc `-=`*[T: seq, O](self: Ed[T, O], value: O) =
+proc `-=`*[T: seq](self: Ed[T], value: T.item_type) =
   assert self.valid
   self.materialize_for_write
   self.change(@[value], false, op_ctx = OperationContext())
 
-proc `&=`*[T, O](self: Ed[T, O], value: O) =
+proc `&=`*[T](self: Ed[T], value: T.item_type) =
   assert self.valid
   self.value = self.value & value
 
-proc `==`*(a, b: Ed): bool =
+proc `==`*[T](a, b: Ed[T]): bool =
   privileged
   a.is_nil == b.is_nil and a.destroyed == b.destroyed and a.tracked == b.tracked and
     a.id == b.id
 
-proc pause_changes*(self: Ed, eids: varargs[EID]) =
+proc pause_changes*[T](self: Ed[T], eids: varargs[EID]) =
   ## Pause change callbacks. Pass specific EIDs or none to pause all.
   privileged
   assert self.valid
@@ -410,7 +413,7 @@ proc pause_changes*(self: Ed, eids: varargs[EID]) =
     for eid in eids:
       self.typed_body.paused_eids.pause_eid(eid)
 
-proc resume_changes*(self: Ed, eids: varargs[EID]) =
+proc resume_changes*[T](self: Ed[T], eids: varargs[EID]) =
   ## Resume change callbacks. Pass specific EIDs or none to resume all.
   privileged
   assert self.valid
@@ -420,7 +423,7 @@ proc resume_changes*(self: Ed, eids: varargs[EID]) =
     for eid in eids:
       self.typed_body.paused_eids.resume_eid(eid)
 
-template pause_impl(self: Ed, eids: untyped, body: untyped) =
+template pause_impl[T](self: Ed[T], eids: untyped, body: untyped) =
   privileged
 
   let previous = self.typed_body.paused_eids
@@ -431,18 +434,18 @@ template pause_impl(self: Ed, eids: untyped, body: untyped) =
   finally:
     self.typed_body.paused_eids = previous
 
-template pause*(self: Ed, eids: varargs[EID], body: untyped) =
+template pause*[T](self: Ed[T], eids: varargs[EID], body: untyped) =
   mixin valid
   assert self.valid
   pause_impl(self, eids, body)
 
-template pause*(self: Ed, body: untyped) =
+template pause*[T](self: Ed[T], body: untyped) =
   privileged
   mixin valid
   assert self.valid
   pause_impl(self, self.typed_body.changed_callbacks.keys, body)
 
-proc destroy*[T, O](self: Ed[T, O], publish = true, op_ctx = OperationContext()) =
+proc destroy*[T](self: Ed[T], publish = true, op_ctx = OperationContext()) =
   ## Destroy the container and remove it from its context. `op_ctx` carries the
   ## source of the op that triggered this -- for a *received* DESTROY (re-broadcast
   ## by `change_receiver` so it relays past this hop) it's the upstream source, so
@@ -566,21 +569,21 @@ method destroy*(self: EdRef) {.base, gcsafe.} =
     ctx.destroy_owned(self.id, source)
   self.destroyed = true
 
-iterator items*[T](self: EdSet[T] | EdSeq[T]): T =
+iterator items*[T](self: Ed[set[T]] | Ed[seq[T]]): T =
   privileged
   assert self.valid
   self.touch_placeholder
   for item in self.tracked.items:
     yield item
 
-iterator items*[K, V](self: EdTable[K, V]): Pair[K, V] =
+iterator items*[K, V](self: Ed[Table[K, V]]): Pair[K, V] =
   privileged
   assert self.valid
   self.touch_placeholder
   for key, value in self.tracked.pairs:
     yield Pair[K, V](key: key, value: value)
 
-iterator pairs*[K, V](self: EdTable[K, V]): (K, V) =
+iterator pairs*[K, V](self: Ed[Table[K, V]]): (K, V) =
   privileged
   assert self.valid
   self.touch_placeholder

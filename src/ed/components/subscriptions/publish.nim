@@ -57,7 +57,8 @@ proc fanout(
         body_no_overwrite = remote_body(msg, no_overwrite = true)
       self.send_remote(sub, source, body_no_overwrite)
 
-proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
+proc publish_destroy*[T](self: Ed[T], op_ctx: OperationContext) =
+  type O {.used.} = item_type(T)
   privileged
   log_defaults("ed publishing")
 
@@ -74,7 +75,7 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
   # ASSIGN -- delete-vs-update is a real conflict (see spike doc).
   # type_id rides along for the capability filter (which types a peer can hold),
   # not for construction -- DESTROY tears down by id.
-  var msg = Message(kind: DESTROY, object_id: self.id, type_id: Ed[T, O].tid)
+  var msg = Message(kind: DESTROY, object_id: self.id, type_id: EdContainer[T, O].tid)
   msg.origin =
     if op_ctx.origin != "":
       op_ctx.origin
@@ -193,9 +194,10 @@ proc pack_messages(msgs: seq[Message]): seq[Message] =
   else:
     result = msgs
 
-proc publish_changes*[T, O](
-    self: Ed[T, O], changes: seq[Change[O]], op_ctx: OperationContext
+proc publish_changes*[T](
+    self: Ed[T], changes: seq[Change[T.item_type]], op_ctx: OperationContext
 ) =
+  type O {.used.} = item_type(T)
   privileged
   log_defaults("ed publishing")
   trace "publish_changes", op_ctx

@@ -16,8 +16,8 @@
 Two features we want Ed to grow into:
 
 1. **Partial / lazy sync.** A context should only hold the objects it actually
-   uses. Referenced-but-unaccessed objects (e.g. the `EdTable`s inside an
-   `EdSeq[EdTable]`) should not exist in memory until accessed, materialize on
+   uses. Referenced-but-unaccessed objects (e.g. the table `Ed`s inside a
+   seq of them) should not exist in memory until accessed, materialize on
    access, and stop syncing after a period of disuse (eviction).
 
 2. **Eventual consistency.** All clients converge on an agreed state. On
@@ -95,19 +95,19 @@ Everything reduces to a little per-object metadata, alongside the existing
 
 Reconciliation differs by data shape:
 
-- **`EdValue[T]` (register):** drift correction is a whole-value overwrite —
+- **`Ed[T]` (register):** drift correction is a whole-value overwrite —
   i.e. **last-writer-wins**. Cheap, no metadata. Can even resolve leaderless via
   deterministic tiebreak `(timestamp, peer_id)`.
-- **`EdSeq`/`EdTable`/`EdSet` (deltas):** reconciliation is "re-apply ops in the
+- **Seq, table and set `Ed`s (deltas):** reconciliation is "re-apply ops in the
   authority's canonical order." Commutative ops (two adds) don't care; add-vs-
   remove of the same element does, and the authority decides.
 
 ### Sequence ordering semantics (decided)
 
-> **`EdSeq` index positions are guaranteed only within a single tick. They may
+> **`Ed[seq[T]]` index positions are guaranteed only within a single tick. They may
 > change on the next tick.**
 
-Verified safe against Enu: `units` is an `EdSeq[Unit]` used almost entirely via
+Verified safe against Enu: `units` is an `Ed[seq[Unit]]` used almost entirely via
 iteration / `find_first`; the only positional access is `units[0]` ("first
 unit"). Tables are keyed by generated ids. Nothing depends on stable indices
 across ticks. This rule lets the authority reorder concurrent inserts freely.
@@ -353,7 +353,7 @@ and make `mode` an extensible level, not a bool.
 |---|---|---|---|
 | A | Per-player avatar / my-bot edits | optimistic; authority = player | nothing |
 | B | Two players recolor the same block | LWW register + deterministic tiebreak | nothing (flicker ok) |
-| C | Two players add units to a shared `EdSeq` | op-replay in canonical order | stable-index assumptions (excluded) |
+| C | Two players add units to a shared `Ed[seq[T]]` | op-replay in canonical order | stable-index assumptions (excluded) |
 | D | **Shared counter** (score, currency, resource count) | **serialized read-modify-write** at authority | plain LWW → **lost update** (10+1, 10+1 = 11) |
 | E | **Transfer** (item inventory A→B) | **atomic multi-object transaction** | non-atomic → item duplicated/vanishes |
 | F | **Claim a unique artifact / one-key door** | **serializable** (or single-object compare-and-set) | weaker → **write skew**: two players both claim |
@@ -391,7 +391,7 @@ but under-samples the harder scenarios (D/F/G), which arrive later.
 
 **Headline finding:** Enu **already event-sources its voxel world** —
 `voxels.nim` keeps `packed_chunks` (snapshots) + `chunk_deltas`
-(`EdTable[Vector3, EdSeq[DeltaUpdate]]`, an append-only delta log per chunk) and
+(`Ed[Table[Vector3, Ed[seq[DeltaUpdate]]]]`, an append-only delta log per chunk) and
 compacts to a new snapshot at `MAX_DELTAS_BEFORE_SNAPSHOT`. The global-log
 direction generalizes a pattern Enu already trusts. `chunk_deltas` is also a
 concrete **nested-Ed / lazy-materialization** case (table of seqs you don't want
@@ -403,7 +403,7 @@ Classification of the reactive fields found:
 |---|---|---|
 | **Cross-thread only** (`SYNC_LOCAL`) | `Unit.collisions`, `Unit.sight_query`, `Unit.eval`, `*.local_flags`, `Player.block_log_entries`; likely the `net_*`/`voxel_tasks` telemetry | **still needs cross-thread consistency** — just not network sync. Truly exempt = objects with *neither* flag (see Sync scopes). |
 | **Plain optimistic LWW registers** (the fast-snap majority) | `Unit.{code,velocity,transform,glow,shared}`; `GameState.{player,open_unit,config,tool,open_sign,level_name,queued_action,status_message,...}`; `Player.input_direction` | optimistic, snap-to-correct. **This is most data.** |
-| **Collections** (op-replay, per-tick order) | `GameState.units : EdSeq[Unit]`; `console.log : EdSeq[string]`; `packed_chunks`/`chunk_deltas`; `*_flags` sets | op-replay in canonical order; id/position-keyed. `chunk_deltas` is the concurrency hotspot (two builders, same chunk → LWW per voxel cell). |
+| **Collections** (op-replay, per-tick order) | `GameState.units : Ed[seq[Unit]]`; `console.log : Ed[seq[string]]`; `packed_chunks`/`chunk_deltas`; `*_flags` sets | op-replay in canonical order; id/position-keyed. `chunk_deltas` is the concurrency hotspot (two builders, same chunk → LWW per voxel cell). |
 | **Counters (D)** | none genuinely shared today (`voxel_tasks`/`net_*` look local/derived) | expect with inventory/economy (currency, scores, resource counts). |
 | **Unique-claim (F)** | `Unit.owner` / sign ownership (`players.nim`); `open_unit`/`open_sign` as an edit lock | host-arbitrated today; the F candidates. |
 | **Invariants (G)** | none hard today (voxel occupancy is LWW-per-cell, not a transaction) | expect with richer game/app rules. |
@@ -422,7 +422,7 @@ All vague, all confirmed **not** transaction-hairy. Classification:
 
 | Feature | Data / writer | Trips | Treatment |
 |---|---|---|---|
-| **Script persistence** (0.3 course progress) — KV maps on a unit, one `SYNC_LOCAL` + one `SYNC_REMOTE` | per-unit KV; **single writer** (the unit's script on the leader thread) | none — even a `map["x"] += 1` is safe (single writer, no contention) | **optimistic, but durability-sensitive.** The real need is *don't lose progress* (durability), not consistency. First near-term feature that wants durable persistence. Maybe servable incrementally on Enu's **existing save path** + an `EdTable`, independent of the big refactor. Nested-Ed (table on a unit) → relevant to partial sync. |
+| **Script persistence** (0.3 course progress) — KV maps on a unit, one `SYNC_LOCAL` + one `SYNC_REMOTE` | per-unit KV; **single writer** (the unit's script on the leader thread) | none — even a `map["x"] += 1` is safe (single writer, no contention) | **optimistic, but durability-sensitive.** The real need is *don't lose progress* (durability), not consistency. First near-term feature that wants durable persistence. Maybe servable incrementally on Enu's **existing save path** + an `Ed[Table[K, V]]`, independent of the big refactor. Nested-Ed (table on a unit) → relevant to partial sync. |
 | **Games** (multiplayer tic-tac-toe, tetris) — host owns data; other scripts update but there is always a clear owner/winner | host-authoritative game state | **F** (claim a cell / spot), occasionally **D** (shared counters e.g. tetris garbage), all **host-serialized** | **host-authoritative optimistic + per-cell CAS.** This is exactly the single-authority model. "Clear owner/winner" = host arbitration → serializable-for-free. **First real use of `confirmed` mode = "make a move"** (don't render an unaccepted/illegal move). No transactions. |
 | **Action loops → AI agents / NPCs** (e.g. bot notified on script error, suggests a fix) | per-agent state-machine state (single writer); error/events (single producer, fan-out) | none typically; **F** if agents contend for a resource (owner-CAS) | **optimistic + reactive events** (the existing `track` mechanism). Reinforces **H** (snapshot reads) *once agents run off the leader thread*. No transactions. |
 | **(Long-term) Roblox-like ecosystem** — sell assets, publish worlds | balances, asset ownership, sales | **D + F + E** (real transactions) | the genuine future transaction driver (marketplace). Aligns with #11: **reserve, don't build.** ~20% of the way there. |

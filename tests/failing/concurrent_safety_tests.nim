@@ -10,7 +10,7 @@ proc concurrent_modifier(ctx: EdContext) {.thread.} =
   
   # Try to get the shared object
   if "shared_obj" in ctx:
-    let shared_obj = EdValue[int](ctx["shared_obj"])
+    let shared_obj = Ed[int](ctx["shared_obj"])
     
     # Rapid modifications
     for i in 1..100:
@@ -29,7 +29,7 @@ proc run*() =
     
     ctx2.subscribe(ctx1)
     
-    var shared_obj = EdValue[int].init(ctx = ctx1, id = "shared_obj")
+    var shared_obj = Ed[int].init(ctx = ctx1, id = "shared_obj")
     shared_obj.value = 0
     
     ctx2.tick()
@@ -55,7 +55,7 @@ proc run*() =
 
   test "concurrent tracking callback registration":
     var ctx = EdContext.init(id = "test_ctx")
-    var shared_seq = EdSeq[string].init(ctx = ctx)
+    var shared_seq = Ed[seq[string]].init(ctx = ctx)
     
     var callback_count = 0
     
@@ -74,7 +74,7 @@ proc run*() =
 
   test "concurrent subscription and modification":
     var ctx1 = EdContext.init(id = "ctx1")
-    var obj = EdValue[string].init(ctx = ctx1, id = "racing_obj")
+    var obj = Ed[string].init(ctx = ctx1, id = "racing_obj")
     
     # Modify object while subscription is happening
     obj.value = "initial"
@@ -88,7 +88,7 @@ proc run*() =
     
     ctx2.tick()
     
-    let remote_obj = EdValue[string](ctx2["racing_obj"])
+    let remote_obj = Ed[string](ctx2["racing_obj"])
     
     # The final value should be consistent, but timing might cause issues
     check remote_obj.value == "after_subscription"

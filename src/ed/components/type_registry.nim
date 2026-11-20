@@ -115,7 +115,7 @@ proc get_value_type(self: NimNode): NimNode =
   if self.kind == nnk_sym:
     let def = self.get_impl
     if def.len >= 3 and def[2].kind == nnk_bracket_expr:
-      if def[2][0].kind == nnk_sym and def[2][0].str_val == "EdValue":
+      if def[2][0].kind == nnk_sym and def[2][0].str_val == "Ed":
         return def[2][1]
   elif self.kind == nnk_bracket_expr:
     if self[0].str_val.starts_with("Ed"):
@@ -213,20 +213,14 @@ proc snake_case(name: string): string =
       result.add c
 
 proc tracked_type(field_type: NimNode): NimNode =
-  ## The value type an Ed field holds: `EdSeq[X]` holds a `seq[X]`. Aliases
-  ## of Ed types are followed to their declaration.
+  ## The value type an Ed field holds: `Ed[seq[X]]` holds a `seq[X]`.
+  ## Aliases of Ed types are followed to their declaration.
   var t = field_type
   for _ in 0 .. 16:
     if t.kind == nnk_bracket_expr and t[0].kind in {nnk_sym, nnk_ident}:
       case t[0].str_val
-      of "EdValue", "Ed":
+      of "Ed":
         return t[1]
-      of "EdSeq":
-        return nnk_bracket_expr.new_tree(ident"seq", t[1])
-      of "EdSet":
-        return nnk_bracket_expr.new_tree(ident"set", t[1])
-      of "EdTable":
-        return nnk_bracket_expr.new_tree(bind_sym"Table", t[1], t[2])
       else:
         discard
     if t.kind == nnk_sym:
@@ -336,11 +330,10 @@ macro build_constructor(T: type, public: bool, constructor: bool): untyped =
       let field = f.name
       let param = f.param
       let declared = f.flags
-      let field_type = f.field_type
       let field_id =
         if f.fixed_id.is_nil: new_lit("") else: f.fixed_id.copy_nim_tree
       creates.add quote do:
-        `res`.`field` = `field_type`.init(
+        `res`.`field` = typeof(`res`.`field`).init(
           `param`,
           flags = (when compiles(`flags`.`param`): `flags`.`param` else: `declared`),
           ctx = `ctx`,
