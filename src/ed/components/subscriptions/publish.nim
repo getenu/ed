@@ -30,7 +30,8 @@ proc fanout(
     source.incl self.id
   var body, body_no_overwrite: string
   for sub in targets:
-    if sub.partial and msg.kind != DESTROY and msg.object_id notin sub.interest:
+    if sub.partial and msg.kind notin {DESTROY, REF_DESTROY} and
+        msg.object_id notin sub.interest:
       # Partial subscriber: only ops for objects it's interested in. DESTROY is
       # exempt, mirroring the capability gate below: a partial replica can hold
       # ids the authority never learned about (placeholders minted from inline
@@ -38,9 +39,12 @@ proc fanout(
       # forever (the reload leak). A destroy for an id a peer doesn't hold is a
       # cheap no-op.
       continue
-    if sub.capabilities.len > 0 and msg.type_id notin sub.capabilities:
+    if sub.capabilities.len > 0 and msg.kind != REF_DESTROY and
+        msg.type_id notin sub.capabilities:
       # Peer can't materialize this type -- never send its ops (incl. DESTROY: it
-      # never built the type, so it never held the object).
+      # never built the type, so it never held the object). A REF_DESTROY's
+      # type is a ref type, which capabilities don't list; a peer that never
+      # held the ref ignores it.
       continue
     if sub.kind == LOCAL:
       self.send(sub, msg, op_ctx, flags)
@@ -88,6 +92,27 @@ proc publish_destroy*[T, O](self: Ed[T, O], op_ctx: OperationContext) =
   self.ctx.fanout(msg, op_ctx, self.flags, targets)
 
   self.ctx.tick_reactor
+
+proc publish_ref_destroy(
+    ctx: EdContext, self: EdRef, source: HashSet[string]
+) {.nimcall, gcsafe.} =
+  ## Send a registered ref's destroy to every subscriber that hasn't seen it.
+  ## Unordered (no LSN): the incarnation it names makes it safe in any order --
+  ## a receiver holding a later object under the same id ignores it.
+  privileged
+  if ctx.replaying:
+    return
+  self.ensure_incarnation
+  let ref_id = $self.type_id & ":" & self.id
+  var msg = Message(
+    kind: REF_DESTROY, object_id: ref_id, type_id: self.type_id,
+    obj: $self.incarnation, origin: ctx.id, op_id: ctx.next_op_id,
+  )
+  let targets = ctx.subscribers.filter_it(it.ctx_id notin source)
+  if targets.len > 0:
+    ctx.fanout(msg, OperationContext(source: source), DEFAULT_FLAGS, targets)
+
+publish_ref_destroy_hook = publish_ref_destroy
 
 proc publish_closure(
     self: EdContext, s: Subscription, root_id: string

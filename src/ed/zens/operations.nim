@@ -1,4 +1,4 @@
-import std/[typetraits, macros, macrocache, tables]
+import std/[typetraits, macros, macrocache, tables, sets]
 import pkg/flatty
 import ed/[core, components/private/tracking, types {.all.}]
 import ed/lifecycle
@@ -492,7 +492,9 @@ proc set_owner*(ctx: EdContext, obj: EdRef, owner_id: string) =
     $obj.type_id & ":" & obj.id
   )
 
-proc destroy_owned*(ctx: EdContext, owner_id: string) =
+proc destroy_owned*(
+    ctx: EdContext, owner_id: string, source = HashSet[string].default
+) =
   ## Destroy everything owned by `owner_id` (per the `owned_by` index). Two
   ## passes: first owned EdRef *members* (an OWNS_MEMBERS collection's children)
   ## -- cascaded through their `destroy` method while the containers they unlink
@@ -504,6 +506,8 @@ proc destroy_owned*(ctx: EdContext, owner_id: string) =
   ## callbacks separately. Containers are type-erased here (`ref EdBase`), so
   ## they're destroyed via their `change_receiver` (the same path a received
   ## DESTROY takes); members are ref_pool keys, dispatched via `EdRef.destroy`.
+  ## `source`: contexts that already know (a received destroy's), so the
+  ## container DESTROYs aren't sent back to them.
   privileged
   private_access EdBase
   ctx.prune_dead_refs() # cursor safety before reading ref_pool entries
@@ -519,25 +523,47 @@ proc destroy_owned*(ctx: EdContext, owner_id: string) =
       if id in ctx.objects and ?ctx.objects[id]:
         let obj = ctx.objects[id]
         if obj.ops != nil:
-          obj.ops.change_receiver(obj, Message(kind: DESTROY), OperationContext())
+          obj.ops.change_receiver(
+            obj, Message(kind: DESTROY), OperationContext(source: source)
+          )
     ctx.owned_by.del(owner_id)
 
 method destroy*(self: EdRef) {.base, gcsafe.} =
-  ## Generic teardown for a registered ref: finish its callback lifetime, tear
-  ## down everything it owns -- containers, and owned members recursively -- then
-  ## latch `destroyed`. Subclasses override with their type-specific cleanup and
-  ## call this last (enu: unlink from the parent, clear globals, then here).
-  ## Deliberately unguarded: an overriding destroy latches `destroyed` at its
-  ## *top* (removal watchers re-enter synchronously) and still needs this body
-  ## to run afterwards.
-  if not self.lifetime.is_nil:
-    self.lifetime.finish()
+  ## Generic teardown for a registered ref: run its `on_destroy` listeners,
+  ## finish its callback lifetime, send the destroy to every other context, tear
+  ## down everything it owns -- containers, and owned members recursively --
+  ## then latch `destroyed`. Subclasses override with their type-specific
+  ## cleanup and call this last (enu: unlink from the parent, clear globals,
+  ## then here). Safe to reach twice (an override's removal watchers can
+  ## re-enter): listeners and the send happen only the first time.
+  privileged
   # The context this ref lives in (stamped on ref_pool add). Fall back to
   # thread_ctx only for a ref that never entered a ref_pool -- i.e. created and
   # destroyed without ever being added to a collection, where it was minted on
   # the current thread anyway.
   let ctx = if self.ctx != nil: self.ctx else: Ed.thread_ctx
-  ctx.destroy_owned(self.id)
+  let first = not self.destroyed
+  var source = ref_destroy_source
+  source.incl ctx.id
+  if first:
+    self.run_destroy_listeners()
+  if not self.lifetime.is_nil:
+    self.lifetime.finish()
+  # What's owned under this id belongs to a newer object if one has taken this
+  # one's place here (a reload that reused the id) -- leave it to that object.
+  let pool_key = $self.type_id & ":" & self.id
+  let superseded =
+    pool_key in ctx.ref_pool and
+    ctx.ref_pool[pool_key].incarnation != self.incarnation
+  # Before the owned teardown, so the destroy reaches the other contexts ahead
+  # of the container DESTROYs: their listeners see the object whole, as ours
+  # did. Each tears down its own copies; our container DESTROYs then find them
+  # already gone.
+  if first and not self.ctx.is_nil and not publish_ref_destroy_hook.is_nil:
+    {.cast(gcsafe).}:
+      publish_ref_destroy_hook(ctx, self, source)
+  if not superseded:
+    ctx.destroy_owned(self.id, source)
   self.destroyed = true
 
 iterator items*[T](self: EdSet[T] | EdSeq[T]): T =

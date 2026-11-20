@@ -769,7 +769,9 @@ proc run*() =
       ctx2.tick
       check dest.len == 0
       orig = nil
-      ctx2.prune_dead_refs()
+      # The removal is held for the rest of its tick, in case it's a move; the
+      # next tick's upkeep lets it go.
+      ctx2.free_refs
       check id notin ctx2.ref_pool
 
       # So a later re-add can only materialize a fresh instance.

@@ -270,24 +270,24 @@ typed forms are unchanged.
   readers can't tell a write-back happens, and `std/with` takes any typed argument,
   so the two collide wherever both are imported (enu imports `std/with`).
 
-## Related: moves and revive
+## Related: moves and destroys
 
-Separate from the field rules, but found alongside them:
+Separate from the field rules, but found alongside them. Both are built
+(`docs/object-lifecycle.md` has the details):
 
-- **Moves.** Before the ORC change (ed `3d3f5cd`), the ref pool kept an
-  unreferenced object for 10 seconds, so removing it from one container and adding
-  it to another found the same object. Now the pool is weak, the object is freed on
-  removal, and the add builds a new one. The plan: keep a removed object for the
-  rest of the tick, so a move within the tick keeps its identity. A remove and add
-  that arrive in different ticks (a relay, the network) may need the window tied
-  to the batch the move was sent in. enu works around this today with its synced
-  `TRANSFERRING` flag.
-- **Revive** came in with `39f27c7` for reloads: a thing destroyed and recreated
-  under the same id while something still holds the old object. `find_ref`
-  revives on every pooled hit, though, not only after a destroy, which is how a
-  live object got overwritten. It should run only after a destroy. With no plain
-  synced fields it only relinks Ed fields anyway. Better still, reload in place so
-  a destroy is final, and drop revive.
+- **Moves.** A registered ref removed from a collection is held until the next
+  tick, so a move within the tick -- removed here, added there -- finds the same
+  object on every side, even where nothing else holds it. A remove and add that
+  land in different ticks (a relay, the network) still get a new object on the
+  far side; enu covers that today with its synced `TRANSFERRING` flag.
+- **Destroys are final.** Revive used to turn a same-id recreate into an update
+  of the old object, so code holding a thing across a reload kept working. It
+  ran on every pooled hit, though, which is how a live object got overwritten,
+  and it brought destroyed objects back. It's gone. Each object carries an
+  `incarnation`; an object arriving under an id whose pooled object is destroyed,
+  or is another incarnation, is a new object. A destroy reaches every context
+  (`REF_DESTROY`, naming the incarnation it ends), and `on_destroy` listeners
+  tell holders to let go.
 
 ## Open
 
