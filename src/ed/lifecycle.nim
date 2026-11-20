@@ -6,7 +6,7 @@
 ## record the death into the globals `types` holds, and the draining/cleanup
 ## logic lives here.
 
-import std/[tables, sets, atomics]
+import std/[tables, sets, atomics, random, sysrand, sequtils]
 import ed/[core, types {.all.}]
 import ed/zens/private
 import ed/utils/logging
@@ -108,7 +108,7 @@ proc prune_dead_refs*(self: EdContext) =
     let epoch = dead_ref_epoch.load # lock-free skip when nothing died (see proxies)
     if epoch == self.last_ref_prune_epoch:
       return
-    var dead: seq[string]
+    var dead: seq[(string, int64)]
     dead_handles_lock.acquire()
     if self.uid in pending_dead_refs:
       dead = pending_dead_refs[self.uid]
@@ -117,8 +117,12 @@ proc prune_dead_refs*(self: EdContext) =
     self.last_ref_prune_epoch = epoch
     if dead.len > 0:
       self.sweep_dirty = true
-    for ref_id in dead:
-      self.ref_pool.del(ref_id)
+    for (ref_id, incarnation) in dead:
+      # Only if the entry is still the reclaimed instance's: a successor under
+      # the same id may have taken it over.
+      if ref_id in self.ref_pool and
+          self.ref_pool[ref_id].incarnation == incarnation:
+        self.ref_pool.del(ref_id)
 
 proc prune_dead_proxies*(self: EdContext) =
   ## Clear body->proxy backrefs whose proxies ORC has reclaimed. Must run before
@@ -177,14 +181,25 @@ proc resolve_proxy*(self: EdContext, body: ref EdBodyBase): ref EdBase =
 proc new_lifetime*(): Lifetime =
   Lifetime()
 
-proc add*(self: Lifetime, cleanup: proc() {.gcsafe.}) =
-  ## Register a teardown action. If the Lifetime has already finished, the action
-  ## runs immediately (so binding to a dead Lifetime can't leak).
+proc add*(self: Lifetime, cleanup: proc() {.gcsafe.}): int {.discardable.} =
+  ## Register a teardown action, returning a key for `remove`. If the Lifetime
+  ## has already finished, the action runs immediately (so binding to a dead
+  ## Lifetime can't leak) and the key is 0.
   privileged
   if self.finished:
     cleanup()
   else:
-    self.cleanups.add cleanup
+    self.next_key.inc
+    result = self.next_key
+    self.cleanups.add (result, cleanup)
+
+proc remove*(self: Lifetime, key: int) =
+  ## Drop a teardown action without running it.
+  privileged
+  for i, entry in self.cleanups:
+    if entry.key == key:
+      self.cleanups.delete i
+      return
 
 proc finish*(self: Lifetime) =
   ## Run every registered teardown action, once. Idempotent.
@@ -194,8 +209,8 @@ proc finish*(self: Lifetime) =
   self.finished = true
   let cleanups = self.cleanups
   self.cleanups = @[]
-  for cleanup in cleanups:
-    cleanup()
+  for entry in cleanups:
+    entry.cleanup()
 
 proc finished*(self: Lifetime): bool =
   privileged
@@ -245,3 +260,81 @@ template own*[T: EdRef](self: T, body: untyped) =
   finally:
     current_lifetime = prev_lifetime
     current_owner_id = prev_owner_id
+
+# --- Incarnations and destroy listeners --------------------------------------
+
+var incarnation_rand {.threadvar.}: Rand
+var incarnation_rand_ready {.threadvar.}: bool
+
+proc ensure_incarnation*(self: EdRef) =
+  ## Give `self` its incarnation if it has none yet (see `EdRef.incarnation`).
+  ## Everything that sends or indexes a ref calls this first, so a copy never
+  ## leaves without one.
+  if self.incarnation == 0:
+    if not incarnation_rand_ready:
+      var seed: array[8, byte]
+      if not urandom(seed):
+        raise OSError.new_exception("no system randomness for ed incarnations")
+      incarnation_rand = init_rand(cast[int64](seed))
+      incarnation_rand_ready = true
+    while self.incarnation == 0:
+      self.incarnation = cast[int64](incarnation_rand.next)
+
+proc add_destroy_listener*[T: EdRef](
+    self: T, callback: proc(it: T) {.gcsafe.}, until: Lifetime = nil
+) =
+  ## `on_destroy` without the sugar. Runs `callback` once when `self` is
+  ## destroyed in this context -- by a local `destroy`, or by the destroy of the
+  ## same object arriving from another context. Not on removal from a
+  ## collection: a moved object isn't destroyed. With `until`, the listener is
+  ## dropped if that lifetime finishes first (the listener's own owner going
+  ## away).
+  privileged
+  assert not self.destroyed, "on_destroy on an object already destroyed"
+  let cancelled = new bool
+  if not until.is_nil:
+    until.add proc() =
+      cancelled[] = true
+  # Drop listeners whose owners are gone, so a long-lived object watched by
+  # many short-lived ones doesn't grow without bound.
+  self.destroy_listeners.keep_it_if(not it.cancelled[])
+  self.destroy_listeners.add DestroyListener(
+    callback: proc(it: EdRef) {.gcsafe.} =
+      callback(T(it)),
+    cancelled: cancelled,
+  )
+
+template on_destroy*(self: EdRef, until: untyped, body: untyped) =
+  ## `thing.on_destroy(node.lifetime): ...` -- `it` is the object being
+  ## destroyed. Use `it`, not the watched variable, so the listener doesn't keep
+  ## the object alive. (`until` is untyped so this overload never type-checks
+  ## the body of a call meant for the one below, where `it` isn't declared.)
+  block:
+    let target = self
+    let listener = proc(it {.inject.}: typeof(target)) {.gcsafe.} =
+      body
+    add_destroy_listener(target, listener, until)
+
+template on_destroy*(self: EdRef, body: untyped) =
+  block:
+    let target = self
+    let listener = proc(it {.inject.}: typeof(target)) {.gcsafe.} =
+      body
+    add_destroy_listener(target, listener)
+
+var ref_destroy_source* {.threadvar.}: HashSet[string]
+  ## While a received REF_DESTROY runs `destroy`: the contexts it has already
+  ## visited, so the relay doesn't send it back to them.
+
+var publish_ref_destroy_hook*: proc(
+  ctx: EdContext, self: EdRef, source: HashSet[string]
+) {.nimcall, gcsafe.}
+  ## Set by the subscriptions layer, which `destroy` can't import.
+
+proc run_destroy_listeners*(self: EdRef) =
+  ## Fire and clear `self`'s `on_destroy` listeners. Called by `destroy`.
+  privileged
+  let listeners = move self.destroy_listeners
+  for listener in listeners:
+    if not listener.cancelled[]:
+      listener.callback(self)

@@ -4,8 +4,9 @@ import pkg/[serialization, json_serialization]
 template ed_ignore*() {.pragma.}
   ## Mark a field to be ignored during `Ed` serialization.
 template ed_identity*() {.pragma.}
-  ## The one kind of plain field that travels: an object's identity (`EdRef.id`).
-  ## Every other plain field stays on its own side (docs/ed-objects.md).
+  ## The one kind of plain field that travels: an object's identity (`EdRef.id`
+  ## and `EdRef.incarnation`). Every other plain field stays on its own side
+  ## (docs/ed-objects.md).
 template ed_accessor*() {.pragma.}
   ## On a getter `Ed.register` generated for a synced field: lets the field
   ## sugar (`changes`, `+=`, `:=`, `edit`) tell a synced field from any other
@@ -40,7 +41,8 @@ type
     ## Unit or a scope -- holds a Lifetime and `finish`es it on teardown, so
     ## everything bound to it cleans up at once with no manual `zid` bookkeeping.
     ## Standalone (not part of EdBase) so an owner holds one directly.
-    cleanups: seq[proc() {.gcsafe.}]
+    cleanups: seq[tuple[key: int, cleanup: proc() {.gcsafe.}]]
+    next_key: int
     finished: bool
 
   RefHandle* = ref object
@@ -59,6 +61,12 @@ type
     ## until then `=destroy` is a no-op.
     ctx_uid*: int  # owning context's per-instance uid (0 = unset). NOT the id.
     ref_id*: string
+    incarnation*: int64
+
+  DestroyListener = object
+    callback: proc(it: EdRef) {.gcsafe.}
+    cancelled: ref bool
+      ## Set when the listener's own lifetime finishes first.
 
   EdRef* = ref object of RootObj
     ## Base for registered (network-syncable) refs. Carries a `RefHandle` so the
@@ -69,13 +77,23 @@ type
       ## The ref's identity (sync identity rides on it via `ref_id` = tid:id).
       ## Lives on the base so runtime code (the `destroy` method, `own` scopes,
       ## ownership) can use it without knowing the concrete type.
+    incarnation* {.ed_identity.}: int64
+      ## Which object under this `id` this is. Random, set on first use, and
+      ## carried with the id, so every context's copy of one object shares it
+      ## while an object later created under the same id (a reload) gets
+      ## another. A destroy names the incarnation it ends, so it can't take
+      ## down a successor that reused the id.
     ref_handle*: RefHandle
     destroyed* {.ed_ignore.}: bool
-      ## Idempotency latch for `destroy`, set at its top. `ed_ignore`: local
-      ## teardown state, never synced (a received ref must arrive un-destroyed).
+      ## Set once `destroy` has run here. Final: a destroyed object is never
+      ## brought back -- an object arriving later under its id is a new one.
+      ## `ed_ignore`: local teardown state, never synced.
     lifetime*: Lifetime
-      ## This ref's teardown actions -- external subscriptions and (via `own`) its
-      ## owned containers. `destroy` runs `lifetime.finish`. Never synced.
+      ## Teardown actions that run when this object is destroyed -- callbacks
+      ## bound to it (via `own`), and nothing else. Never synced.
+    destroy_listeners: seq[DestroyListener]
+      ## `on_destroy` callbacks, run once when this object is destroyed in this
+      ## context.
     ctx* {.cursor.}: EdContext
       ## The context this instance lives in, stamped on first `ref_pool` add. A
       ## registered ref belongs to exactly one context (sync mints a separate
@@ -151,6 +169,9 @@ type
                # receiver's write base for REJECT_STALE registers. A relay doesn't
                # forward ops that change nothing it holds, so stamps alone can't
                # tell a context below it where it is.
+    REF_DESTROY # a registered ref (EdRef) was destroyed: object_id is its
+                # ref_id (tid:id), obj its incarnation. Each receiver destroys
+                # its copy if it holds that incarnation, and relays it on.
 
   BaseChange* = ref object of RootObj
     changes*: set[ChangeKind]
@@ -253,19 +274,15 @@ type
     # this entry -- so the cursor can never dangle (ref_pool[id] non-nil <=> instance
     # alive). Requires every registered type to inherit `EdRef`.
     obj* {.cursor.}: ref RootObj
+    incarnation*: int64
+      ## `obj`'s incarnation, so a reclaimed predecessor under the same id
+      ## doesn't prune its successor's entry.
 
   RegisteredType = object
     tid*: int
     stringify*: proc(self: ref RootObj): string {.no_side_effect.}
     parse*:
       proc(ctx: EdContext, clone_from: string): ref RootObj {.no_side_effect.}
-    # Revive: converge a freshly-parsed `incoming` incarnation onto an EXISTING
-    # instance (a reincarnated id whose object a consumer still holds) -- copy its
-    # synced scalars and (already-relinked) Ed fields, leaving main-side refs
-    # (e.g. a godot node) intact. Identity preserved -> held references stay valid
-    # across destroy+recreate (eventual convergence).
-    revive*:
-      proc(existing: ref RootObj, incoming: ref RootObj) {.no_side_effect.}
 
   SubscriptionKind* = enum
     BLANK
@@ -485,6 +502,10 @@ type
     # object_id -> key_bin -> waiting subscribers (per-key table requests).
     pending_key_wants*: Table[string, Table[string, seq[Subscription]]]
     ref_pool: Table[string, CountedRef]
+    removed_refs: seq[ref RootObj]
+      # Registered refs removed from a collection since the last tick, held so a
+      # move -- removed here and added there within the tick -- finds the same
+      # object instead of a fresh copy. Released at the start of the next tick.
     subscribers*: seq[Subscription]
     chan: Chan[Message]
     last_msg_id: Table[string, int]
@@ -811,7 +832,7 @@ var dead_ref_epoch*: Atomic[int]
   ## (tick, resolve_proxy, from_flatty). Process-global, matching the pending
   ## tables (a context can be created on one thread and pruned on another).
 
-var pending_dead_refs*: Table[int, seq[string]]
+var pending_dead_refs*: Table[int, seq[(string, int64)]]
   ## ctx uid -> ref_ids whose registered instance ORC has reclaimed. Populated by
   ## `RefHandle.=destroy`, which must NOT touch its `EdContext` (it may already be
   ## freed -- even within the same cycle-collection batch). Each context drains its
@@ -819,7 +840,7 @@ var pending_dead_refs*: Table[int, seq[string]]
   ## Entries for a context that dies without draining just linger (bounded; freed
   ## at thread exit) and can't be misattributed, since the key is the uid.
 
-proc record_dead_ref(ctx_uid: int, ref_id: string) =
+proc record_dead_ref(ctx_uid: int, ref_id: string, incarnation: int64) =
   ## Queue a reclaimed registered ref for its context to prune. Touches no
   ## `EdContext` (see RefHandle) -- only the globals above; the drain/cleanup is
   ## `prune_dead_refs` (lifecycle.nim). No-op until the first `ref_pool` add set
@@ -827,7 +848,7 @@ proc record_dead_ref(ctx_uid: int, ref_id: string) =
   if ctx_uid != 0 and ref_id.len > 0:
     {.cast(gcsafe).}:
       dead_handles_lock.acquire()
-      pending_dead_refs.mget_or_put(ctx_uid, @[]).add(ref_id)
+      pending_dead_refs.mget_or_put(ctx_uid, @[]).add((ref_id, incarnation))
       discard dead_ref_epoch.fetch_add(1) # wake the lock-free prune skip
       dead_handles_lock.release()
 
@@ -836,7 +857,7 @@ proc `=destroy`(h: var typeof(RefHandle()[])) =
   ## stay in this module (a custom `=destroy` is bound where the type lives and
   ## must be in scope at every reclaim site). It only records the death; the
   ## custom destructor replaces field destruction, so `ref_id` is freed by hand.
-  record_dead_ref(h.ctx_uid, h.ref_id)
+  record_dead_ref(h.ctx_uid, h.ref_id, h.incarnation)
   `=destroy`(h.ref_id)
 
 var pending_dead_proxies*: Table[int, seq[(string, int)]]

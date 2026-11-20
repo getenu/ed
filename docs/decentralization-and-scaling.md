@@ -211,7 +211,7 @@ lean, not a constraint.
 one is flatty-coupled:
 
 1. **Ed-field semantics** — nil non-synced refs/ptrs/procs, blank `ed_ignore`,
-   relink Ed-fields *by id*, and `revive`/converge. Irreplaceable, codec-independent.
+   relink Ed-fields *by id*. Irreplaceable, codec-independent.
 2. **Type dispatch** — reconstruct the right concrete type from a `tid` + bytes.
 3. **Capability negotiation** — which `tid`s a peer can materialize.
 4. **Codec calls** — the only flatty-coupled part; swap the `to_flatty`/`from_flatty`

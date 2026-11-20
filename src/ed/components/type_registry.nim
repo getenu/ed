@@ -50,6 +50,10 @@ proc register_type(typ: type) =
   let stringify =
     func (self: ref RootObj): string =
       let self = typ(self)
+      when self is EdRef:
+        # A copy never leaves without the incarnation it belongs to.
+        {.no_side_effect.}:
+          EdRef(self).ensure_incarnation
       var clone = new typ
       clone[] = self[]
       for src, dest in fields(self[], clone[]):
@@ -87,32 +91,9 @@ proc register_type(typ: type) =
               field = type(field)(ctx.resolve_proxy(ctx.objects[field.id]))
       result = self
 
-  let revive =
-    func (existing: ref RootObj, incoming: ref RootObj) =
-      # Converge a held instance to a freshly-parsed reincarnation without
-      # replacing it: relink its Ed fields to the incoming ones (already
-      # resolved by `parse`). Nothing else syncs, so nothing else is copied --
-      # this side's refs (e.g. a godot `node`) and plain fields stay as they
-      # are.
-      let src = typ(incoming)
-      let dest = typ(existing)
-      for s, d in fields(src[], dest[]):
-        when s is Ed:
-          # Re-link only fields that actually changed identity (a reload gives an
-          # owned container a fresh id) or whose current target is stale. Leaving
-          # an unchanged, still-valid field alone avoids downgrading it to an
-          # incoming placeholder that hasn't materialized here yet.
-          if ?s and (not ?d or d.id != s.id):
-            d = s
-        else:
-          # Refs, procs and plain fields belong to this side and are left as
-          # they are: a plain field never syncs, so the incoming copy's value
-          # is just its default (see stringify).
-          discard
-
   with_lock:
     global_type_registry[][key] =
-      RegisteredType(stringify: stringify, parse: parse, revive: revive, tid: key)
+      RegisteredType(stringify: stringify, parse: parse, tid: key)
 
 proc is_zen(node: NimNode): bool =
   if node.kind == nnk_sym and node.str_val == "EdBase":
@@ -434,10 +415,13 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
       continue
     let id = change.item.ref_id
     if ADDED in change.changes:
+      let added = EdRef(item)
+      added.ensure_incarnation
       if id notin self.ref_pool:
         debug "saving ref", id
         self.ref_pool[id] = CountedRef()
       self.ref_pool[id].obj = change.item
+      self.ref_pool[id].incarnation = added.incarnation
       # Wire the per-instance cleanup handle the first time we see this instance.
       # The pool's `obj` hold is non-owning (cursor); this handle keeps it from
       # dangling -- when ORC reclaims the instance its RefHandle.=destroy dels this
@@ -445,14 +429,17 @@ proc ref_count*[O](self: EdContext, changes: seq[Change[O]], ed_id: string) =
       # one thing a bare registered ref can't know under multiple contexts/thread.
       let handle_owner = EdRef(item)
       if handle_owner.ref_handle.is_nil:
-        handle_owner.ref_handle = RefHandle(ctx_uid: self.uid, ref_id: id)
+        handle_owner.ref_handle = RefHandle(
+          ctx_uid: self.uid, ref_id: id, incarnation: handle_owner.incarnation
+        )
       # The instance's own context, for destroy's owner cascade -- the one
       # context it lives in (see EdRef.ctx). Cursor, so no cycle.
       handle_owner.ctx = self
     # REMOVE only unlinks a container from the ref; it never frees. ORC reclaims
     # the instance when its last real reference drops (RefHandle then cleans the
-    # pool), giving move-identity for free: a removed-then-readded replica
-    # re-links the same instance across any gap.
+    # pool). Held until the next tick, so a move within the tick keeps it.
+    if REMOVED in change.changes:
+      self.removed_refs.add RootRef(change.item)
 
     # Member ownership: an OWNS_MEMBERS collection's EdRef members belong to the
     # collection's *owner* -- membership drives the `owned_by` index, and removal
@@ -491,33 +478,24 @@ proc find_ref*[T](self: EdContext, value: var T): bool =
         value = T(existing)
         result = true
       else:
-        # Dedup to the pooled instance, but REVIVE it: converge the freshly-parsed
-        # incarnation (`value`) onto it -- re-linking owned fields a reload gave
-        # fresh ids -- and clear any destroyed latch. This merges a same-id
-        # destroy+recreate into an in-place update: identity is preserved, so a
-        # consumer still holding the instance converges to the new state instead
-        # of being left on dead fields.
-        var registered_type: RegisteredType
-        if lookup_type(existing, registered_type) and
-            registered_type.revive != nil:
-          registered_type.revive(existing, value)
-        if EdRef(existing).destroyed:
-          EdRef(existing).destroyed = false
-        # A revived ref must come back fully alive: its lifetime was finished by
-        # the destroy, and binding a new watcher to a finished lifetime untracks
-        # it immediately -- every watch a consumer re-establishes on the revived
-        # object would silently die. Fresh lifetime = watchable again.
-        if EdRef(existing).lifetime != nil and EdRef(existing).lifetime.finished:
-          EdRef(existing).lifetime = new_lifetime()
-        value = T(existing)
-        result = true
+        # The pooled instance, if it's the same object: the same incarnation,
+        # not destroyed here. Anything else under this id is a new object (a
+        # reload) and stays the fresh copy; adding it takes over the pool entry.
+        let pooled = EdRef(existing)
+        let incoming = EdRef(RootRef(value))
+        if not pooled.destroyed and
+            (incoming.incarnation == 0 or
+              incoming.incarnation == pooled.incarnation):
+          value = T(existing)
+          result = true
 
 when defined(dump_ed_objects):
   import std/[os, algorithm]
 
 proc free_refs*(self: EdContext) =
-  ## Per-tick ref-pool maintenance: prune entries for instances ORC has
-  ## reclaimed (RefHandle can't touch `ref_pool` itself -- see prune_dead_refs).
+  ## Per-tick ref-pool maintenance: release last tick's removals, and prune
+  ## entries for instances ORC has reclaimed (RefHandle can't touch `ref_pool`
+  ## itself -- see prune_dead_refs).
   ## Memory is ORC-owned; there is no manual free.
   privileged
 
@@ -536,6 +514,9 @@ proc free_refs*(self: EdContext) =
       write_file(self.id & "-counts", counts)
       self.dump_at = now + init_duration(seconds = 10)
 
+  # The last tick's removals that weren't added back are released; any that
+  # nothing else holds are reclaimed and pruned below.
+  self.removed_refs.set_len(0)
   self.prune_dead_refs()
 
 when is_main_module:

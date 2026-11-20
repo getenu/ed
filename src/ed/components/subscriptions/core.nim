@@ -13,6 +13,7 @@ import
 import pkg/threading/channels {.all.}
 import pkg/flatty
 import ed/[core, types {.all.}], ed/zens/[contexts, private, initializers {.all.}]
+from ed/zens/operations import destroy
 import ed/components/private/global_state
 import ed/lifecycle
 import ../type_registry
@@ -821,6 +822,38 @@ proc handle_op(self: EdContext, msg: Message, source: HashSet[string]) =
   # Ops (table ADDs) may have brought entries chained key-waiters want.
   self.serve_key_wants(msg.object_id)
 
+proc handle_ref_destroy(self: EdContext, msg: Message, source: HashSet[string]) =
+  ## Destroy our copy of a registered ref destroyed elsewhere -- if we hold that
+  ## incarnation -- which relays it on; otherwise just relay it.
+  privileged
+  log_defaults("ed publishing")
+  self.prune_dead_refs()
+  let incarnation =
+    try:
+      parse_biggest_int(msg.obj).int64
+    except ValueError:
+      0'i64
+  var held: EdRef
+  # Read the pool entry in place: copying it into a local lets the compiler move
+  # its cursor into `held` without counting the reference.
+  if msg.object_id in self.ref_pool and
+      self.ref_pool[msg.object_id].incarnation == incarnation and
+      self.ref_pool[msg.object_id].obj of EdRef:
+    held = EdRef(self.ref_pool[msg.object_id].obj)
+  if not held.is_nil and not held.destroyed:
+    let prev = ref_destroy_source
+    ref_destroy_source = source
+    try:
+      held.destroy()
+    finally:
+      ref_destroy_source = prev
+  else:
+    var relay = source
+    relay.incl self.id
+    let targets = self.subscribers.filter_it(it.ctx_id notin relay)
+    if targets.len > 0:
+      self.fanout(msg, OperationContext(source: relay), DEFAULT_FLAGS, targets)
+
 proc process_message(
     self: EdContext, msg: Message, sub: Subscription = nil
 ) {.gcsafe.} =
@@ -930,6 +963,8 @@ proc process_message(
     self.handle_request(msg, source)
   elif msg.kind == UNSUBSCRIBE:
     self.handle_unsubscribe(source)
+  elif msg.kind == REF_DESTROY:
+    self.handle_ref_destroy(msg, source)
   elif msg.kind == PROGRESS:
     if msg.base_lsn > self.base_hint and
         self.from_upstream(OperationContext.init(source = source)):

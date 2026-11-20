@@ -14,10 +14,15 @@ type ReincUnit = ref object of EdRef
   # serialization as the cause).
   items: EdSeq[int]
 
+type MoveUnit = ref object of EdRef
+  items: EdSeq[int]
+  note: string # plain: stays on each side, so it shows which object this is
+
 # Register the synced ref types so they cross contexts (parse/stringify +
 # type_id). Without this the replica deserializes garbage (IndexDefect).
 Ed.register(OwnerTest, false)
 Ed.register(ReincUnit, false)
+Ed.register(MoveUnit, false)
 
 proc run*() =
   suite "lifetime":
@@ -413,7 +418,9 @@ proc run*() =
       # the authority between reloads, then draining the replica once at the end.
       # The replica must converge on the LAST incarnation -- valid, not a stale one.
       var auth = EdContext.init(id = "ri3_auth", is_authority = true)
-      var rep = EdContext.init(id = "ri3_rep")
+      # Room for the whole unread churn: the authority's sends block once the
+      # replica's channel is full, and nothing drains it until the end.
+      var rep = EdContext.init(id = "ri3_rep", chan_size = 400)
       rep.subscribe(auth)
       Ed.thread_ctx = auth
 
@@ -450,13 +457,10 @@ proc run*() =
       check rep["ri3_x_items"].valid
       check EdSeq[int](rep["ri3_x_items"]).value == @[20] # the latest, not a stale one
 
-    test "REINC held ref: a retained reference survives reincarnation (enu BuildNode.model)":
-      # The enu BuildNode.model bug: the consumer holds a reference to the unit
-      # and fails to release it on removal, so the object stays in ref_pool
-      # across reincarnations. The replica drains every reload (no batching, no
-      # lag) -- the ONLY extra ingredient vs the passing storm test is the held
-      # reference. If ed leaves the held object pointing at destroyed fields,
-      # `held.items` goes invalid (the enu "Ed invalid" spam on self.model.code).
+    test "REINC held ref: a held reference is destroyed, and the reload is a new object":
+      # A consumer that holds the unit across a reload sees it destroyed -- ed
+      # doesn't bring it back -- and the collection holds a new object under the
+      # same id. (Holders let go on removal or destroy: see fix-1.)
       var auth = EdContext.init(id = "ri4_auth", is_authority = true)
       var rep = EdContext.init(id = "ri4_rep")
       rep.subscribe(auth)
@@ -492,32 +496,71 @@ proc run*() =
           auth.tick(blocking = false)
           rep.tick(blocking = false)
 
-      # The held reference must still be usable -- not silently left pointing at
-      # destroyed fields. (Crash-safe: read .value only if valid.)
-      let held_usable =
-        not held.is_nil and not held.items.is_nil and held.items.valid
-      check held_usable
-      if held_usable:
-        check held.items.value == @[20]
+      check held.destroyed
+      let current = EdSeq[ReincUnit](rep["ri4_units"]).value[0]
+      check current != held
+      check not current.destroyed
+      check current.items.value == @[20]
 
-    test "REINC revive resets a finished lifetime so new watchers bind":
-      # The disappearing-voxels bug: a consumer finishes the unit's lifetime on
-      # removal (remove_from_scene), the same instance revives on the re-add, and
-      # the consumer re-establishes its watches bound to the unit's lifetime
-      # (require_lifetime returns the EXISTING one). Binding to a finished
-      # lifetime untracks immediately -- every re-established watch silently dies,
-      # so synced data arrives and nothing renders. Revive must hand back a
-      # usable (unfinished) lifetime.
-      var auth = EdContext.init(id = "ri6_auth", is_authority = true)
-      var rep = EdContext.init(id = "ri6_rep")
+    test "on_destroy fires in every context, and not on removal":
+      var auth = EdContext.init(id = "od_auth", is_authority = true)
+      var rep = EdContext.init(id = "od_rep")
       rep.subscribe(auth)
       Ed.thread_ctx = auth
 
-      var units = EdSeq[ReincUnit].init(ctx = auth, id = "ri6_units")
+      var units = EdSeq[ReincUnit].init(ctx = auth, id = "od_units")
+      var x = ReincUnit(id: "od_x")
+      x.own:
+        x.items = EdSeq[int].init(@[0], ctx = auth, id = "od_x_items")
+      units.add x
+      for _ in 0 ..< 4:
+        auth.tick(blocking = false)
+        rep.tick(blocking = false)
+
+      let copy = EdSeq[ReincUnit](rep["od_units"]).value[0]
+      var auth_fired, rep_fired = 0
+      var rep_saw: seq[int]
+      x.on_destroy:
+        check it == x
+        auth_fired.inc
+      copy.on_destroy:
+        # The destroy arrives ahead of the teardown: the object is still whole.
+        rep_saw = it.items.value
+        rep_fired.inc
+
+      # A move: removed and added back, never destroyed.
+      units -= x
+      units.add x
+      for _ in 0 ..< 4:
+        auth.tick(blocking = false)
+        rep.tick(blocking = false)
+      check auth_fired == 0
+      check rep_fired == 0
+
+      units -= x
+      x.destroy()
+      for _ in 0 ..< 4:
+        auth.tick(blocking = false)
+        rep.tick(blocking = false)
+      check auth_fired == 1
+      check rep_fired == 1
+      check rep_saw == @[0]
+      check copy.destroyed
+
+    test "a destroy ends only the incarnation it names":
+      # The replica destroys its copy of the first object late -- after the
+      # authority already made a new one under the same id. That destroy must
+      # not reach the new object.
+      var auth = EdContext.init(id = "inc_auth", is_authority = true)
+      var rep = EdContext.init(id = "inc_rep")
+      rep.subscribe(auth)
+      Ed.thread_ctx = auth
+
+      var units = EdSeq[ReincUnit].init(ctx = auth, id = "inc_units")
       proc make(v: int): ReincUnit =
-        result = ReincUnit(id: "ri6_x")
+        result = ReincUnit(id: "inc_x")
         result.own:
-          result.items = EdSeq[int].init(ctx = auth, id = "ri6_x_items_" & $v)
+          result.items = EdSeq[int].init(ctx = auth, id = "inc_x_items_" & $v)
         result.items.add v
 
       var x1 = make(1)
@@ -525,46 +568,83 @@ proc run*() =
       for _ in 0 ..< 4:
         auth.tick(blocking = false)
         rep.tick(blocking = false)
+      let stale = EdSeq[ReincUnit](rep["inc_units"]).value[0]
 
-      # The consumer holds the replica's instance and finishes its lifetime on
-      # removal (the remove_from_scene pattern).
-      var held = EdSeq[ReincUnit](rep["ri6_units"]).value[0]
-      held.lifetime = new_lifetime()
-      held.lifetime.finish()
-
-      # Reload: same-id reincarnation; the replica revives `held` in place.
       units -= x1
-      x1.destroy()
       var x2 = make(2)
-      x2.items.add 3
       units.add x2
       for _ in 0 ..< 4:
         auth.tick(blocking = false)
         rep.tick(blocking = false)
+      check x2.incarnation != stale.incarnation
 
-      # The revived instance must be watchable again: its lifetime is not the
-      # finished one (else this track is untracked immediately and never fires).
-      check held.lifetime == nil or not held.lifetime.finished
-      var fired = 0
-      let life = if held.lifetime == nil: new_lifetime() else: held.lifetime
-      held.items.track(
-        life,
-        proc(changes: seq[Change[int]]) {.gcsafe.} =
-          fired.inc,
-      )
-      x2.items.add 4
+      Ed.thread_ctx = rep
+      stale.destroy()
+      for _ in 0 ..< 4:
+        rep.tick(blocking = false)
+        auth.tick(blocking = false)
+      Ed.thread_ctx = auth
+      # (The authority's `x1` isn't reached either: once a newer object holds
+      # the id in a context, a destroy of the older one finds nothing there.)
+      check not x2.destroyed
+      check x2.items.valid
+      let current = EdSeq[ReincUnit](rep["inc_units"]).value[0]
+      check current != stale
+      check not current.destroyed
+      check current.items.value == @[2]
+
+    test "a move within a tick keeps the object on the other side":
+      # Nothing on the replica holds the object but the collections, so between
+      # its removal and its re-add it's held only by ed for the rest of the tick.
+      var auth = EdContext.init(id = "mv_auth", is_authority = true)
+      var rep = EdContext.init(id = "mv_rep")
+      rep.subscribe(auth)
+      Ed.thread_ctx = auth
+
+      var here = EdSeq[MoveUnit].init(ctx = auth, id = "mv_here")
+      var there = EdSeq[MoveUnit].init(ctx = auth, id = "mv_there")
+      var x = MoveUnit(id: "mv_x")
+      x.own:
+        x.items = EdSeq[int].init(ctx = auth, id = "mv_x_items")
+      here.add x
       for _ in 0 ..< 4:
         auth.tick(blocking = false)
         rep.tick(blocking = false)
-      check fired > 0
+      # In a proc of its own, so no temporary here keeps the replica's copy
+      # alive across the move.
+      proc mark(rep: EdContext) {.nimcall.} =
+        EdSeq[MoveUnit](rep["mv_here"]).value[0].note = "the replica's own"
+      mark(rep)
+
+      here -= x
+      there.add x
+      for _ in 0 ..< 4:
+        auth.tick(blocking = false)
+        rep.tick(blocking = false)
+      proc note(rep: EdContext): string {.nimcall.} =
+        EdSeq[MoveUnit](rep["mv_there"]).value[0].note
+      check EdSeq[MoveUnit](rep["mv_here"]).len == 0
+      check note(rep) == "the replica's own"
+
+    test "on_destroy with a lifetime is dropped when that lifetime finishes":
+      var ctx = EdContext.init(id = "odl_ctx")
+      Ed.thread_ctx = ctx
+      var x = ReincUnit(id: "odl_x")
+      let watcher = new_lifetime()
+      var fired = 0
+      x.on_destroy(watcher):
+        fired.inc
+      watcher.finish()
+      x.destroy()
+      check fired == 0
 
     test "REINC fix-1: release-on-removal keeps the held ref valid":
       # Fix (1): the consumer (BuildNode) RELEASES its reference when the unit is
       # removed and re-acquires on add -- modelled as a seq watcher that clears
       # `held` on REMOVED and sets it on ADDED. With the reference dropped on
       # removal the object prunes, so the next CREATE mints fresh; `held` is then
-      # never left pointing at destroyed fields. (Same full-reload churn as the
-      # failing `REINC held ref` test -- only the consumer discipline differs.)
+      # never left pointing at destroyed fields. (The same full-reload churn as
+      # the `REINC held ref` test -- only the consumer discipline differs.)
       var auth = EdContext.init(id = "ri5_auth", is_authority = true)
       var rep = EdContext.init(id = "ri5_rep")
       rep.subscribe(auth)

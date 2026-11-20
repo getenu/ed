@@ -77,3 +77,35 @@ MCP-created bot after the client drops).
 
 The result: enu's hand-written `destroy_impl` choreography collapses to roughly an
 `on_destroy` hook for app-only refs plus `self.destroy`.
+
+## Destroy is final
+
+An `EdRef`'s `destroy` ends that object in every context, and nothing brings it
+back.
+
+- **Incarnations.** Each object gets a random `incarnation` the first time it's
+  sent or indexed, and it travels with the id (`{.ed_identity.}`), so every
+  context's copy of one object shares it. An object created later under the same
+  id -- a reload -- gets another. `find_ref` only hands back the pooled object if
+  it's the same incarnation and not destroyed; otherwise the incoming copy is a
+  new object, and adding it takes over the pool entry. A reclaimed predecessor's
+  `RefHandle` only prunes the entry if it's still its own.
+- **The destroy travels.** `destroy` sends a `REF_DESTROY` (ref id + incarnation)
+  to every subscriber that hasn't seen it, after tearing down what the object
+  owns. A receiver holding that incarnation runs its own `destroy` -- which fires
+  its listeners and relays it on; one that doesn't just relays it. It's
+  unordered (no LSN): the incarnation makes it safe to apply in any order, and a
+  context where a newer object already holds the id ignores it.
+- **Listeners.** `thing.on_destroy(owner_lifetime): ...` runs once when the
+  object is destroyed in this context -- not on removal, so a move doesn't fire
+  it. `it` is the object. Passing the listener's own lifetime drops the listener
+  if that lifetime finishes first.
+- **Ownership across incarnations.** `owned_by` is keyed by owner id. A context
+  where a newer object has already taken the id skips the owned-teardown when it
+  destroys the older one, since what's owned under that id now belongs to the
+  newer object (the older one's containers were destroyed by their own DESTROYs).
+- **Moves.** A ref removed from a collection is held until the next tick
+  (`removed_refs`, released by `free_refs`), so a move within a tick keeps the
+  same object everywhere, with no timer. The old 10s grace did this for any gap;
+  a remove and add that land in different ticks on a context get a new object
+  there.
