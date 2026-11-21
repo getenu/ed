@@ -262,7 +262,7 @@ type
     ## Represents a change to an `Ed` container, including the affected item.
     item*: O
 
-  Pair[K, V] = object
+  Pair*[K, V] = object
     ## Key-value pair used for table changes.
     key*: K
     value*: V

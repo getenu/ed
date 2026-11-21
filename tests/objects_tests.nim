@@ -302,6 +302,15 @@ proc run*() =
         keys.add change.item.key
     table["x"] = 1
     check keys == @["x"]
+    # What each kind holds, for naming it in generic code.
+    check int.item_type is int
+    check seq[string].item_type is string
+    check set[char].item_type is char
+    check Table[string, int].item_type is Pair[string, int]
+    proc first[T](x: Ed[T]): T.item_type =
+      for item in x:
+        return item
+    check first(ed(@["a", "b"])) == "a"
 
   test "+= on synced fields sits beside other libraries' +=":
     var r = 1 // 2

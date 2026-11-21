@@ -26,7 +26,7 @@ export channels, flatty
 import ed/[types, zens, components, utils, lifecycle]
 # The core container type and its helpers stay internal: apps name containers
 # as `Ed[T]`.
-export types except EdContainer, item_type, ed_core, as_ed
+export types except EdContainer, ed_core, as_ed
 export zens, components, utils, lifecycle
 
 import ed/client
